@@ -18,6 +18,9 @@ No game files, dumps or screenshots are part of this repository; you need your o
 the picture is mostly black (shaders that do not translate yet make their draws skip) and the
 frame rate is low (title-memory copies). Platform notes and the tested setup: [AMD-LINUX.md](AMD-LINUX.md).
 
+Running on Linux under Proton (or system Wine), with the switches for the world's faults,
+is described in [docs/linux-proton.md](docs/linux-proton.md).
+
 ## Getting started
 
 Requirements: Windows 10/11 x64, a CPU with AVX2, a Direct3D 12 GPU with
