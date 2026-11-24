@@ -811,6 +811,33 @@ impl Host {
         }
     }
 
+    /// A render target view that discards what is written to it, in `desc`'s
+    /// format (R8G8B8A8_UNORM without one), valid until it is recorded. It
+    /// holds the place of a target the host cannot render to, so the targets
+    /// after it keep their slots.
+    pub(crate) fn null_rtv(
+        &self,
+        desc: Option<&D3D12_RENDER_TARGET_VIEW_DESC>,
+    ) -> D3D12_CPU_DESCRIPTOR_HANDLE {
+        let desc = desc
+            .filter(|d| d.Format != DXGI_FORMAT_UNKNOWN)
+            .copied()
+            .unwrap_or(D3D12_RENDER_TARGET_VIEW_DESC {
+                Format: DXGI_FORMAT_R8G8B8A8_UNORM,
+                ViewDimension: D3D12_RTV_DIMENSION_TEXTURE2D,
+                ..Default::default()
+            });
+        let slot = self.next_rtv.fetch_add(1, Ordering::Relaxed) % RTV_RING;
+        // SAFETY: a slot of our heap; a null resource with a description.
+        unsafe {
+            let mut handle = self.rtvs.GetCPUDescriptorHandleForHeapStart();
+            handle.ptr += (slot * self.rtv_size) as usize;
+            self.device
+                .CreateRenderTargetView(None::<&ID3D12Resource>, Some(&desc), handle);
+            handle
+        }
+    }
+
     /// A host depth view of `resource`, valid until it is recorded.
     pub(crate) fn dsv(
         &self,

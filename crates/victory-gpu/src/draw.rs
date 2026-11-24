@@ -282,7 +282,13 @@ impl State {
             let Some(texture) = crate::resource::host_resource(record.resource) else {
                 continue;
             };
-            let Some(rtv) = host.rtv(texture, record.desc().as_ref()) else {
+            let desc = record.desc();
+            let Some(rtv) = host.rtv(texture, desc.as_ref()) else {
+                // The host texture cannot be rendered to (its flag was
+                // dropped): a null view keeps the later targets in their
+                // slots, as the pipeline expects them.
+                once!("a render target the host texture cannot be rendered to");
+                rtvs.push(host.null_rtv(desc.as_ref()));
                 continue;
             };
             self.targets.push(record.resource as usize);
