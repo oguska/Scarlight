@@ -113,6 +113,19 @@ enum Stop {
 
 const UNTRACKED_SELECT: Why = "a select on an untracked mask";
 
+/// A scalar logical op on a lane mask (see `Lower::mask_op`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MaskOp {
+    Move,
+    And,
+    Or,
+    Xor,
+    AndNot,
+    OrNot,
+    Not,
+    Select,
+}
+
 pub(crate) fn lower(parts: &Parts) -> Result<Lowered, ShaderError> {
     match lower_program(parts, false) {
         Err(ShaderError::Unsupported {
@@ -1455,7 +1468,9 @@ impl<'a> Lower<'a> {
         if self.phi_at.contains_key(&v) {
             self.read_phis.insert(v);
         }
-        let is_mask = self.x.st.masks.contains_key(&v) || self.x.st.highs.contains_key(&v);
+        let is_mask = self.x.st.masks.contains_key(&v)
+            || self.x.st.highs.contains_key(&v)
+            || self.lane_bits.contains_key(&v);
         match self.vals.get(&v) {
             Some(&Val::Missing(_)) | None if self.mask_ok && is_mask => {
                 return self.mask_dword(v).map(Val::I32);
@@ -1620,7 +1635,11 @@ impl<'a> Lower<'a> {
             Some(&lo) => (lo, true),
             None => (v, false),
         };
-        let &m = self.x.st.masks.get(&lo).ok_or(LANE_MASK)?;
+        let tracked = self.x.st.masks.get(&lo).copied();
+        let bit = self.lane_bits.get(&lo).copied();
+        if tracked.is_none() && bit.is_none() {
+            return Err(LANE_MASK);
+        }
         if self.console_cf {
             // Every lane runs every block: the mask's bits are the lanes'
             // own, both halves' words exchanged.
@@ -1632,7 +1651,10 @@ impl<'a> Lower<'a> {
                 Some(&b) if b == self.cur_ir => self.cur,
                 Some(&b) => self.tail[b].ok_or("a lane mask written after its use")?,
             };
-            let bit = self.boolean(m, at)?;
+            let bit = match tracked {
+                Some(m) => self.boolean(m, at)?,
+                None => bit.unwrap_or_else(|| self.s.m.bool(false)),
+            };
             let xy = self.console_ballot(at, bit);
             self.ballots.insert(lo, xy);
             return Ok(if high { xy.1 } else { xy.0 });
@@ -1640,7 +1662,7 @@ impl<'a> Lower<'a> {
         if self.split {
             return Err("a lane mask read whole in a wave64 program split in halves");
         }
-        if !self.x.st.active.contains(&lo) {
+        if tracked.is_some() && !self.x.st.active.contains(&lo) {
             return Err("a lane mask holding lanes elsewhere read as data");
         }
         let (x, y) = match self.ballots.get(&lo) {
@@ -1655,7 +1677,10 @@ impl<'a> Lower<'a> {
                 if !self.balloting.insert(lo) {
                     return Err("a lane mask whose lanes depend on its own value");
                 }
-                let bit = self.boolean(m, at);
+                let bit = match tracked {
+                    Some(m) => self.boolean(m, at),
+                    None => Ok(bit.unwrap_or_else(|| self.s.m.bool(false))),
+                };
                 self.balloting.remove(&lo);
                 let bit = bit?;
                 let i32t = self.s.t.i32;
@@ -2036,6 +2061,21 @@ impl<'a> Lower<'a> {
         Ok(v)
     }
 
+    /// The lane's bit of `v` if it is a lane mask (a compare's, a mask op's
+    /// or a structurised one): a mask read as a boolean is that bit.
+    fn lane_mask_bit(&mut self, v: Value) -> Result<Option<V>, Why> {
+        if let Some(&bit) = self.lane_bits.get(&v) {
+            return Ok(Some(bit));
+        }
+        if self.x.st.highs.contains_key(&v) {
+            return Ok(None);
+        }
+        match self.x.st.masks.get(&v).copied() {
+            Some(m) => Ok(Some(self.boolean(m, self.cur)?)),
+            None => Ok(None),
+        }
+    }
+
     fn atom(&mut self, atom: Atom, at: usize) -> Result<V, Why> {
         match atom {
             Atom::Lane(v) => self.lane_bits.get(&v).copied().ok_or_else(|| {
@@ -2044,13 +2084,16 @@ impl<'a> Lower<'a> {
                     .copied()
                     .unwrap_or("a lane mask from a carry")
             }),
-            Atom::Uniform(v) => match self.get(v)? {
+            Atom::Uniform(v) => match self.lane_mask_bit(v)? {
+                Some(x) => Ok(x),
+                None => match self.get(v)? {
                 Val::Bit(x) => Ok(x),
                 Val::I32(x) => {
                     let z = self.s.m.i32(0);
                     Ok(self.s.m.cmp(at, pred::NE, x, z))
                 }
                 Val::Missing(w) => Err(w),
+                },
             },
             Atom::Phi(id) => {
                 if let Some(&v) = self.mask_phis.get(&id) {
@@ -2100,7 +2143,14 @@ impl<'a> Lower<'a> {
                 let hi = self.s.m.i32((k >> 32) as u32);
                 Ok(self.lane_bit(at, lo, Some(hi)))
             }
-            Atom::Opaque(_) => Err("an opaque lane mask"),
+            // Outside compute, a mask held as a number that is known by
+            // its lanes (a compare's or a mask op's) is the lane's own bit,
+            // as the console tests it; the masks above are what could not
+            // be tracked.
+            Atom::Opaque(v) => match self.lane_bits.get(&v).copied() {
+                Some(bit) => Ok(bit),
+                None => Err("an opaque lane mask"),
+            },
             Atom::Constant(_) => Err("a constant lane mask"),
         }
     }
@@ -3098,6 +3148,13 @@ impl<'a> Lower<'a> {
         };
         let lo = dst_code.and_then(|c| inst.write(Reg::S(c)));
         if inst.write(Reg::S(EXEC)).is_some() || self.is_mask(lo) {
+            // A mask op (its result a mask, or EXEC): its lane bits are the
+            // operands' bits combined, so a later use as data (a count, an
+            // export guard) can ballot them; refusing it here stopped whole
+            // programs at the first `s_and_b64 exec, ...`.
+            if self.mask_op(inst)? {
+                return Ok(());
+            }
             return Err(LANE_MASK);
         }
         if matches!(
@@ -3553,6 +3610,125 @@ impl<'a> Lower<'a> {
             carry = self.s.m.bin(c, Bin::Or, carry, more);
         }
         (r, carry)
+    }
+
+    /// A scalar op whose result is a lane mask (or EXEC): each lane's bit of
+    /// the result is its bit of the operands, combined as the op does. The
+    /// result is kept as lane bits ([`Self::lane_bits`]), so a branch, a
+    /// `v_cndmask` or a guard tests it directly, and a use as data ballots it
+    /// ([`Self::mask_dword`]). False if the op is not one.
+    fn mask_op(&mut self, inst: &Inst) -> Result<bool, Why> {
+        let name = inst.name();
+        let save = name.contains("_saveexec") || name.contains("_wrexec");
+        let (op, flip) = match name {
+            "s_mov_b32" | "s_mov_b64" => (MaskOp::Move, false),
+            "s_and_b32" | "s_and_b64" => (MaskOp::And, false),
+            "s_or_b32" | "s_or_b64" => (MaskOp::Or, false),
+            "s_xor_b32" | "s_xor_b64" => (MaskOp::Xor, false),
+            "s_andn2_b32" | "s_andn2_b64" => (MaskOp::AndNot, false),
+            "s_orn2_b32" | "s_orn2_b64" => (MaskOp::OrNot, false),
+            "s_andn2_wrexec_b32" | "s_andn2_wrexec_b64" => (MaskOp::AndNot, false),
+            "s_nand_b32" | "s_nand_b64" => (MaskOp::AndNot, true),
+            "s_nor_b32" | "s_nor_b64" => (MaskOp::OrNot, true),
+            "s_xnor_b32" | "s_xnor_b64" => (MaskOp::Xor, true),
+            "s_not_b32" | "s_not_b64" => (MaskOp::Not, false),
+            "s_cselect_b32" | "s_cselect_b64" => (MaskOp::Select, false),
+            "s_and_saveexec_b32" | "s_and_saveexec_b64" => (MaskOp::And, false),
+            "s_or_saveexec_b32" | "s_or_saveexec_b64" => (MaskOp::Or, false),
+            "s_xor_saveexec_b32" | "s_xor_saveexec_b64" => (MaskOp::Xor, false),
+            _ => return Ok(false),
+        };
+        let c = self.cur;
+        let t = self.s.m.bool(true);
+        let x = match op {
+            MaskOp::Move => self.mask_op_bit(inst, 0)?,
+            MaskOp::Not => self.s.m.bin(c, Bin::Xor, t, t),
+            MaskOp::Select => {
+                let cond = self.scc_in(inst)?;
+                let a = self.mask_op_bit(inst, 0)?;
+                let b = self.mask_op_bit(inst, 1)?;
+                self.s.m.select(c, cond, a, b)
+            }
+            // The saveexec forms AND/OR/XOR with EXEC itself, which every
+            // lane here is in: the source's bit is the result's.
+            _ if save => self.mask_op_bit(inst, 0)?,
+            _ => {
+                let a = self.mask_op_bit(inst, 0)?;
+                let b = self.mask_op_bit(inst, 1)?;
+                let b = if matches!(op, MaskOp::AndNot | MaskOp::OrNot) {
+                    self.s.m.bin(c, Bin::Xor, b, t)
+                } else {
+                    b
+                };
+                let bin = match op {
+                    MaskOp::And | MaskOp::AndNot => Bin::And,
+                    MaskOp::Or | MaskOp::OrNot => Bin::Or,
+                    _ => Bin::Xor,
+                };
+                self.s.m.bin(c, bin, a, b)
+            }
+        };
+        let x = if flip {
+            self.s.m.bin(c, Bin::Xor, x, t)
+        } else {
+            x
+        };
+        // A saved EXEC holds the lanes here (every lane in the block runs):
+        // the new EXEC holds the op's.
+        let exec_write = inst.write(Reg::S(EXEC));
+        for &(_, v) in &inst.writes {
+            let bit = if Some(v) == exec_write {
+                x
+            } else if save {
+                t
+            } else {
+                x
+            };
+            self.lane_bits.insert(v, bit);
+            // Read as data it is this mask's ballot (see `mask_dword`); the
+            // error is for uses that are not allowed one.
+            self.vals.entry(v).or_insert(Val::Missing(LANE_MASK));
+        }
+        Ok(true)
+    }
+
+    /// The lane bit of source `k` of a mask op: the bit of the mask whose
+    /// value the register holds, else every lane (an unwritten EXEC), else
+    /// whether the number is nonzero.
+    fn mask_op_bit(&mut self, inst: &Inst, k: usize) -> Result<V, Why> {
+        let Fields::Sop { src, .. } = &inst.fields else {
+            return Err(LANE_MASK);
+        };
+        let Some(op) = src.get(k).copied() else {
+            return Err(LANE_MASK);
+        };
+        let c = self.cur;
+        if let Operand::Scalar { code, .. } = op
+            && code != NULL
+        {
+            // Both words of a mask hold the same lane's bit.
+            let v = inst.read(Reg::S(code));
+            if let Some(v) = v {
+                if let Some(&bit) = self.lane_bits.get(&v) {
+                    return Ok(bit);
+                }
+                if let Some(&m) = self.x.st.masks.get(&v) {
+                    return self.boolean(m, c);
+                }
+                if self.x.st.highs.contains_key(&v) {
+                    return Err(LANE_MASK);
+                }
+            }
+            if code == EXEC {
+                // Not written since entry: every lane here.
+                return Ok(self.s.m.bool(true));
+            }
+        }
+        // A number: any bit set is some lane's bit; a constant keeps its
+        // own low bit.
+        let x = self.operand(inst, &op)?;
+        let z = self.s.m.i32(0);
+        Ok(self.s.m.cmp(c, pred::NE, x, z))
     }
 
     fn scc_in(&mut self, inst: &Inst) -> Result<V, Why> {
@@ -6955,7 +7131,18 @@ impl<'a> Lower<'a> {
                 _ => None,
             }
         };
-        if let Some(lo) = code.and_then(|c| inst.write(Reg::S(c))) {
+        let lo = code
+            .and_then(|c| inst.write(Reg::S(c)))
+            // A compare whose EXEC write the decoder does not name (wave32
+            // writes `exec_lo`, and `v_cmpx` has no destination field): its
+            // one write is the mask.
+            .or_else(|| {
+                inst.name()
+                    .starts_with("v_cmpx")
+                    .then(|| inst.writes.first().map(|&(_, w)| w))
+                    .flatten()
+            });
+        if let Some(lo) = lo {
             self.lane_bits.insert(lo, r);
         }
         for &(_, w) in &inst.writes {

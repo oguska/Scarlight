@@ -1068,6 +1068,41 @@ fn lane_reads_in_branches_beside_a_whole_wave_section() {
     );
 }
 
+/// A mask built in SGPRs: `s_mov_b64`/`s_and_b64` copy EXEC and vcc into a
+/// pair, `s_bcnt1_i32_b64` counts it and the count picks a branch. Each
+/// lane's bit of the result is its bit of the operands, so this lowers
+/// (through the ballot when the count reads it); it used to stop at the
+/// first `s_mov_b64 s[10:11], exec` with "a lane mask read as data".
+#[test]
+fn a_mask_built_in_sgprs_is_counted() {
+    let body = [
+        0x7D88_0094, // v_cmp_gt_u32 vcc, 20, v0
+        0xBE8A_047E, // s_mov_b64 s[10:11], exec
+        0x878C_6A7E, // s_and_b64 s[12:13], exec, vcc
+        0x8880_6A0C, // s_or_b64 s[0:1], vcc, s[12:13]
+        0x8F07_8C00, // s_bcnt1_i32_b64 s7, s[0:1]
+        0xBF86_0001, // s_cbranch_scc0 +1
+        0x7E04_0209, // v_mov_b32 v2, s9
+        0x7E04_0281, // v_mov_b32 v2, 1
+        0xBE80_040A, // s_mov_b64 s[0:1], s[10:11]
+    ];
+    for (lanes_min, lanes_max) in [(32, 64), (32, 32)] {
+        let target = super::Target {
+            lanes_min,
+            lanes_max,
+        };
+        match emit_for(&program(&body, 64), target) {
+            Ok(shader) => assert!(!shader.dxil.is_empty()),
+            // A host that cannot run the console wave may still refuse the
+            // whole-wave form; it must not be the lane-mask refusal.
+            Err(e) => assert!(
+                !e.to_string().contains("lane mask read as data"),
+                "{lanes_min}..{lanes_max}: {e}"
+            ),
+        }
+    }
+}
+
 /// EXEC restored dword by dword from a mask: the structure pass holds such
 /// a mask as a number, and that number is known only as the mask's own
 /// dword. The lowering used to follow that in a circle until the stack
