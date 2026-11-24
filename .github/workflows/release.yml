@@ -1,0 +1,52 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      # The version and components pinned in rust-toolchain.toml, as in ci.yml.
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      # The assets contain the binary, the licence and the docs only: no game files, ever.
+      - name: Build
+        run: cargo build --release -p victory --locked
+      - name: Stage assets
+        shell: pwsh
+        run: |
+          $stage = "dist/Scarlight"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item "target/release/victory.exe" $stage
+          Copy-Item "LICENSE", "README.md", "AMD-LINUX.md", "victory.example.toml" $stage
+          Compress-Archive -Path $stage -DestinationPath "dist/Scarlight-windows-x64.zip" -Force
+      - name: Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") { $tag = "dev-${{ github.run_number }}" }
+          gh release view $tag 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag "dist/Scarlight-windows-x64.zip" --clobber
+          } else {
+            gh release create $tag "dist/Scarlight-windows-x64.zip" --generate-notes --title $tag `
+              --target "$env:GITHUB_SHA" `
+              --notes "Windows x64 build from $tag. Reads files you supply; no game files are included or needed to build."
+          }
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Scarlight-windows-x64
+          path: dist/Scarlight-windows-x64.zip
