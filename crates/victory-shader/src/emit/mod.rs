@@ -2212,9 +2212,13 @@ mod barycentric_tests {
         let export = |reg: u32| [0xF800_180F, reg << 24 | reg << 16 | reg << 8 | reg, S_ENDPGM];
         let cases: [(&str, Vec<u32>); 5] = [
             (
-                // v_readlane_b32 v4, v2, 5
+                // v_readlane_b32 s4, v2, 5; v_mov_b32 v4, s4
                 "v_readlane_b32 of a constant lane",
-                [vec![0x7E04_02F2, 0xD760_0004, 0x0001_0B02], export(4).to_vec()].concat(),
+                [
+                    vec![0x7E04_02F2, 0xD760_0004, 0x0001_0B02, 0x7E08_0204],
+                    export(4).to_vec(),
+                ]
+                .concat(),
             ),
             (
                 // v_writelane_b32 v5, 7, 5
@@ -2244,5 +2248,56 @@ mod barycentric_tests {
             };
             assert!(!shader.dxil.is_empty(), "{name}: no DXIL");
         }
+    }
+    /// A swizzle across quads stays refused in a pixel shader: a helper lane
+    /// at a primitive's edge can be its source, and wave operations leave
+    /// those out in SM 6.6. (`lane_operand_checked`'s wave64 refusal has no
+    /// test: a synthetic wave64 pixel program needs the console's EXEC
+    /// conventions first, which no test builds yet.)
+    #[test]
+    fn a_pixel_swizzle_across_quads_is_refused() {
+        let target = SigElement {
+            name: "SV_Target".into(),
+            index: 0,
+            kind: 16,
+            comp: 9,
+            interp: 0,
+            row: Some(0),
+            col: 0,
+            cols: 1,
+            usage: 1,
+            half: false,
+        };
+        let sig = super::container::signature(&[target], false);
+        let bytes = crate::dxbc::build(&[(FourCC::OSG1, &sig)]);
+        let c = Container::parse(&bytes).unwrap();
+        let lower = |words: &[u32], wave64: bool, lanes: Target| -> Result<HostShader, ShaderError> {
+            let native = NativeProgram {
+                stage: HwStage::Ps,
+                wave64,
+                vgprs: 8,
+                layout: vec![],
+                used: vec![],
+                io: StageIo::Ps {
+                    inputs: vec![],
+                    input_addr: 0,
+                    db_shader_control: 0,
+                    patches: vec![],
+                },
+                code: words.iter().flat_map(|w| w.to_le_bytes()).collect(),
+            };
+            let p = ir::build(&native.patched_code(), native.wave64, native.vgprs).unwrap();
+            let st = structure::structure(&p).unwrap();
+            let res = resource::track(&p, &native.layout, native.stage, Some(&st)).unwrap();
+            let io = io::raise(&p, &native).unwrap();
+            emit(&c, &native, &p, &st, &io, &res, lanes)
+        };
+        // ds_swizzle_b32 v3, v2 offset:0x7C00 (xor 31: lanes of other quads).
+        let swizzle = [0xD8D4_7C00, 0x0300_0102, 0xF800_180F, 0x0303_0303, S_ENDPGM];
+        let why = lower(&swizzle, false, Target::ANY).expect_err("a cross-quad swizzle");
+        assert!(
+            format!("{why:?}").contains("a swizzle across quads in a pixel shader"),
+            "{why:?}"
+        );
     }
 }

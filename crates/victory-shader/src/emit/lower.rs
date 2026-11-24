@@ -2466,6 +2466,21 @@ impl<'a> Lower<'a> {
         }
     }
 
+    /// Refuses a constant lane that a host wave narrower than the program's
+    /// does not hold (a wave64 program's lane 40 on a 32-lane host): a
+    /// `WaveReadLaneAt` of a lane the wave does not have is undefined. No
+    /// emulation exists for those lanes yet (compute exchanges halves;
+    /// graphics stages have no such path).
+    fn lane_operand_checked(&self, lane: V) -> Result<(), Why> {
+        if self.s.threads.is_none()
+            && self.x.native.wave64
+            && matches!(lane, V::Const(k) if k >= self.x.target.lanes_max)
+        {
+            return Err("a wave64 lane on a host wave narrower than the program's");
+        }
+        Ok(())
+    }
+
     /// Code that depends on the lane layout: wave operations, and in compute
     /// the console's wave size (lanes are thread ids in group order there).
     /// Pixel lanes match only within a quad.
@@ -2803,6 +2818,15 @@ impl<'a> Lower<'a> {
             // console's, so quad-local swizzles read through quad operations.
             let mesh_quad = self.s.mesh.is_some() && quad;
             if !mesh_quad {
+                // A pixel shader has helper lanes at a primitive's edge, and a
+                // wave operation leaves them out: a swizzle that reads another
+                // quad can name one, and `WaveReadLaneAt` of a helper lane is
+                // undefined in SM 6.6 (helper participation is 6.7). Only the
+                // quad-local patterns are taken; `ds_bpermute` is safe because
+                // it zeroes a lane its ballot does not hold.
+                if self.s.pixel && !quad {
+                    return Err("a swizzle across quads in a pixel shader");
+                }
                 self.cross_lane(quad)?;
             }
             // The source sits in the address field.
@@ -4653,11 +4677,16 @@ impl<'a> Lower<'a> {
                         } else {
                             let a = self.rel_offset_op(inst, op0, base, local)?;
                             let lane = self.operand(inst, op1)?;
-                            if self.mask_data == MaskData::Host && !matches!(lane, V::Const(_)) {
+                            // The lane space is the main arm's: a computed
+                            // one is a host lane, a constant one the console's
+                            // of the lane's own wave.
+                            let lane = if self.mask_data == MaskData::Host {
                                 self.s.flags |= flags::WAVE_OPS;
+                                self.console_lane_operand(lane)
                             } else {
                                 self.cross_lane(false)?;
-                            }
+                                lane
+                            };
                             if self.console_cf {
                                 self.console_read_lane(a, lane)
                             } else {
@@ -5922,6 +5951,7 @@ impl<'a> Lower<'a> {
                 let (a, lane) = (s(self, 0)?, s(self, 1)?);
                 // A computed lane in a pixel or vertex program is a host lane
                 // (from a mask or `v_mbcnt`); a constant one is the console's.
+                self.lane_operand_checked(lane)?;
                 let lane = if self.mask_data == MaskData::Host {
                     self.s.flags |= flags::WAVE_OPS;
                     self.console_lane_operand(lane)
@@ -5950,6 +5980,7 @@ impl<'a> Lower<'a> {
                 };
                 // The lane space is `v_readlane`'s: a host lane, or a
                 // console's constant lane of the lane's own wave.
+                self.lane_operand_checked(lane)?;
                 let lane = if self.mask_data == MaskData::Host {
                     self.s.flags |= flags::WAVE_OPS;
                     self.console_lane_operand(lane)
