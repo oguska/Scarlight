@@ -464,6 +464,26 @@ fn sample_form(name: &str) -> Option<SampleForm> {
     Some(f)
 }
 
+/// The `f32` the `f16` of these 16 bits stands for (a value known at
+/// translation: an a16 image address).
+fn f16_to_f32(bits: u32) -> f32 {
+    let sign = (bits & 0x8000) << 16;
+    let (exp, man) = ((bits >> 10) & 0x1F, bits & 0x3FF);
+    let out = match (exp, man) {
+        // Zero.
+        (0, 0) => sign,
+        // Subnormal: man * 2^-24, its own exponent and mantissa.
+        (0, _) => {
+            let p = 31 - man.leading_zeros();
+            sign | ((p + 103) << 23) | ((man - (1 << p)) << (23 - p))
+        }
+        (0x1F, 0) => sign | 0x7F80_0000,
+        (0x1F, _) => sign | 0x7FC0_0000,
+        _ => sign | ((exp + 112) << 23) | man << 13,
+    };
+    f32::from_bits(out)
+}
+
 /// Pixel inputs packing two 16-bit rows per dword whose second row the
 /// metadata leaves out (`row2` = `row`): as for outputs
 /// ([`half_outputs`]), the next 16-bit row of the signature that no input
@@ -4194,16 +4214,21 @@ impl<'a> Lower<'a> {
                     .get(..4)
                     .and_then(|w| w.try_into().ok())
                     .ok_or("a sampler constant")?;
-                let n = match self.samplers.iter().position(|w| *w == words) {
+                // A comparison sample takes a comparison sampler and the
+                // ordinary forms a default one: the same words used both ways
+                // need two slots (DXIL rejects either handle in the other's
+                // operation), and two either way still share one.
+                let cmp = props.0 & 0x8000 != 0;
+                let n = match self.samplers.iter().enumerate().position(|(n, w)| {
+                    *w == words && (self.s.cmp_samplers >> n & 1 != 0) == cmp
+                }) {
                     Some(n) => n,
                     None => {
                         self.samplers.push(words);
                         self.samplers.len() - 1
                     }
                 };
-                if props.0 & 0x8000 != 0 {
-                    // shortcut: one sampler used with and without comparison
-                    // would need two static samplers; it becomes a comparison one.
+                if cmp {
                     self.s.cmp_samplers |= 1 << n;
                 }
                 Ok(self.s.sampler_handle(self.cur, n as u32))
@@ -7228,9 +7253,9 @@ impl<'a> Lower<'a> {
             let known =
                 |l: &mut Self, (at, half): (usize, Option<u32>)| -> Result<Option<f32>, Why> {
                     let x = raw(l, at)?;
-                    Ok(l.s.m.known(x).and_then(|bits| match half {
-                        None => Some(f32::from_bits(bits as u32)),
-                        Some(h) => (bits >> (16 * h) & 0x7FFF == 0).then_some(0.0),
+                    Ok(l.s.m.known(x).map(|bits| match half {
+                        None => f32::from_bits(bits as u32),
+                        Some(h) => f16_to_f32(((bits >> (16 * h)) & 0xFFFF) as u32),
                     }))
                 };
             let level = if f.l {
@@ -7239,6 +7264,16 @@ impl<'a> Lower<'a> {
                 f.lz.then_some(0.0)
             };
             let level_zero = level == Some(0.0);
+            // Implicit derivatives are a pixel shader's, and a compute
+            // group's only in the shapes the SM 6.6 rules allow: X a
+            // multiple of 4 with Y and Z 1, or X and Y both even
+            // (DirectX-Specs, HLSL SM 6.6 Derivatives).
+            let derivatives = self.s.pixel
+                || self.s.mesh.is_none()
+                    && self
+                        .s
+                        .threads
+                        .is_some_and(|[x, y, z]| x % 4 == 0 && y == 1 && z == 1 || x % 2 == 0 && y % 2 == 0);
             // The DXIL operation. SM 6.6 has no comparison at a level, with
             // a bias or with gradients (SampleCmpLevel is SM 6.7,
             // SampleCmpBias and SampleCmpGrad 6.8) and gathers level 0 only;
@@ -7269,6 +7304,11 @@ impl<'a> Lower<'a> {
                     GATHER_AT_LEVEL
                 }
             } else if f.c {
+                if kind == 4 {
+                    // DXIL's comparison samples are of 2D images (and cubes);
+                    // the validator refuses SampleCmp* on a Texture3D.
+                    return Err("a comparison sample of a 3D image");
+                }
                 if f.d {
                     return Err("a comparison sample with explicit derivatives");
                 }
@@ -7280,12 +7320,11 @@ impl<'a> Lower<'a> {
                 }
                 if f.l || f.lz {
                     65
-                } else if self.s.pixel || self.s.threads.is_some() && self.s.mesh.is_none() {
-                    // Implicit derivatives: pixel and compute shaders.
+                } else if derivatives {
                     64
                 } else {
                     return Err(
-                        "a comparison sample with implicit derivatives outside pixel and compute shaders",
+                        "a comparison sample with implicit derivatives outside a pixel shader or a quad-shaped compute group",
                     );
                 }
             } else if f.d {
@@ -7297,6 +7336,11 @@ impl<'a> Lower<'a> {
             } else {
                 60
             };
+            if matches!(op, 60 | 61 | 64) && !derivatives {
+                return Err(
+                    "an implicit-derivative sample outside a pixel shader or a quad-shaped compute group",
+                );
+            }
             let mut cs = vec![fu; 4];
             for (k, slot) in cs.iter_mut().enumerate().take(coords) {
                 *slot = float(self, coord_at(k))?;
@@ -7394,6 +7438,18 @@ impl<'a> Lower<'a> {
                     let f32t = self.s.t.f32;
                     let dims = self.s.m.named_struct("dx.types.Dimensions", vec![i32t; 4]);
                     let n = self.s.m.i32(n as u32);
+                    // SampleLevel clamps the level to the view's last, so
+                    // the size the shift divides by must be that level's: a
+                    // level past it has no size (0), and the shift would be
+                    // infinite.
+                    let d0 = self
+                        .s
+                        .op(c, "getDimensions", Attr::ReadOnly, dims, 72, &[h, zero]);
+                    let levels = self.s.m.extract(c, d0, 3);
+                    let one = self.s.m.i32(1);
+                    let last = self.s.m.bin(c, Bin::Sub, levels, one);
+                    let past = self.s.m.cmp(c, pred::SGT, n, last);
+                    let n = self.s.m.select(c, past, last, n);
                     let d = self
                         .s
                         .op(c, "getDimensions", Attr::ReadOnly, dims, 72, &[h, n]);
@@ -7627,10 +7683,14 @@ impl<'a> Lower<'a> {
         } else {
             (0..4).filter(|ch| dmask >> ch & 1 != 0).collect()
         };
+        // SampleCmp answers in field 0 whatever channel the mask names (the
+        // other fields are not its result); a comparison gather answers four.
+        let compare_sample = form.is_some_and(|f| f.c && !f.gather);
         let mut xs = Vec::new();
         for ch in channels {
             let x = match gathered {
                 Some(texels) => texels[ch as usize],
+                None if compare_sample => self.s.m.extract(c, r, 0),
                 None => self.s.m.extract(c, r, ch),
             };
             xs.push(if *d16 {
@@ -8976,10 +9036,34 @@ fn image_address_place(k: usize, extras: usize, grads: usize, a16: bool) -> (usi
 
 #[cfg(test)]
 mod tests {
-    use super::{Lowered, Numeric, Parts, buffer_format, half_shift, image_address_place, lower};
+    use super::{
+        Lowered, Numeric, Parts, buffer_format, f16_to_f32, half_shift, image_address_place, lower,
+    };
     use crate::native::{
         ComputeIo, HwStage, NativeProgram, ResourceType, RootParam, RootType, StageIo, UsedResource,
     };
+
+    /// An a16 address's f16 constant is decoded at translation, so a level
+    /// of 1 (`0x3c00`) is known like one written as a dword.
+    #[test]
+    fn f16_constants_decode_to_their_value() {
+        for (bits, want) in [
+            (0x0000u32, 0.0f32),
+            (0x8000, -0.0),
+            (0x3C00, 1.0),
+            (0x4000, 2.0),
+            (0xC000, -2.0),
+            (0x3800, 0.5),
+            (0x0001, 2.0f32.powi(-24)),
+            (0x03FF, 1023.0 / 2f32.powi(24)),
+            (0x7C00, f32::INFINITY),
+            (0xFBFF, -65504.0),
+            (0xFC00, f32::NEG_INFINITY),
+        ] {
+            assert_eq!(f16_to_f32(bits), want, "{bits:#06x}");
+        }
+        assert!(f16_to_f32(0x7E00).is_nan());
+    }
 
     #[test]
     fn a16_image_addresses_pack_as_the_hardware_does() {

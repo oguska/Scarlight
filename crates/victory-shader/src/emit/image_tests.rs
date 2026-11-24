@@ -67,6 +67,8 @@ struct Mimg {
     implicit: bool,
     /// On a cube image (else 2D).
     cube: bool,
+    /// The dimension field: 1 is 2D, 2 is 3D, 3 is cube.
+    dim: u8,
 }
 
 impl Mimg {
@@ -80,7 +82,7 @@ impl Mimg {
             0xF000_0000
                 | (self.op & 0x7F) << 18
                 | self.op >> 7
-                | (if self.cube { 3 } else { 1 }) << 3
+                | u32::from(if self.cube { 3 } else { self.dim }) << 3
                 | u32::from(self.dmask) << 8,
             2 | data << 8
                 | (rsrc / 4) << 16
@@ -102,6 +104,7 @@ fn op(name: &str) -> u32 {
                 d16: false,
                 implicit: false,
                 cube: false,
+                dim: 1,
             };
             let code: Vec<u8> = i
                 .words()
@@ -124,6 +127,7 @@ fn mimg(name: &str, dmask: u8) -> Mimg {
         implicit: name.starts_with("image_sample")
             && !name.split('_').any(|t| explicit.contains(&t)),
         cube: false,
+        dim: 1,
     }
 }
 
@@ -217,15 +221,28 @@ fn translate(inst: Mimg, literals: &[(u8, u32)]) -> Result<HostShader, ShaderErr
         super::validator::Validator::load(super::validator::Validator::default_path().as_deref())
     {
         match v.validate(&mut s.dxil.clone()) {
-            Err(e) if !(inst.implicit && e.contains(CS_DERIVATIVES)) => panic!("validation: {e}"),
-            _ => {}
+            Err(e) if inst.implicit => {
+                // Only the one diagnostic is let through: a report with any
+                // other error left over still fails.
+                let other = e
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty() && !l.ends_with(CS_DERIVATIVES))
+                    .collect::<Vec<_>>();
+                assert!(other.is_empty(), "validation: {e}");
+            }
+            Err(e) => panic!("validation: {e}"),
+            Ok(()) => {}
         }
     }
     Ok(s)
 }
 
 fn lower(words: &[u32]) -> Result<HostShader, ShaderError> {
-    let n = native(words);
+    lower_native(native(words))
+}
+
+fn lower_native(n: NativeProgram) -> Result<HostShader, ShaderError> {
     let p = ir::build(&n.code, n.wave64, n.vgprs)?;
     let st = structure::structure(&p)?;
     let res = resource::track(&p, &n.layout, n.stage, Some(&st))?;
@@ -933,6 +950,7 @@ fn stores_of_some_channels_write_zero_to_the_others() {
             d16,
             implicit: false,
             cube: false,
+            dim: 1,
         };
         // Lane l writes texel (l mod 8, l / 8) with channel k = l + k / 4.
         let value = |l: usize, k: usize| l as f32 + k as f32 / 4.0;
@@ -1106,6 +1124,35 @@ fn sample_and_gather_forms_lower_to_valid_dxil() {
         }
     }
     assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// DXIL's comparison samples are of 2D images and cubes; the validator
+/// refuses them on a Texture3D, so the translation does too.
+#[test]
+fn a_comparison_sample_of_a_3d_image_is_refused() {
+    let three_d = Mimg {
+        dim: 2,
+        ..mimg("image_sample_c_lz_o", 1)
+    };
+    match translate(three_d, &[]) {
+        Err(e) => assert!(e.to_string().contains("3D"), "{e}"),
+        Ok(_) => panic!("a 3D comparison sample translated"),
+    }
+}
+
+/// Implicit derivatives are the pixel shader's, or a compute group's in
+/// the shapes the SM 6.6 rules allow: a group of 6 threads is neither.
+#[test]
+fn implicit_derivatives_need_a_quad_shaped_group() {
+    let mut n = native(&program(mimg("image_sample", 0xF), &[]));
+    let StageIo::Cs(cs) = &mut n.io else {
+        unreachable!()
+    };
+    cs.threads = [6, 1, 1];
+    match lower_native(n) {
+        Err(e) => assert!(e.to_string().contains("implicit-derivative sample"), "{e}"),
+        Ok(_) => panic!("a sample with implicit derivatives translated in a [6, 1, 1] group"),
+    }
 }
 
 #[test]

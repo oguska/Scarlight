@@ -1359,6 +1359,16 @@ impl Host {
                             }
                             _ => unreachable!(),
                         };
+                        // D3D12 reads 0 as the whole chain, and a count past
+                        // the chain truncates when cast: either way the
+                        // resource, the upload loop and the SRV would
+                        // disagree about the levels.
+                        let max = 32 - w.max(h).leading_zeros();
+                        if !(1..=max).contains(&levels) {
+                            return Err(format!(
+                                "a view of {levels} levels, of the 1..={max} it has"
+                            ));
+                        }
                         let mut desc = texture_as(w, h, D3D12_RESOURCE_FLAG_NONE, format);
                         desc.MipLevels = levels as u16;
                         desc.DepthOrArraySize = faces as u16;
@@ -1380,10 +1390,21 @@ impl Host {
                             let mut p = std::ptr::null_mut();
                             upload.Map(0, None, Some(&mut p)).map_err(err)?;
                             for y in 0..lh {
+                                // The whole row must be there: a slice that
+                                // only starts inside the payload would copy
+                                // past its end.
+                                let start = from + y * lw * size;
+                                let row = bytes.get(start..start + lw * size).ok_or_else(|| {
+                                    format!(
+                                        "a view of {} bytes, {start} + {} needed",
+                                        bytes.len(),
+                                        lw * size
+                                    )
+                                })?;
                                 std::ptr::copy_nonoverlapping(
-                                    bytes[from + y * lw * size..].as_ptr(),
+                                    row.as_ptr(),
                                     p.cast::<u8>().add(y * pitch),
-                                    lw * size,
+                                    row.len(),
                                 );
                             }
                             from += lw * lh * size;
