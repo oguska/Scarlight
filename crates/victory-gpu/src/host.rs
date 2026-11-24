@@ -1217,7 +1217,7 @@ impl HostList {
                         add(C::Copies, 1);
                         add(C::CopyBytes, len as u64);
                     }
-                    batch.title_written();
+                    batch.title_written(Some((dst, dst.saturating_add(len))));
                     copy_mapped(dst as *mut u8, src as *const u8, len, true);
                     len
                 }
@@ -1241,7 +1241,7 @@ impl HostList {
                 }
                 Step::Run(work) | Step::Host(work) => {
                     if matches!(step, Step::Run(_)) {
-                        batch.title_written();
+                        batch.title_written(None);
                     }
                     work();
                     #[cfg(feature = "diagnostics")]
@@ -1285,6 +1285,12 @@ impl HostList {
 struct Batch {
     /// Per copy, `[from, to)` ranges in the order they came.
     refreshes: Vec<(std::sync::Arc<crate::shadow::Shadow>, Ranges)>,
+    /// Per copy, ranges already brought up to date in this submission and
+    /// not written since by a step of it (sorted, disjoint): a list asking
+    /// for one again (the world's lists read the same 174 MB heap through
+    /// dozens of ranges, each asked of the kernel's write watch again) is
+    /// not asked again until a step may have written title memory there.
+    fresh: Vec<(std::sync::Arc<crate::shadow::Shadow>, Ranges)>,
     /// Staging buffers (by address) refreshed since the last title write.
     textures: std::collections::HashSet<usize>,
 }
@@ -1313,6 +1319,9 @@ impl Batch {
             return;
         }
         let range = (address, address.saturating_add(len));
+        if self.is_fresh(shadow, range) {
+            return;
+        }
         match self
             .refreshes
             .iter_mut()
@@ -1323,6 +1332,38 @@ impl Batch {
         }
     }
 
+    /// Whether `range` is wholly inside what is already up to date.
+    fn is_fresh(&self, shadow: &std::sync::Arc<crate::shadow::Shadow>, range: (usize, usize)) -> bool {
+        self.fresh
+            .iter()
+            .find(|(s, _)| std::sync::Arc::ptr_eq(s, shadow))
+            .is_some_and(|(_, ranges)| ranges.iter().any(|&(a, b)| a <= range.0 && range.1 <= b))
+    }
+
+    /// Notes `ranges` of `shadow` up to date.
+    fn note_fresh(&mut self, shadow: &std::sync::Arc<crate::shadow::Shadow>, ranges: &[(usize, usize)]) {
+        let at = match self.fresh.iter().position(|(s, _)| std::sync::Arc::ptr_eq(s, shadow)) {
+            Some(at) => at,
+            None => {
+                self.fresh.push((shadow.clone(), Vec::new()));
+                self.fresh.len() - 1
+            }
+        };
+        let known = &mut self.fresh[at].1;
+        known.extend_from_slice(ranges);
+        // Merge only ranges that overlap or touch exactly (no page rounding:
+        // a gap between them was not checked).
+        known.sort_unstable();
+        let mut merged: Ranges = Vec::with_capacity(known.len());
+        for &(from, to) in known.iter() {
+            match merged.last_mut() {
+                Some((_, end)) if from <= *end => *end = (*end).max(to),
+                _ => merged.push((from, to)),
+            }
+        }
+        *known = merged;
+    }
+
     /// Whether `staging` is still to be refreshed in this submission (and
     /// notes it refreshed).
     fn texture_due<T>(&mut self, staging: &std::sync::Arc<T>) -> bool {
@@ -1331,14 +1372,26 @@ impl Batch {
 
     /// Before a step that writes title memory: pending refreshes are done
     /// first, and textures are checked again after it.
-    fn title_written(&mut self) {
+    ///
+    /// `written`: the title range the step writes, if it is known; what may
+    /// be up to date there is not any more (all of it when unknown).
+    fn title_written(&mut self, written: Option<(usize, usize)>) {
         self.flush();
         self.textures.clear();
+        match written {
+            None => self.fresh.clear(),
+            Some((from, to)) => {
+                for (_, ranges) in &mut self.fresh {
+                    ranges.retain(|&(a, b)| b <= from || to <= a);
+                }
+            }
+        }
     }
 
     fn flush(&mut self) {
-        for (shadow, mut ranges) in self.refreshes.drain(..) {
+        for (shadow, mut ranges) in std::mem::take(&mut self.refreshes) {
             coalesce_ranges(&mut ranges, crate::watch::PAGE);
+            self.note_fresh(&shadow, &ranges);
             for (from, to) in ranges {
                 let started = std::time::Instant::now();
                 let copied = shadow.update(from, to - from);
@@ -2205,7 +2258,7 @@ mod batch {   // Batch::texture_due lives here; `mod tests` is already taken at 
         assert!(!batch.texture_due(&a));
         // A copy into title memory or work that may write it may have
         // changed the texture's memory.
-        batch.title_written();
+        batch.title_written(None);
         assert!(batch.texture_due(&a));
         assert!(!batch.texture_due(&a));
         // A fresh submission starts over.
