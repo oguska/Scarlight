@@ -811,6 +811,19 @@ fn comparisons_and_comparison_gathers_match_per_texel_comparisons() {
                 ([0, f(r), f(u), f(v)].to_vec(), one(r, (u, v), (1, -1)))
             },
         ),
+        // The comparison answers in field 0 whatever channel the mask
+        // names, so a mask of just green stores the same result there.
+        case(
+            "c_lz_o dmask=2",
+            mimg("image_sample_c_lz_o", 2),
+            &[(2, ow(1, -1))],
+            |l| {
+                let (u, v) = centre(l);
+                let r = reference(l);
+                let [c, _, _, _] = one(r, (u, v), (1, -1));
+                ([0, f(r), f(u), f(v)].to_vec(), [0, c, 0, 0])
+            },
+        ),
         case(
             "c_lz_o per lane",
             mimg("image_sample_c_lz_o", 1),
