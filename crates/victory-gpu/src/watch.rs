@@ -172,7 +172,18 @@ pub(crate) fn allocation(address: usize) -> Option<Allocation> {
         let start = info.AllocationBase as usize;
         let end = start.checked_add(info.RegionSize)?;
         // The Private bit is the first field of the Win32 region union.
-        let private = info.Anonymous.Anonymous._bitfield & 1 != 0;
+        // Wine leaves the union's flags zero for every region; there the
+        // allocation type comes from VirtualQuery instead.
+        let mut private = info.Anonymous.Anonymous._bitfield & 1 != 0;
+        if info.Anonymous.Anonymous._bitfield == 0 {
+            use windows_sys::Win32::System::Memory::{
+                MEM_PRIVATE, MEMORY_BASIC_INFORMATION, VirtualQuery,
+            };
+            let mut basic = MEMORY_BASIC_INFORMATION::default();
+            // SAFETY: a query about an address; nothing is dereferenced.
+            let n = VirtualQuery(address as *const _, &mut basic, size_of_val(&basic));
+            private = n != 0 && basic.Type == MEM_PRIVATE;
+        }
         (start <= address && address < end).then_some(Allocation {
             start,
             end,
@@ -639,6 +650,55 @@ pub(crate) mod tests {
         VirtualFree,
     };
     const MEM_WRITE_WATCH: u32 = 0x20_0000;
+
+    /// A private reservation is reported private, a mapped view is not
+    /// (Wine fills no region flags, so this checks the fallback there).
+    #[test]
+    fn allocation_tells_private_memory_from_views() {
+        use windows_sys::Win32::System::Memory::{
+            CreateFileMappingW, FILE_MAP_WRITE, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile,
+            UnmapViewOfFile,
+        };
+        // SAFETY: a fresh write-watched reservation of ours.
+        let p = unsafe {
+            VirtualAlloc(
+                std::ptr::null(),
+                2 * PAGE,
+                MEM_RESERVE | MEM_COMMIT | MEM_WRITE_WATCH,
+                PAGE_READWRITE,
+            )
+        } as usize;
+        assert_ne!(p, 0);
+        let Some(a) = allocation(p) else {
+            // QueryVirtualMemoryInformation is missing: nothing to check.
+            return;
+        };
+        assert!(a.private, "a VirtualAlloc reservation is private");
+        assert!(a.is_private_span(p, p + 2 * PAGE));
+        // SAFETY: a pagefile section of one block, mapped read-write.
+        let view = unsafe {
+            let section = CreateFileMappingW(
+                -1isize as _,
+                std::ptr::null(),
+                PAGE_READWRITE,
+                0,
+                PAGE as u32,
+                std::ptr::null(),
+            );
+            assert!(!section.is_null());
+            MapViewOfFile(section, FILE_MAP_WRITE, 0, 0, PAGE)
+        };
+        assert!(!view.Value.is_null());
+        assert!(
+            !allocation(view.Value as usize).unwrap().private,
+            "a mapped view is not"
+        );
+        // SAFETY: ours.
+        unsafe {
+            UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: view.Value });
+            VirtualFree(p as *mut _, 0, MEM_RELEASE);
+        }
+    }
 
     #[test]
     fn journal_index_preserves_order_bounds_and_older_observers() {
