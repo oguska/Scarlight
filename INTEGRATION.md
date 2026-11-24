@@ -38,7 +38,6 @@ without a native compiler.
 | PR | Author | Title | Why |
 |---|---|---|---|
 | [#177](https://github.com/Marvisak/VIctory/pull/177) | @Ortomanic | Shaders: key heap handles by element type (atomic on a float-read UAV) | valid SPIR-V for atomics on float-read images (Linux) |
-| [#190](https://github.com/Marvisak/VIctory/pull/190) | @LaunchDoesntCode | GPU: build the indirect-argument clamp with our own writer (no shader compiler at run time) | indirect-argument clamp without a shader compiler (Wine) |
 | [#439](https://github.com/Marvisak/VIctory/pull/439) | @r4tedx | Shaders: one console wave sharing LDS runs in the console flow on 32-lane hosts | +3 world shaders |
 | [#453](https://github.com/Marvisak/VIctory/pull/453) | @AntoninMichelq | Shaders: pixel barycentrics through SV_Barycentrics (values and computed interpolation) | barycentrics: +2 world pixel shaders |
 | [#454](https://github.com/Marvisak/VIctory/pull/454) | @ruvenesh | Loader: opt-in VICTORY_NO_WATCHDOG hook for the title's watchdog (build 1.0.2.1) | VICTORY_NO_WATCHDOG for long world runs |

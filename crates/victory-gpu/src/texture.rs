@@ -785,7 +785,10 @@ impl Staging {
             let (mip, slice) = (i as u32 % self.mips, i as u32 / self.mips);
             let f = footprint.Footprint;
             let pitch = f.RowPitch as usize;
-            let len = pitch * rows as usize * f.Depth as usize;
+            // The staging buffer is the subresources' footprints, so the
+            // last row's padding can reach past its end: the slice stops
+            // where the buffer does (the walk then stops there too).
+            let len = staged_span(footprint.Offset as usize, pitch, rows, f.Depth, self.bytes);
             // SAFETY: the subresource's part of the mapped staging buffer.
             let linear = unsafe {
                 std::slice::from_raw_parts_mut(self.data.add(footprint.Offset as usize), len)
@@ -799,6 +802,14 @@ impl Staging {
             }
         }
     }
+}
+
+/// The bytes of one subresource a staging buffer of `bytes` holds from
+/// `offset`: its rows at `pitch` bytes each, at most what is left of the
+/// buffer (the host sizes the last row without its padding).
+fn staged_span(offset: usize, pitch: usize, rows: u32, depth: u32, bytes: u64) -> usize {
+    let len = pitch * rows as usize * depth as usize;
+    len.min((bytes as usize).saturating_sub(offset))
 }
 
 /// Lets go of a title texture's staging buffer (lists that recorded an
@@ -1057,7 +1068,7 @@ fn staging(resource: This, texture: &ID3D12Resource) -> Option<Arc<Staging>> {
 
 #[cfg(test)]
 mod title_memory_tests {
-    use super::with_title;
+    use super::{staged_span, with_title};
 
     /// Title memory whose tail is reserved and not committed reads through
     /// the copy as its bytes and then zeros, without a fault; so does
@@ -1160,6 +1171,14 @@ mod title_memory_tests {
                 layout
                     .detile(in_place, 0, 0, &mut exact, pitch, pitch * height as usize)
                     .expect("the staging buffer's bytes are enough");
+                // And the slice the production detiling takes stops there
+                // instead of at the last row's padded end (1,024 bytes).
+                assert_eq!(staged_span(0, pitch, height, 1, staged as u64), staged);
+                assert_eq!(
+                    staged_span(0, pitch, height, 1, staged as u64),
+                    pitch * height as usize - (pitch - row),
+                    "the padding of the last row is not part of the buffer"
+                );
                 assert_ne!(VirtualFree(base.cast(), 0, MEM_RELEASE), 0);
             }
         }
