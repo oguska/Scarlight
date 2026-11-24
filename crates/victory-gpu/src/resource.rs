@@ -799,6 +799,7 @@ const RENDER_TARGET: u32 = 1;
 
 /// The `D3D12_FEATURE_DATA_FORMAT_SUPPORT.Support1` bits the device reports
 /// for `format`; `None` if the query fails.
+#[cfg(windows)]
 fn format_support(device: &windows::Win32::Graphics::Direct3D12::ID3D12Device, format: u32) -> Option<u32> {
     use windows::Win32::Graphics::Direct3D12::*;
     let mut support = D3D12_FEATURE_DATA_FORMAT_SUPPORT {
@@ -819,6 +820,7 @@ fn format_support(device: &windows::Win32::Graphics::Direct3D12::ID3D12Device, f
 
 /// `flags` without the unordered-access and render-target uses a typed
 /// format's `support1` bits (`D3D12_FORMAT_SUPPORT1`) do not offer.
+#[cfg(windows)]
 fn supported_flags(mut flags: u32, support1: u32) -> u32 {
     use windows::Win32::Graphics::Direct3D12::*;
     if support1 & D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW.0 as u32 == 0 {
@@ -1962,6 +1964,7 @@ mod tests {
 
     /// The flag filter and the clear-value rule on fixed support bits, the
     /// same on every adapter.
+    #[cfg(windows)]
     #[test]
     fn unsupported_flags_and_clear_values_are_dropped() {
         use windows::Win32::Graphics::Direct3D12::*;
