@@ -89,6 +89,24 @@ impl Default for GraphicsState {
     }
 }
 
+/// A vertex input the host has no format for is filled with zeros, which
+/// puts every vertex drawn from it at the origin: counted and named
+/// (rate-limited), with the title's format and its stride/slot.
+fn note_unknown_input(name: String, e: &D3D12_INPUT_ELEMENT_DESC) {
+    static UNKNOWN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = UNKNOWN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if n < 8 || n.is_multiple_of(512) {
+        tracing::warn!(
+            n,
+            semantic = name,
+            console_format = e.Format.0,
+            slot = e.InputSlot,
+            offset = e.AlignedByteOffset,
+            "a vertex input without a host format reads zeros"
+        );
+    }
+}
+
 /// Integer render target formats: D3D12 cannot blend into them.
 fn integer_format(f: DXGI_FORMAT) -> bool {
     matches!(
@@ -201,12 +219,18 @@ impl GraphicsState {
                         .iter()
                         .zip(&self.names)
                         .map(|(e, name)| {
+                            let format = crate::resource::pc_format(e.Format.0 as u32);
+                            if format == 0 {
+                                // An input with no host format is filled
+                                // with zeros: every vertex drawn from it
+                                // lands on the origin (`notes/vtx.md`).
+                                note_unknown_input(name.to_string_lossy().to_string(), e);
+                            }
                             // SAFETY: plain-old-data D3D12 struct; zeroed to clear padding.
                             let mut out: D3D12_INPUT_ELEMENT_DESC = std::mem::zeroed();
                             out.SemanticName = PCSTR(name.as_ptr().cast());
                             out.SemanticIndex = e.SemanticIndex;
-                            out.Format =
-                                DXGI_FORMAT(crate::resource::pc_format(e.Format.0 as u32) as i32);
+                            out.Format = DXGI_FORMAT(format as i32);
                             out.InputSlot = e.InputSlot;
                             out.AlignedByteOffset = e.AlignedByteOffset;
                             out.InputSlotClass = e.InputSlotClass;
