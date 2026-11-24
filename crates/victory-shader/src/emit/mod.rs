@@ -82,10 +82,10 @@ pub mod clamp;
 mod container;
 #[cfg(all(test, windows))]
 mod diff_tests;
-#[cfg(all(windows, any(test, feature = "host")))]
-pub mod host;
 #[cfg(all(test, windows))]
 mod image_tests;
+#[cfg(all(windows, any(test, feature = "host")))]
+pub mod host;
 #[cfg(all(test, windows))]
 mod lane_read_loop_tests;
 mod lower;
