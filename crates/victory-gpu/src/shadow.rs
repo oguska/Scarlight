@@ -38,11 +38,23 @@ pub(crate) struct Shadow {
     /// Whether the memory is write-watched: unknown, yes, no.
     watched: AtomicU8,
     /// Ranges shaders of a submission not yet copied back may be writing:
-    /// title memory there is older than the copy.
-    pending: Mutex<Vec<(usize, usize)>>,
+    /// title memory there is older than the copy. With the asynchronous
+    /// write-back the entry also holds the job that puts the bytes back.
+    pending: Mutex<Vec<Pending>>,
     /// The copy's bytes before the submission ran, from an offset on,
     /// covering the ranges its shaders write: what the GPU wrote differs.
     before: Mutex<Before>,
+}
+
+/// A range a submission's shaders may write, until its copy-back ran.
+struct Pending {
+    from: usize,
+    to: usize,
+    /// Which submission declared it (a later one must not be mistaken for
+    /// it: same address, same length).
+    submission: u64,
+    /// The write-back job that puts it back, when that runs on the worker.
+    done: Option<std::sync::Arc<crate::writeback::Done>>,
 }
 
 #[derive(Default)]
@@ -192,11 +204,30 @@ impl Shadow {
     /// submission declares (the world declares overlapping views of its
     /// 174 MB heap dozens of times), in reused memory (fresh snapshots cost
     /// ~2.3 million page faults per world frame).
-    pub(crate) fn writing(&self, address: usize, len: usize) {
+    pub(crate) fn writing(&self, address: usize, len: usize, submission: u64) {
+        // A snapshot is per copy, not per submission: a range an earlier
+        // submission's write-back job still holds is waited for, or its
+        // bytes before would be the earlier submission's, not this one's.
+        let waits: Vec<std::sync::Arc<crate::writeback::Done>> = self
+            .pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|p| p.submission < submission && p.from < address + len && address < p.to)
+            .filter_map(|p| p.done.clone())
+            .collect();
+        for done in waits {
+            done.wait();
+        }
         self.pending
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .push((address, address + len));
+            .push(Pending {
+                from: address,
+                to: address + len,
+                submission,
+                done: None,
+            });
         let (from, to) = self.inside(address, len);
         // SAFETY: inside the mapping.
         let host =
@@ -226,6 +257,25 @@ impl Shadow {
         *before = Some((start, grown));
     }
 
+    /// The asynchronous write-back job that holds `[address, address + len)`
+    /// of `submission`: a later submission's snapshot of the copy waits for
+    /// it. Nothing if the range was copied back inline.
+    pub(crate) fn write_back(
+        &self,
+        address: usize,
+        len: usize,
+        submission: u64,
+        done: std::sync::Arc<crate::writeback::Done>,
+    ) {
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(p) = pending
+            .iter_mut()
+            .find(|p| (p.from, p.to, p.submission) == (address, address + len, submission))
+        {
+            p.done = Some(done);
+        }
+    }
+
     /// After the submission ran: copies the bytes its shaders wrote back
     /// into title memory (unmapped pages left alone), and only those: the
     /// title's threads write the same buffers while the GPU runs (its
@@ -233,7 +283,7 @@ impl Shadow {
     /// putting back the copy's older bytes there broke the title's own
     /// records (a fence list read as -1, title+0x4e9b54a). Returns the bytes
     /// written.
-    pub(crate) fn copy_back(&self, address: usize, len: usize) -> usize {
+    pub(crate) fn copy_back(&self, address: usize, len: usize, submission: u64) -> usize {
         let mut before = self.before.lock().unwrap_or_else(|e| e.into_inner());
         let Before {
             snapshot,
@@ -304,7 +354,7 @@ impl Shadow {
         // Every submitted step that declared the range is done with it (one
         // submission runs at a time), and the snapshot with the last range.
         let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
-        pending.retain(|&r| r != (address, address + len));
+        pending.retain(|p| (p.from, p.to, p.submission) != (address, address + len, submission));
         if pending.is_empty()
             && let Some((_, bytes)) = snapshot.take()
         {
@@ -328,7 +378,7 @@ impl Shadow {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
-            .copied()
+            .map(|p| (p.from, p.to))
             .filter(|&(a, e)| a < to && e > from)
             .collect();
         if !busy.is_empty() {
