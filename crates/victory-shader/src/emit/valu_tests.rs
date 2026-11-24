@@ -6,7 +6,7 @@
 //! near `1.0`, and turn-range reduction for `v_sin_*`/`v_cos_*`.
 
 use super::host::{Dispatch, Host, Root, View};
-use super::{HostShader, lower, validator};
+use super::{HostShader, Target, lower, validator};
 use crate::native::{
     ComputeIo, HwStage, NativeProgram, ResourceType, RootParam, RootType, StageIo, UsedResource,
 };
@@ -1049,6 +1049,9 @@ fn run_wave_cs(wave64: bool, body: &[u32], mut check: impl FnMut(&str, &[u32])) 
         outputs: Vec::new(),
         prims: Vec::new(),
         mesh_stride: 0,
+        target: Target::ANY,
+        console_cf: false,
+        per_lane_only: false,
     })
     .expect("lower");
 
@@ -1060,6 +1063,7 @@ fn run_wave_cs(wave64: bool, body: &[u32], mut check: impl FnMut(&str, &[u32])) 
         static_samplers: Vec::new(),
         root_cbvs: lowered.root_cbvs,
         root_srvs: lowered.root_srvs,
+        stride_table: lowered.stride_table,
     };
 
     if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
@@ -1343,7 +1347,8 @@ fn lds_byte_and_half_writes_keep_the_rest_of_the_dword() {
 #[test]
 fn lds_byte_and_half_reads_extend_as_the_console() {
     // [0] = s0, then each read of it.
-    let reads: [(u8, u16, fn(u32) -> u32); 6] = [
+    type Read = (u8, u16, fn(u32) -> u32);
+    let reads: [Read; 6] = [
         (DS_READ_U8, 1, |w| w >> 8 & 0xFF),
         (DS_READ_I8, 1, |w| (w >> 8) as u8 as i8 as i32 as u32),
         (DS_READ_U16, 2, |w| w >> 16),
