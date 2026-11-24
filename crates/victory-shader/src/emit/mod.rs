@@ -2151,4 +2151,83 @@ mod barycentric_tests {
             translate(opcode);
         }
     }
+    /// Cross-lane operations outside compute: a pixel program's lane-indexed
+    /// reads and writes, its mask bit count, its byte permute and its
+    /// swizzle all lower. They were refused with "a cross-lane operation
+    /// outside compute", which dropped every draw of the program.
+    #[test]
+    fn cross_lane_operations_lower_in_a_pixel_program() {
+        let target = SigElement {
+            name: "SV_Target".into(),
+            index: 0,
+            kind: 16,
+            comp: 9,
+            interp: 0,
+            row: Some(0),
+            col: 0,
+            cols: 1,
+            usage: 1,
+            half: false,
+        };
+        let sig = super::container::signature(&[target], false);
+        let bytes = crate::dxbc::build(&[(FourCC::OSG1, &sig)]);
+        let c = Container::parse(&bytes).unwrap();
+        let pixel = |words: &[u32]| -> Result<HostShader, ShaderError> {
+            let native = NativeProgram {
+                stage: HwStage::Ps,
+                wave64: false,
+                vgprs: 8,
+                layout: vec![],
+                used: vec![],
+                io: StageIo::Ps {
+                    inputs: vec![],
+                    input_addr: 0,
+                    db_shader_control: 0,
+                    patches: vec![],
+                },
+                code: words.iter().flat_map(|w| w.to_le_bytes()).collect(),
+            };
+            let p = ir::build(&native.patched_code(), native.wave64, native.vgprs).unwrap();
+            let st = structure::structure(&p).unwrap();
+            let res = resource::track(&p, &native.layout, native.stage, Some(&st)).unwrap();
+            let io = io::raise(&p, &native).unwrap();
+            emit(&c, &native, &p, &st, &io, &res, Target::ANY)
+        };
+        // exp mrt0 of v<reg>, done vm, then s_endpgm.
+        let export = |reg: u32| [0xF800_180F, reg << 24 | reg << 16 | reg << 8 | reg, S_ENDPGM];
+        let cases: [(&str, Vec<u32>); 5] = [
+            (
+                // v_readlane_b32 v4, v2, 5
+                "v_readlane_b32 of a constant lane",
+                [vec![0x7E04_02F2, 0xD760_0004, 0x0001_0B02], export(4).to_vec()].concat(),
+            ),
+            (
+                // v_writelane_b32 v5, 7, 5
+                "v_writelane_b32 of a constant lane",
+                [vec![0x7E04_02F2, 0xD761_0005, 0x0001_0A87], export(5).to_vec()].concat(),
+            ),
+            (
+                // v_mbcnt_lo_u32_b32 v5, -1, 0: the lane index
+                "v_mbcnt_lo_u32_b32 of an all-ones mask",
+                [vec![0xD765_0005, 0x0001_00C1], export(5).to_vec()].concat(),
+            ),
+            (
+                // ds_bpermute_b32 v3, v2, v1 offset:12
+                "ds_bpermute_b32",
+                [vec![0xDACC_000C, 0x0300_0102], export(3).to_vec()].concat(),
+            ),
+            (
+                // ds_swizzle_b32 v3, v2 offset:0x8000 (a quad pattern)
+                "ds_swizzle_b32 of a quad",
+                [vec![0xD8D4_8000, 0x0300_0102], export(3).to_vec()].concat(),
+            ),
+        ];
+        for (name, words) in cases {
+            let shader = match pixel(&words) {
+                Ok(shader) => shader,
+                Err(e) => panic!("{name}: refused: {e:?}"),
+            };
+            assert!(!shader.dxil.is_empty(), "{name}: no DXIL");
+        }
+    }
 }

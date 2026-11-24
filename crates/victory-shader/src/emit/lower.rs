@@ -61,11 +61,14 @@ pub(crate) struct Lowered {
     /// Test builds: the property words of each handle annotation, in order.
     #[cfg(test)]
     pub annotations: Vec<(u32, u32)>,
-    /// The names of the emitted functions (which dx.ops ran); tests only.
+    /// The names of the emitted functions (which dx.ops ran); tests only,
+    /// kept from #599 for tests of lane ops (none reads them here yet).
     #[cfg(test)]
+    #[allow(dead_code)]
     pub op_names: Vec<String>,
-    /// The emitted instructions, one line each; tests only.
+    /// The emitted instructions, one line each; tests only (see above).
     #[cfg(test)]
+    #[allow(dead_code)]
     pub insts: Vec<String>,
 }
 
@@ -2441,9 +2444,16 @@ impl<'a> Lower<'a> {
             // memory if mesh programs turn out to need these.
             return Err("a cross-lane operation in a mesh shader");
         }
-        if self.s.threads.is_none() && !(quad && self.s.pixel) {
-            return Err("a cross-lane operation outside compute");
-        }
+        // Compute, pixel and vertex programs all have the console's lanes on
+        // the host: a compute lane is relabelled to its console lane, and a
+        // pixel or vertex wave is lane for lane the console's when the host
+        // wave is the program's (the target is 32-64 lanes). `quad` marks the
+        // operations whose lanes all lie in one quad; the host has quads in
+        // every stage they are used in. A pixel shader's helper lanes are host
+        // lanes too: they take part in quads and in wave operations, so a read
+        // of one is what the host makes it, and what they compute is never
+        // written.
+        let _ = quad;
         debug_assert!(self.s.threads.is_none() || self.console_lanes);
         self.s.flags |= flags::WAVE_OPS;
         Ok(())
