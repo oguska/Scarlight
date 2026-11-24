@@ -230,7 +230,7 @@ fn translate(inst: Mimg, literals: &[(u8, u32)]) -> Result<HostShader, ShaderErr
                     .map(str::trim)
                     .filter(|l| {
                         !l.is_empty()
-                            && !l.ends_with(CS_DERIVATIVES)
+                            && !l.contains(CS_DERIVATIVES)
                             && !l.ends_with("See other errors for details.")
                             && *l != "Validation failed."
                     })
