@@ -10027,6 +10027,31 @@ mod tests {
     }
 
     #[test]
+    fn lane_mask_ops_combine_their_bits_with_exec() {
+        // Each combines its source's lane bit (`s_not` flips it, NAND and
+        // NOR flip the AND and the OR, and the saveexec and wrexec forms
+        // combine it with the old EXEC) and writes EXEC, which the branch
+        // then tests.
+        let tail = [
+            0xBF88_0001, // s_cbranch_execz -> s_endpgm
+            0xBE82_0381, // s_mov_b32 s2, 1
+            S_ENDPGM,
+        ];
+        let ops: [&[u32]; 6] = [
+            &[0xBE80_0387, 0xBE81_0383, 0x8C7E_0001], // s_nand_b32 exec, s0, s1
+            &[0xBE80_0387, 0xBE81_0383, 0x8D7E_0001], // s_nor_b32 exec, s0, s1
+            &[0xBE80_0387, 0xBEFE_0700],              // s_not_b32 exec, s0
+            &[0xBE80_0387, 0xBE82_3C00],              // s_and_saveexec_b32 s2, s0
+            &[0xBE80_0387, 0xBE82_3D00],              // s_or_saveexec_b32 s2, s0
+            &[0xBE80_0387, 0xBE82_4700],              // s_andn2_wrexec_b32 s2, s0
+        ];
+        for head in ops {
+            let words: Vec<u32> = head.iter().chain(&tail).copied().collect();
+            lowers(&words, 0).unwrap();
+        }
+    }
+
+    #[test]
     fn a_missing_value_stays_missing_through_two_live_joins() {
         let mut words = [
             0xF490_0180,
