@@ -3719,8 +3719,10 @@ impl<'a> Lower<'a> {
             "s_andn2_b32" | "s_andn2_b64" => (MaskOp::AndNot, false),
             "s_orn2_b32" | "s_orn2_b64" => (MaskOp::OrNot, false),
             "s_andn2_wrexec_b32" | "s_andn2_wrexec_b64" => (MaskOp::AndNot, false),
-            "s_nand_b32" | "s_nand_b64" => (MaskOp::AndNot, true),
-            "s_nor_b32" | "s_nor_b64" => (MaskOp::OrNot, true),
+            // NAND/NOR complement the AND/OR itself; the ANDN2/ORN2 forms
+            // complement the second operand (handled below, unflipped).
+            "s_nand_b32" | "s_nand_b64" => (MaskOp::And, true),
+            "s_nor_b32" | "s_nor_b64" => (MaskOp::Or, true),
             "s_xnor_b32" | "s_xnor_b64" => (MaskOp::Xor, true),
             "s_not_b32" | "s_not_b64" => (MaskOp::Not, false),
             "s_cselect_b32" | "s_cselect_b64" => (MaskOp::Select, false),
@@ -3733,7 +3735,10 @@ impl<'a> Lower<'a> {
         let t = self.s.m.bool(true);
         let x = match op {
             MaskOp::Move => self.mask_op_bit(inst, 0)?,
-            MaskOp::Not => self.s.m.bin(c, Bin::Xor, t, t),
+            MaskOp::Not => {
+                let a = self.mask_op_bit(inst, 0)?;
+                self.s.m.bin(c, Bin::Xor, a, t)
+            }
             MaskOp::Select => {
                 let cond = self.scc_in(inst)?;
                 let a = self.mask_op_bit(inst, 0)?;
