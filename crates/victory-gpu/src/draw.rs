@@ -24,6 +24,44 @@ use crate::object::This;
 use crate::pipeline::host::HostPipeline;
 use crate::scissor;
 
+/// A root view with no bytes behind it reads zeros for every lane that
+/// loads through it (a vertex fetch then puts every vertex on the origin):
+/// counted and named (rate-limited).
+fn note_empty_root_view(address: u64, left: u64, why: &str) {
+    static EMPTY: AtomicU64 = AtomicU64::new(0);
+    let n = EMPTY.fetch_add(1, Ordering::Relaxed);
+    if n < 8 || n.is_multiple_of(512) {
+        tracing::warn!(
+            n,
+            address = format_args!("{address:#x}"),
+            left,
+            why,
+            "a root view reads zeros"
+        );
+    }
+}
+
+/// A vertex view with nothing in it reads zeros on the host, which puts
+/// every vertex drawn from it at the origin (`xcl-bin/notes/vtx.md`):
+/// counted and named (rate-limited).
+fn note_vertex_view(slot: u32, v: &VertexView) {
+    if v.size != 0 && v.stride != 0 {
+        return;
+    }
+    static EMPTY: AtomicU64 = AtomicU64::new(0);
+    let n = EMPTY.fetch_add(1, Ordering::Relaxed);
+    if n < 8 || n.is_multiple_of(512) {
+        tracing::warn!(
+            n,
+            slot,
+            size = v.size,
+            stride = v.stride,
+            address = format_args!("{:#x}", v.address),
+            "a vertex buffer without size or stride reads zeros"
+        );
+    }
+}
+
 /// A root argument as the title set it.
 #[derive(Debug, Clone, Default)]
 enum Root {
@@ -261,11 +299,13 @@ impl State {
 
     pub(crate) fn set_vertex_buffers(&mut self, start: u32, views: &[VertexView]) {
         for (i, v) in views.iter().enumerate() {
+            note_vertex_view(start + i as u32, v);
             if let Some(slot) = self.vertex.get_mut(start as usize + i) {
                 *slot = *v;
             }
         }
     }
+
 
     pub(crate) fn clear_vertex_buffers(&mut self, start: u32, count: u32) {
         for slot in self.vertex.iter_mut().skip(start as usize).take(count as usize) {
@@ -624,6 +664,13 @@ impl State {
                         // SAFETY: a live buffer.
                         let base = unsafe { s.buffer.GetGPUVirtualAddress() };
                         let offset = s.gpu(*a) - base;
+                        if s.left(*a) < 16 {
+                            note_empty_root_view(
+                                *a,
+                                s.left(*a),
+                                "no bytes left in the title's buffer",
+                            );
+                        }
                         if offset.is_multiple_of(16) {
                             host.raw_at(index, &s.buffer, offset, s.left(*a));
                         } else {
@@ -636,7 +683,12 @@ impl State {
                             host.null_raw_at(index);
                         }
                     }
-                    None => host.null_raw_at(index),
+                    None => {
+                        if let Some(a) = address {
+                            note_empty_root_view(a, 0, "the title's buffer has no host copy");
+                        }
+                        host.null_raw_at(index)
+                    }
                 }
                 index
             }
@@ -904,6 +956,7 @@ impl State {
             return;
         };
         if let Some(view) = host.mirror(index, handle, true) {
+            host.refresh_slot(index, list);
             readable(list, u, &view);
         }
     }
@@ -990,6 +1043,7 @@ impl State {
             if let Some(&first) = self.fresh_tables.get(&key) {
                 for u in entries.iter().filter(|u| u.kind != ResourceType::Cbv) {
                     let handle = table + u64::from(u.table_offset_dwords) * 4;
+                    host.refresh_slot(first + u.table_offset_dwords / 8, list);
                     if let Some(view) = crate::descriptor::view(handle) {
                         readable(list, u, &view);
                     }
@@ -1025,6 +1079,7 @@ impl State {
                     }
                     Some(view) => {
                         host.make_at(index, &view);
+                        host.refresh_slot(index, list);
                         if let Some(u) = used {
                             readable(list, u, &view);
                         }
