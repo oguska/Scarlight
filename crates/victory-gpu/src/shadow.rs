@@ -320,8 +320,10 @@ impl Shadow {
         let start = self.start as usize;
         title.resize(to - from, 0);
         if !crate::host::read_into((start + from) as *const u8, title) {
-            // Not all of it is mapped: piece by piece.
-            if to - from <= PIECE {
+            // Not all of it is mapped: piece by piece. A short range can
+            // still straddle a 64 KiB piece boundary.
+            let first = (PIECE - (start + from) % PIECE).min(to - from);
+            if first == to - from {
                 return 0;
             }
             let mut written = 0;
