@@ -532,7 +532,15 @@ impl State {
         }
         #[cfg(feature = "diagnostics")]
         crate::producers::set_reader(&p.name);
-        self.refresh_heap(list, compute);
+        let uses_heap = p.stages.iter().any(|s| {
+            s.translated()
+                .used
+                .iter()
+                .any(|u| u.root == RootType::ResourceHeap)
+        });
+        if uses_heap {
+            self.refresh_heap(list, compute);
+        }
         for stage in &p.stages {
             let t = stage.translated();
             for u in t.used.iter().filter(|u| u.root == RootType::ResourceHeap) {
@@ -1008,19 +1016,14 @@ impl State {
                 };
                 let placed = crate::descriptor::host::placed_texture(&view);
                 let v = placed.as_ref().unwrap_or(&view);
-                let kind = match v {
-                    View::Shader(..) => ResourceType::Srv,
-                    View::Unordered(..) => ResourceType::Uav,
-                    _ => continue,
-                };
+                if !matches!(v, View::Shader(..) | View::Unordered(..)) {
+                    continue;
+                }
                 if let Some((address, len)) = crate::descriptor::host::buffer_range(v)
                     && len > 0
                     && let Some(shadow) = crate::shadow::find(address, len)
                 {
                     shadow.refresh(list, address, len);
-                    if kind == ResourceType::Uav {
-                        shadow.gpu_writes(list, address, len);
-                    }
                 }
                 if let View::Shader(resource, _) = v
                     && let Some(t) = crate::resource::host_resource(*resource as This)
