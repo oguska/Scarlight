@@ -3733,6 +3733,14 @@ impl<'a> Lower<'a> {
         };
         let c = self.cur;
         let t = self.s.m.bool(true);
+        // A save form AND/OR/XORs (or ANDN2/ORN2s) the source with the EXEC it
+        // reads, and its destination saves that same old EXEC, so neither is
+        // the source nor every lane.
+        let old_exec = if save {
+            Some(self.exec_bit(inst)?)
+        } else {
+            None
+        };
         let x = match op {
             MaskOp::Move => self.mask_op_bit(inst, 0)?,
             MaskOp::Not => {
@@ -3745,12 +3753,14 @@ impl<'a> Lower<'a> {
                 let b = self.mask_op_bit(inst, 1)?;
                 self.s.m.select(c, cond, a, b)
             }
-            // The saveexec forms AND/OR/XOR with EXEC itself, which every
-            // lane here is in: the source's bit is the result's.
-            _ if save => self.mask_op_bit(inst, 0)?,
+            // The saveexec/wrexec forms combine the source with the EXEC the
+            // instruction reads (not necessarily full).
             _ => {
                 let a = self.mask_op_bit(inst, 0)?;
-                let b = self.mask_op_bit(inst, 1)?;
+                let b = match old_exec {
+                    Some(e) => e,
+                    None => self.mask_op_bit(inst, 1)?,
+                };
                 let b = if matches!(op, MaskOp::AndNot | MaskOp::OrNot) {
                     self.s.m.bin(c, Bin::Xor, b, t)
                 } else {
@@ -3769,14 +3779,15 @@ impl<'a> Lower<'a> {
         } else {
             x
         };
-        // A saved EXEC holds the lanes here (every lane in the block runs):
-        // the new EXEC holds the op's.
+        // A saved destination holds the EXEC the instruction read (each lane
+        // its own bit, false for a lane that was not in it); EXEC holds the
+        // op's result.
         let exec_write = inst.write(Reg::S(EXEC));
         for &(_, v) in &inst.writes {
             let bit = if Some(v) == exec_write {
                 x
-            } else if save {
-                t
+            } else if let Some(e) = old_exec {
+                e
             } else {
                 x
             };
@@ -3786,6 +3797,26 @@ impl<'a> Lower<'a> {
             self.vals.entry(v).or_insert(Val::Missing(LANE_MASK));
         }
         Ok(true)
+    }
+
+    /// This lane's bit of the EXEC the instruction reads: the mask whose value
+    /// the EXEC register holds, else every lane (an EXEC not written since
+    /// entry is full).
+    fn exec_bit(&mut self, inst: &Inst) -> Result<V, Why> {
+        let Some(v) = inst.read(Reg::S(EXEC)) else {
+            return Ok(self.s.m.bool(true));
+        };
+        if let Some(&bit) = self.lane_bits.get(&v) {
+            return Ok(bit);
+        }
+        if let Some(&m) = self.x.st.masks.get(&v) {
+            let c = self.cur;
+            return self.boolean(m, c);
+        }
+        if self.x.st.highs.contains_key(&v) {
+            return Err(LANE_MASK);
+        }
+        Ok(self.s.m.bool(true))
     }
 
     /// The lane bit of source `k` of a mask op: the bit of the mask whose
