@@ -1049,6 +1049,9 @@ fn run_wave_cs(wave64: bool, body: &[u32], mut check: impl FnMut(&str, &[u32])) 
         outputs: Vec::new(),
         prims: Vec::new(),
         mesh_stride: 0,
+        target: super::Target::ANY,
+        console_cf: false,
+        per_lane_only: false,
     })
     .expect("lower");
 
@@ -1060,6 +1063,7 @@ fn run_wave_cs(wave64: bool, body: &[u32], mut check: impl FnMut(&str, &[u32])) 
         static_samplers: Vec::new(),
         root_cbvs: lowered.root_cbvs,
         root_srvs: lowered.root_srvs,
+        stride_table: lowered.stride_table,
     };
 
     if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
@@ -1340,10 +1344,13 @@ fn lds_byte_and_half_writes_keep_the_rest_of_the_dword() {
     );
 }
 
+/// (opcode, offset, the read's result from s0 in the low dword)
+type HalfRead = (u8, u16, fn(u32) -> u32);
+
 #[test]
 fn lds_byte_and_half_reads_extend_as_the_console() {
     // [0] = s0, then each read of it.
-    let reads: [(u8, u16, fn(u32) -> u32); 6] = [
+    let reads: [HalfRead; 6] = [
         (DS_READ_U8, 1, |w| w >> 8 & 0xFF),
         (DS_READ_I8, 1, |w| (w >> 8) as u8 as i8 as i32 as u32),
         (DS_READ_U16, 2, |w| w >> 16),
