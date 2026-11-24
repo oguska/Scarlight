@@ -1277,13 +1277,25 @@ fn readable(list: &HostList, u: &UsedResource, view: &View) {
     let view = placed.as_ref().unwrap_or(view);
     // Buffer views read title memory: their range is copied at submission;
     // what shaders write through unordered access goes back to it after.
+    // A view off its buffer copy's elements uses its own copy of just its
+    // bytes: a host copy like any other, so its own refresh brings it up to
+    // date from title memory (which the last submission's copy-back already
+    // wrote), and what shaders write in it goes back from it.
+    // shortcut: such a copy is brought up to date from title memory when the
+    // submission is prepared, so it does not see what a shader of the same
+    // submission wrote in that range through another view, nor do they see
+    // its writes until the next one. Getting that right needs every host
+    // buffer's state tracked across the submission (PR #334), so that the
+    // bytes can be copied on the GPU inside the list instead.
     if let Some((address, len)) = crate::descriptor::host::buffer_range(view)
         && len > 0
-        && let Some(shadow) = crate::shadow::find(address, len)
+        && let Some(copy) = crate::shadow::aligned_existing(address, len)
+            .filter(|_| crate::descriptor::host::off_element(view))
+            .or_else(|| crate::shadow::find(address, len))
     {
-        shadow.refresh(list, address, len);
+        copy.refresh(list, address, len);
         if u.kind == ResourceType::Uav {
-            shadow.gpu_writes(list, address, len);
+            copy.gpu_writes(list, address, len);
         }
     }
     match (view, u.kind) {
