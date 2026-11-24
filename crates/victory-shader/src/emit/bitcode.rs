@@ -211,6 +211,13 @@ pub(crate) struct Module {
 }
 
 impl Module {
+    /// The instructions in the module so far: what a test checks the shape of
+    /// an emitted program by.
+    #[cfg(test)]
+    pub(crate) fn instructions(&self) -> usize {
+        self.insts.len()
+    }
+
     fn ty(&mut self, def: TypeDef) -> Ty {
         if let Some(&t) = self.type_ids.get(&def) {
             return Ty(t);

@@ -4882,6 +4882,21 @@ impl HostList {
             .push(Step::Fill(dst as usize, src as usize, len));
     }
 
+    /// Copies `len` bytes of title memory at `src` into `dst` (mapped inside
+    /// `upload`) when the list is submitted, keeping `upload` alive until the
+    /// list is reset.
+    pub(crate) fn defer_fill_upload(
+        &self,
+        upload: ID3D12Resource,
+        dst: *mut u8,
+        src: *const u8,
+        len: usize,
+    ) {
+        let mut d = self.deferred();
+        d.uploads.push(upload);
+        d.copies.push(Step::Fill(dst as usize, src as usize, len));
+    }
+
     /// Brings `[address, address + len)` of a buffer's host copy up to date
     /// when the list is submitted (once per range until a title copy
     /// intervenes), keeping the copy alive until the list is reset.
