@@ -6085,7 +6085,10 @@ impl<'a> Lower<'a> {
                                 let hi = self.s.m.i32(if (x as i32) < 0 { u32::MAX } else { 0 });
                                 self.lane_bit(c, lo, Some(hi))
                             } else {
-                                return Err("a constant lane mask");
+                                // A constant that is a mask of console lanes
+                                // only lowers once the retry enables
+                                // `numeric_selects`, so ask for it.
+                                return Err(UNTRACKED_SELECT);
                             }
                         }
                         _ => return Err(UNTRACKED_SELECT),
