@@ -16,6 +16,7 @@
 //! guess; a pass the title runs only once and whose pipeline takes longer
 //! is lost.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -28,6 +29,7 @@ pub(crate) struct Pending {
     shaders: Vec<Arc<Shader>>,
     pub(crate) graphics: Option<Box<GraphicsState>>,
     queued: AtomicBool,
+    urgent: AtomicBool,
     made: OnceLock<Option<HostPipeline>>,
     /// What identifies it across runs (shader containers and state), and
     /// whether a draw has used it yet.
@@ -53,6 +55,7 @@ impl Pending {
             shaders,
             graphics,
             queued: AtomicBool::new(false),
+            urgent: AtomicBool::new(false),
             made: OnceLock::new(),
             key: key.finalize().to_hex()[..32].to_owned(),
             used: AtomicBool::new(false),
@@ -91,6 +94,43 @@ pub(crate) fn missing(p: &Pending) -> Option<String> {
     }
 }
 
+struct WorkQueue {
+    urgent: VecDeque<Arc<Pending>>,
+    background: VecDeque<Arc<Pending>>,
+}
+
+impl WorkQueue {
+    fn enqueue(&mut self, p: Arc<Pending>, urgent: bool) {
+        if urgent {
+            self.urgent.push_back(p);
+        } else {
+            self.background.push_back(p);
+        }
+    }
+
+    fn promote(&mut self, p: &Arc<Pending>) -> bool {
+        if let Some(pos) = self.background.iter().position(|q| Arc::ptr_eq(q, p))
+            && let Some(item) = self.background.remove(pos)
+        {
+            self.urgent.push_back(item);
+            return true;
+        }
+        false
+    }
+
+    fn pop(&mut self) -> Option<Arc<Pending>> {
+        self.urgent.pop_front().or_else(|| self.background.pop_front())
+    }
+}
+
+static WORK: (Mutex<WorkQueue>, Condvar) = (
+    Mutex::new(WorkQueue {
+        urgent: VecDeque::new(),
+        background: VecDeque::new(),
+    }),
+    Condvar::new(),
+);
+
 /// Signalled whenever a worker has made a pipeline.
 static DONE: (Mutex<()>, Condvar) = (Mutex::new(()), Condvar::new());
 
@@ -109,7 +149,7 @@ pub(crate) fn waiting() -> u64 {
 /// queues it on first use.
 pub(crate) fn ready(p: &Arc<Pending>) -> Option<&HostPipeline> {
     if p.made.get().is_none() {
-        start(p);
+        start(p, true);
         wait(p, crate::frame::current());
     }
     let made = p.made.get()?.as_ref();
@@ -119,11 +159,29 @@ pub(crate) fn ready(p: &Arc<Pending>) -> Option<&HostPipeline> {
     made
 }
 
-/// Queues `p` for the workers, once.
-fn start(p: &Arc<Pending>) {
-    if !p.queued.swap(true, Ordering::Relaxed) {
+/// Queues `p` for the workers, once; urgent draws jump ahead of early
+/// pre-warming work and promote already-queued background entries.
+fn start(p: &Arc<Pending>, urgent: bool) {
+    if urgent {
+        p.urgent.store(true, Ordering::Release);
+    }
+    if !p.queued.swap(true, Ordering::AcqRel) {
         PEAK.fetch_max(WAITING.fetch_add(1, Ordering::Relaxed) + 1, Ordering::Relaxed);
-        queue(p.clone());
+        if ensure_workers() {
+            let (lock, ready) = &WORK;
+            let mut q = lock.lock().unwrap_or_else(|e| e.into_inner());
+            let urgent = urgent || p.urgent.load(Ordering::Acquire);
+            q.enqueue(p.clone(), urgent);
+            ready.notify_one();
+        } else {
+            p.make();
+            WAITING.fetch_sub(1, Ordering::Relaxed);
+        }
+    } else if urgent && p.made.get().is_none() {
+        let (lock, ready) = &WORK;
+        if lock.lock().unwrap_or_else(|e| e.into_inner()).promote(p) {
+            ready.notify_one();
+        }
     }
 }
 
@@ -132,7 +190,7 @@ fn start(p: &Arc<Pending>) {
 pub(crate) fn early(p: &Arc<Pending>) {
     if !p.shaders.is_empty() && super::library::wanted_early(&p.key) {
         super::library::EARLY.fetch_add(1, Ordering::Relaxed);
-        start(p);
+        start(p, false);
     }
 }
 
@@ -144,6 +202,9 @@ fn wait(p: &Pending, frame: u64) {
         WAITED_US.store(0, Ordering::Relaxed);
     }
     let left = BUDGET.saturating_sub(Duration::from_micros(WAITED_US.load(Ordering::Relaxed)));
+    if left.is_zero() {
+        return;
+    }
     let started = Instant::now();
     let (lock, done) = &DONE;
     let mut held = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -157,16 +218,13 @@ fn wait(p: &Pending, frame: u64) {
     WAITED_US.fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
 }
 
-/// Hands `p` to the workers (half the logical processors, 2 to 8), started
-/// on first use.
-fn queue(p: Arc<Pending>) {
-    static SENDER: OnceLock<std::sync::mpsc::Sender<Arc<Pending>>> = OnceLock::new();
-    let sender = SENDER.get_or_init(|| {
-        let (sender, receiver) = std::sync::mpsc::channel::<Arc<Pending>>();
-        let receiver = Arc::new(Mutex::new(receiver));
+/// Starts the pipeline workers (half the logical processors, 2 to 8) once.
+fn ensure_workers() -> bool {
+    static WORKERS: OnceLock<bool> = OnceLock::new();
+    *WORKERS.get_or_init(|| {
         let workers = std::thread::available_parallelism().map_or(2, |n| (n.get() / 2).clamp(2, 8));
+        let mut started = 0;
         for i in 0..workers {
-            let receiver = receiver.clone();
             let spawned = std::thread::Builder::new()
                 .name(format!("victory-pipelines-{i}"))
                 .spawn(move || {
@@ -177,8 +235,16 @@ fn queue(p: Arc<Pending>) {
                         let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
                     }
                     loop {
-                        let next = receiver.lock().unwrap_or_else(|e| e.into_inner()).recv();
-                        let Ok(p) = next else { return };
+                        let p = {
+                            let (lock, ready) = &WORK;
+                            let mut q = lock.lock().unwrap_or_else(|e| e.into_inner());
+                            loop {
+                                if let Some(p) = q.pop() {
+                                    break p;
+                                }
+                                q = ready.wait(q).unwrap_or_else(|e| e.into_inner());
+                            }
+                        };
                         p.make();
                         if WAITING.fetch_sub(1, Ordering::Relaxed) == 1 {
                             drained();
@@ -187,17 +253,13 @@ fn queue(p: Arc<Pending>) {
                         }
                     }
                 });
-            if let Err(e) = spawned {
-                tracing::warn!(error = %e, "no pipeline worker");
+            match spawned {
+                Ok(_) => started += 1,
+                Err(e) => tracing::warn!(error = %e, "no pipeline worker"),
             }
         }
-        sender
-    });
-    if let Err(e) = sender.send(p) {
-        // No worker: made here instead.
-        e.0.make();
-        WAITING.fetch_sub(1, Ordering::Relaxed);
-    }
+        started > 0
+    })
 }
 
 /// The most pipelines waiting at once since the workers last ran out.
@@ -234,5 +296,25 @@ mod tests {
             std::thread::yield_now();
         }
         assert!(matches!(p.made.get(), Some(None)));
+    }
+
+    #[test]
+    fn urgent_and_promoted_pipelines_run_before_background() {
+        let bg1 = Arc::new(Pending::new(Vec::new(), None));
+        let bg2 = Arc::new(Pending::new(Vec::new(), None));
+        let urg = Arc::new(Pending::new(Vec::new(), None));
+        let mut q = WorkQueue {
+            urgent: VecDeque::new(),
+            background: VecDeque::new(),
+        };
+        q.enqueue(bg1.clone(), false);
+        q.enqueue(bg2.clone(), false);
+        q.enqueue(urg.clone(), true);
+        assert!(q.promote(&bg2));
+        assert!(!q.promote(&bg2));
+        assert!(Arc::ptr_eq(&q.pop().unwrap(), &urg));
+        assert!(Arc::ptr_eq(&q.pop().unwrap(), &bg2));
+        assert!(Arc::ptr_eq(&q.pop().unwrap(), &bg1));
+        assert!(q.pop().is_none());
     }
 }
