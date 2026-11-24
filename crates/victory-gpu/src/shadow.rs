@@ -152,7 +152,7 @@ impl Shadow {
         list.defer_refresh(self, address as usize, len as usize);
     }
 
-    fn new(buffer: ID3D12Resource, data: *mut u8, gpu: u64, start: u64, len: u64) -> Shadow {
+    pub(crate) fn new(buffer: ID3D12Resource, data: *mut u8, gpu: u64, start: u64, len: u64) -> Shadow {
         let pages = (start + len).div_ceil(PAGE as u64) - start / PAGE as u64;
         Shadow {
             buffer,
@@ -263,6 +263,11 @@ impl Shadow {
             let host_at = |a: usize, b: usize| unsafe { std::slice::from_raw_parts(self.data.add(a), b - a) };
             let mut title = Vec::new();
             let mut synced = Vec::new();
+            // A run is read whole before any of it is written. Two views of
+            // one physical page in the range would each be read before the
+            // other's GPU bytes are put in, and the second write would undo
+            // the first: such a range goes a page at a time.
+            let aliased = crate::watch::has_aliases(start + from, start + to);
             let mut at = from;
             while at < to {
                 let n = (PAGE - (start + at) % PAGE).min(to - at);
@@ -274,7 +279,7 @@ impl Shadow {
                 // Extend the run over the consecutive pages that changed too:
                 // one read and one write for the lot.
                 let mut end = at + n;
-                while end < to {
+                while end < to && !aliased {
                     let next = (PAGE - (start + end) % PAGE).min(to - end);
                     let old = &before[end - from..end - from + next];
                     if !unchanged.differs(start + end, host_at(end, end + next), old) {
@@ -493,9 +498,8 @@ impl Shadow {
                     Ordering::Relaxed,
                     Ordering::Relaxed,
                 );
-            } else {
-                return self.copy(from, to);
             }
+            // Either way this range is copied whole, without a watch.
         }
         #[cfg(feature = "diagnostics")]
         crate::copystat::add(crate::copystat::C::Unverified, (to - from) as u64);

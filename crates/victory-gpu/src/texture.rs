@@ -242,7 +242,7 @@ impl Staging {
     pub(crate) fn refresh(&self) {
         use std::sync::atomic::Ordering::Relaxed;
         let started = std::time::Instant::now();
-        let read = self.refresh_now();
+        let (read, _unchanged) = self.refresh_now();
         let preparing = &crate::host::PREPARING;
         let us = started.elapsed().as_micros() as u64;
         preparing[2].fetch_add(us, Relaxed);
@@ -253,15 +253,17 @@ impl Staging {
         {
             use crate::copystat::{C, add};
             add(C::TexChecks, 1);
-            if read == 0 {
+            if _unchanged {
                 add(C::TexIdle, 1);
                 add(C::TexIdleBytes, self.layout.size);
             }
         }
     }
 
-    /// Returns the bytes of title memory read.
-    fn refresh_now(&self) -> usize {
+    /// Returns the bytes of title memory read, and whether the check found
+    /// the texture unchanged (a clean watch or equal hashes: not a texture
+    /// whose memory is unavailable).
+    fn refresh_now(&self) -> (usize, bool) {
         let size = self.layout.size as usize;
         let start = self.memory as usize;
         let mut last = self.last.lock().unwrap_or_else(|e| e.into_inner());
@@ -269,9 +271,13 @@ impl Staging {
         if let Some((now, written)) = crate::watch::writes(start, start + size, false) {
             let before = last.asked;
             if before != 0 && written.iter().all(|&(_, w)| w <= before) {
-                return 0;
+                return (0, true);
             }
             last.asked = now;
+            // The staging buffer now holds bytes the page hashes do not
+            // describe: a later hash check must detile every subresource,
+            // not only those of the pages that differ from the old hashes.
+            last.hashes.clear();
             #[cfg(feature = "diagnostics")]
             let started = std::time::Instant::now();
             // Read through the copy, which stands unmapped pages: memory of
@@ -286,7 +292,7 @@ impl Staging {
                     add(C::TexWatched, size as u64);
                     add(C::TexReadUs, started.elapsed().as_micros() as u64);
                 }
-                return size;
+                return (size, false);
             }
             // The rest of the memory is as last read: read again only the
             // pages written since, and detile what they hold.
@@ -316,7 +322,7 @@ impl Staging {
             self.detile(&last.read, Some(&changed));
             #[cfg(feature = "diagnostics")]
             crate::copystat::add(crate::copystat::C::TexWatched, read as u64);
-            return read;
+            return (read, false);
         }
         if !committed(self.memory, size) {
             #[cfg(feature = "diagnostics")]
@@ -326,7 +332,7 @@ impl Staging {
                 desc = ?self.layout.desc,
                 "a sampled texture's memory is not committed"
             );
-            return 0;
+            return (0, false);
         }
         // SAFETY: committed memory of the texture's layout size.
         let tiled = unsafe { std::slice::from_raw_parts(self.memory, size) };
@@ -345,14 +351,14 @@ impl Staging {
             started.elapsed().as_micros() as u64,
         );
         if last.hashes == last.scratch {
-            return size;
+            return (size, true);
         }
         let changed = changed_pages(&last.hashes, &last.scratch, page, size);
         self.detile(tiled, changed.as_deref());
         std::mem::swap(&mut last.hashes, &mut last.scratch);
         #[cfg(feature = "diagnostics")]
         crate::copystat::add(crate::copystat::C::TexChanged, size as u64);
-        size
+        (size, false)
     }
 
     /// Each subresource's ranges of the memory, made on first use: the
@@ -524,6 +530,15 @@ fn staging(resource: This, texture: &ID3D12Resource) -> Option<Arc<Staging>> {
 #[allow(clippy::single_range_in_vec_init)]
 mod tests {
     use super::{changed_pages, overlaps, page_ranges};
+
+    /// Hashes cleared by a watched detile are "not the same parts": every
+    /// subresource is detiled at the next hash check.
+    #[test]
+    fn cleared_hashes_change_every_subresource() {
+        let now = [blake3::hash(b"a"), blake3::hash(b"b")];
+        assert_eq!(changed_pages(&[], &now, 4, 8), None);
+        assert_eq!(changed_pages(&now, &now, 4, 8), Some(vec![]));
+    }
 
     #[test]
     fn ranges_overlap_only_when_they_share_a_byte() {

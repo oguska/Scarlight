@@ -182,38 +182,8 @@ the asset-policy hook checks it (`docs/asset-policy.md`).
 
 ## License and credits
 
-<<<<<<< HEAD
-| Variable | Effect |
-|----------|--------|
-| `VICTORY_LOG=<target>=debug,...` | debug and trace output |
-| `VICTORY_STACKS=20,60` | every thread's stack at those seconds |
-| `VICTORY_WATCH=<rva>,...` | logs a title u32 when it changes |
-| `VICTORY_KEYS=30:Enter,35:X` | presses keys at those seconds, focus or not |
-| `VICTORY_CRASH_SAVE=<rva>:<len>,...` | saves title memory to the cache folder on a crash |
-| `VICTORY_CAPTURE=<dir>` | saves presented frames (powers of two, or `VICTORY_CAPTURE_FRAMES=<list>`) |
-| `VICTORY_DUMP_TARGETS=1` | with the two above, saves every render target of those frames |
-| `VICTORY_D3D12_DEBUG=1` | host debug layer |
-| `VICTORY_D3D12_GBV=1` | with the above, GPU-based validation (bad descriptor use reported, not faulted; slow) |
-| `VICTORY_D3D12_DRED=1` | on a GPU failure, the allocation hit and the commands in flight |
-| `VICTORY_SKIP_PIPELINES=<hash>,...` | omit draws and dispatches, including indirect ones, whose pipeline contains a listed 16-digit shader hash |
-| `VICTORY_SKIP_WAVE64=mesh,compute` | omit draws and dispatches whose pipeline has a program of a listed stage written for 64-lane waves (on hosts with 32-lane waves, such as NVIDIA's, these can hang the GPU) |
-| `VICTORY_PIPELINE_WAIT_MS=<n>` | milliseconds each title frame may spend waiting for pipelines being made before a draw or dispatch whose pipeline is not ready is dropped (default 500; 0 never waits, so first uses are dropped until their pipeline is made) — any build, not just this one |
-| `VICTORY_GPU_TIMING=1` | with the above, each list of a submission run and timed on its own; slow lists logged with their slowest commands |
-| `VICTORY_D3D12_WARP=1` | host device on the software adapter (slow; cannot reset the driver) |
-| `VICTORY_SHADER_LOOP_LIMIT=<n>` | translated shader loops stop after `n` iterations per lane instead of 2^20 (own shader cache entries); if a lower `n` makes world frames much faster, loops hitting the limit are what makes them slow |
-| `VICTORY_AUDIO_CAPTURE=<file.wav>` | records what the title plays (our process only) |
-| `VICTORY_XMA_DUMP=<dir>` | saves the first 32 XMA voices' context and input |
-
-Every build appends crashes and host GPU failures to `crashes.log` in the
-title's data folder.
-
-## License
-
-GPL-3.0-or-later. See [LICENSE](LICENSE).
-=======
 GPL-3.0-or-later; see [LICENSE](LICENSE). Scarlight is derived from
 [VIctory](https://github.com/Marvisak/VIctory) by Marvis and its contributors, and keeps their
 commit history. Thanks to the authors listed in [INTEGRATION.md](INTEGRATION.md),
 [JMAN730/victory](https://github.com/JMAN730/victory), and everyone whose fixes made the world
 load. Architecture overview: [docs/architecture.md](docs/architecture.md).
->>>>>>> r1122

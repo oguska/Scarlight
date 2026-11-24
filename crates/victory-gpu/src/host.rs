@@ -1403,6 +1403,9 @@ impl Batch {
         self.textures.clear();
         match written {
             None => self.fresh.clear(),
+            // A destination another view shows is also written there, at
+            // addresses this range does not name: nothing is fresh then.
+            Some((from, to)) if crate::watch::has_aliases(from, to) => self.fresh.clear(),
             Some((from, to)) => {
                 for (_, ranges) in &mut self.fresh {
                     ranges.retain(|&(a, b)| b <= from || to <= a);
@@ -2391,6 +2394,35 @@ mod batch {   // Batch::texture_due lives here; `mod tests` is already taken at 
         assert!(!batch.texture_due(&a));
         assert!(!batch.texture_due(&a.clone()));
         assert!(!batch.texture_due(&b));
+    }
+
+    /// A copy into a destination that another view of the same pages shows
+    /// writes those pages through addresses its range does not name: no
+    /// copy is fresh after it. A destination nothing aliases only drops the
+    /// ranges it overlaps.
+    #[test]
+    fn a_copy_into_an_aliased_destination_makes_nothing_fresh() {
+        let Some(host) = crate::host::host() else { return };
+        let mut title = [0u8; 8];
+        let start = title.as_mut_ptr() as usize;
+        let (buffer, data) = host.shared_buffer(8).unwrap();
+        let shadow = Arc::new(crate::shadow::Shadow::new(buffer, data, 0, start as u64, 8));
+        let block = crate::watch::PAGE;
+        // Two blocks of address space far from the title buffer, said to show
+        // the same pages (the runtime's alias lookup).
+        let (a, b) = (1usize << 40, (1usize << 40) + 8 * block);
+        let mut batch = Batch::default();
+        batch.note_fresh(&shadow, &[(start, start + 8)]);
+        assert!(batch.is_fresh(&shadow, (start, start + 8)));
+        // Not aliased: a write elsewhere leaves it fresh.
+        crate::watch::tests::set_alias_pair(0, 0);
+        batch.title_written(Some((a, a + 16)));
+        assert!(batch.is_fresh(&shadow, (start, start + 8)));
+        // Aliased: the write reaches pages the range does not name.
+        crate::watch::tests::set_alias_pair(a, b);
+        batch.title_written(Some((a, a + 16)));
+        assert!(!batch.is_fresh(&shadow, (start, start + 8)));
+        crate::watch::tests::set_alias_pair(0, 0);
     }
 
     #[test]

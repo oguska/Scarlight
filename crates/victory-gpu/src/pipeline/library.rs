@@ -139,11 +139,20 @@ pub(crate) fn pipeline(
     let pso = create()?;
     MADE.fetch_add(1, Ordering::Relaxed);
     let mut l = library.lock().unwrap_or_else(|e| e.into_inner());
-    if l.stored.insert(name.to_owned()) {
+    if !l.stored.contains(name) {
         // SAFETY: a live pipeline; a name already stored in an earlier run
         // is refused, which leaves the library as it was.
-        if unsafe { l.library.StorePipeline(PCWSTR(wide.as_ptr()), &pso) }.is_ok() {
-            l.added += 1;
+        match unsafe { l.library.StorePipeline(PCWSTR(wide.as_ptr()), &pso) } {
+            Ok(()) => {
+                l.stored.insert(name.to_owned());
+                l.added += 1;
+            }
+            // Already there (E_INVALIDARG): not asked again this run. A
+            // failure for lack of memory is, once there is some.
+            Err(e) if e.code() == windows::Win32::Foundation::E_INVALIDARG => {
+                l.stored.insert(name.to_owned());
+            }
+            Err(_) => {}
         }
     }
     Ok(pso)

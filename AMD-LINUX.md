@@ -72,3 +72,6 @@ cargo build --profile diag -p victory --features diagnostics   # target\diag\vic
 | `VICTORY_SHADER_LOOP_LIMIT=<n>` | translated shader loops stop after `n` iterations per lane instead of 2^20 (own shader cache entries); if a lower `n` makes world frames much faster, loops hitting the limit are what makes them slow |
 | `VICTORY_AUDIO_CAPTURE=<file.wav>` | records what the title plays (our process only) |
 | `VICTORY_XMA_DUMP=<dir>` | saves the first 32 XMA voices' context and input |
+| `VICTORY_PIPELINE_WAIT_MS=<n>` | milliseconds each title frame may spend waiting for pipelines being made before a draw or dispatch whose pipeline is not ready is dropped (default 500; 0 never waits, so first uses are dropped until their pipeline is made) |
+| `VICTORY_DEBUG_PS=1` | graphics pipelines draw depth-tested geometry with one debug pixel shader, so a draw whose shader does not translate still paints |
+| `VICTORY_PS_FALLBACK=0` | turns off the fallback to that pixel shader for a pixel stage that does not translate (on by default) |

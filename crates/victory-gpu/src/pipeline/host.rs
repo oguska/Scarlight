@@ -997,15 +997,13 @@ mod tests {
             std::ptr::addr_of_mut!((*p).BackFace).write_unaligned(base.BackFace);
             p.read_unaligned()
         };
+        // The cleaned values hold the title's fields, whatever its padding
+        // held. (Their padding bytes are not compared: a returned struct is
+        // moved by value, and reading padding as `u8` reads uninitialized
+        // memory.)
         let a = clean_depth(dirty);
         let b = clean_depth(base);
-        // SAFETY: inspecting raw bytes of plain-old-data structs.
-        let (ba, bb) = unsafe {
-            (
-                std::slice::from_raw_parts((&raw const a).cast::<u8>(), size_of::<D3D12_DEPTH_STENCIL_DESC>()),
-                std::slice::from_raw_parts((&raw const b).cast::<u8>(), size_of::<D3D12_DEPTH_STENCIL_DESC>()),
-            )
-        };
-        assert_eq!(ba, bb);
+        assert_eq!(a, b);
+        assert_eq!(a, base);
     }
 }

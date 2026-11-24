@@ -842,6 +842,9 @@ fn map(physical: &mut Physical, base: usize, len: usize, slice: Slice) -> bool {
     static LOOKUP: std::sync::Once = std::sync::Once::new();
     LOOKUP.call_once(|| victory_gpu::set_alias_lookup(other_views));
     note_aliases(base, len, &slice, true);
+    // Views of these pages that were guarded before this one existed cannot
+    // see writes through it: the GPU side opens them (`victory_gpu`).
+    victory_gpu::title_memory_aliased(base, len);
     physical.views.insert(base, (len, slice));
     true
 }
