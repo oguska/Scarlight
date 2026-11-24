@@ -51,13 +51,13 @@ upstream. Tested setup and measurements: [AMD-LINUX.md](AMD-LINUX.md).
 
 | World shaders | Full archive | Best world fps | Furthest |
 |:---:|:---:|:---:|:---:|
-| **700 / 768** offline on RADV | **24,073 / 25,529** translated | **0.45** on Scarlight builds | World loads and plays audio; picture mostly black |
+| **720 / 768** offline on RADV | **24,073 / 25,529** translated | **0.45** on Scarlight builds | World loads and plays audio; picture mostly black |
 
 *0.6 fps with HUD and minimap reached is VIctory #994 as-is with its debug pixel shader, not a Scarlight build.*
 
 </div>
 
-Last updated: 24 Nov 2026, Scarlight `858e220`.
+Last updated: 24 Nov 2026, Scarlight `main after #11`.
 
 ### Milestones
 
@@ -66,7 +66,7 @@ Last updated: 24 Nov 2026, Scarlight `858e220`.
 | ✅ | Boots | Boots into the title's own menus |
 | ✅ | Menus | 30 fps, drawn and interactive |
 | ✅ | Loads world | World streams in and the title's audio plays |
-| 🟡 | World picture | Mostly black: 68 of 768 world programs still skip their draws |
+| 🟡 | World picture | Mostly black: 48 of 768 world programs still skip their draws |
 | ❌ | Playable | 0.45 fps and a black picture: no real gameplay |
 
 ### Shader translation
@@ -74,9 +74,9 @@ Last updated: 24 Nov 2026, Scarlight `858e220`.
 | Programs | Translated | Total | Progress |
 |---|---|---|---|
 | **All programs** | **24,073** | **25,529** | `█████████░ 94%` |
-| World set, translate → SPIR-V → RADV pipeline | 700 | 768 | `█████████░ 91%` |
+| World set, translate → SPIR-V → RADV pipeline | 720 | 768 | `█████████░ 94%` |
 
-*Full archive: 25,529 programs, measured at 858e220. World set: 768 programs, each through translation, SPIR-V validation and a real RADV pipeline.*
+*Full archive: 25,529 programs, measured at main after #11. World set: 768 programs, each through translation, SPIR-V validation and a real RADV pipeline.*
 
 ### Performance
 
@@ -91,7 +91,7 @@ Last updated: 24 Nov 2026, Scarlight `858e220`.
 
 | GPU | OS / driver | Furthest stage |
 |---|---|---|
-| RX 9070 XT (RDNA4) | CachyOS, Mesa 26.3.1 RADV; GE-Proton11-14 with vkd3d-proton master | World loads and plays audio, picture mostly black; 700 of 768 world programs build a RADV pipeline |
+| RX 9070 XT (RDNA4) | CachyOS, Mesa 26.3.1 RADV; GE-Proton11-14 with vkd3d-proton master | World loads and plays audio, picture mostly black; 720 of 768 world programs build a RADV pipeline |
 
 <!-- state:end -->
 
