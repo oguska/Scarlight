@@ -161,6 +161,11 @@ pub extern "system" fn XMemVirtualAlloc(
             "XMemVirtualAlloc"
         );
     }
+    if !at.is_null() && kind & MEM_COMMIT != 0 {
+        // The committed contents are new and read-write: the GPU side must
+        // not keep the blocks cached as unmapped (or guarded) from before it.
+        victory_gpu::title_memory_remapped(at as usize, size);
+    }
     at
 }
 
