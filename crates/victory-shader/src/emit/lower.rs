@@ -270,6 +270,11 @@ struct Lower<'a> {
     flat: Option<V>,
     /// Mesh: IR blocks whose `s_barrier` is left out.
     no_barrier: HashSet<usize>,
+    /// IR blocks whose `s_barrier` is control-dependent on a non-uniform
+    /// (per-lane) branch: emitting `SYNC_THREAD_GROUP` (bit 1) there
+    /// deadlocks 32-lane hosts when warps diverge, so only the memory fence
+    /// bits are emitted.
+    fence_only_barrier: HashSet<usize>,
     /// Vertex and mesh outputs holding 16-bit values: row, whether two per
     /// dword, and the row packed after it.
     half_outputs: HashMap<u8, (bool, Option<u8>)>,
@@ -667,6 +672,7 @@ impl<'a> Lower<'a> {
                 }
             }
         }
+        let fence_only_barrier = divergent_barriers(p, x.st, &no_barrier);
         Lower {
             s,
             x,
@@ -713,6 +719,7 @@ impl<'a> Lower<'a> {
             xchg: None,
             flat: None,
             no_barrier,
+            fence_only_barrier,
             half_outputs: half_outputs(&x.native.io, &x.outputs),
             mask_data: match x.native.stage {
                 HwStage::Cs => MaskData::Console,
@@ -3035,7 +3042,11 @@ impl<'a> Lower<'a> {
                 // Thread-group sync with a shared-memory fence, and a UAV
                 // fence when the program writes UAVs (the waits before an
                 // s_barrier make those writes visible on the console).
-                let mode = if self.writes_uavs { 1 | 2 | 8 } else { 1 | 8 };
+                // Omit SYNC_THREAD_GROUP (8) when control-dependent on a
+                // per-lane branch, where a 32-lane host deadlocks if one warp
+                // skips the barrier while another waits on it.
+                let sync = if self.fence_only_barrier.contains(&b) { 0 } else { 8 };
+                let mode = sync | 1 | if self.writes_uavs { 2 } else { 0 };
                 let mode = self.s.m.i32(mode);
                 let void = self.s.t.void;
                 self.s
@@ -8643,6 +8654,165 @@ fn image_address_place(k: usize, extras: usize, grads: usize, a16: bool) -> (usi
     (extras + 2 * per.div_ceil(2) + r / 2, Some(r as u32 % 2))
 }
 
+/// IR blocks containing `s_barrier` (not already in `skip`) that are
+/// control-dependent, directly or through other branches, on a non-uniform
+/// (per-lane) branch: whether a thread reaches the barrier then depends on
+/// its lane. Emitting `SYNC_THREAD_GROUP` in such a block deadlocks 32-lane
+/// hosts whenever warps diverge. A per-lane branch that reconverges before
+/// the barrier does not count: the barrier post-dominates both its sides
+/// (or neither, past a later uniform branch that alone decides).
+fn divergent_barriers(
+    p: &crate::ir::Program,
+    st: &crate::structure::Structured,
+    skip: &HashSet<usize>,
+) -> HashSet<usize> {
+    let n = p.blocks.len();
+    let barriers: Vec<usize> = (0..n)
+        .filter(|b| !skip.contains(b) && p.blocks[*b].insts.iter().any(|i| i.name() == "s_barrier"))
+        .collect();
+    if barriers.is_empty() {
+        return HashSet::new();
+    }
+    let divergent: Vec<bool> = (0..n)
+        .map(|u| match st.exits[u] {
+            LaneExit::Branch {
+                when,
+                taken,
+                not_taken,
+            } => {
+                taken != not_taken
+                    && st
+                        .bools
+                        .support(when)
+                        .iter()
+                        .any(|a| !matches!(a, Atom::Uniform(_)))
+            }
+            _ => false,
+        })
+        .collect();
+    if !divergent.contains(&true) {
+        return HashSet::new();
+    }
+    // The CFG with a virtual exit (`n`) after every block that ends the
+    // program.
+    let exit = n;
+    let mut preds: Vec<Vec<usize>> = p.blocks.iter().map(|b| b.preds.clone()).collect();
+    preds.push(
+        (0..n)
+            .filter(|&b| matches!(st.exits[b], LaneExit::End))
+            .collect(),
+    );
+    let mut succs = vec![Vec::new(); n + 1];
+    for (b, ps) in preds.iter().enumerate() {
+        for &pred in ps {
+            succs[pred].push(b);
+        }
+    }
+    let ipdom = post_dominators(&succs, &preds, exit);
+    // `controls[x]`: the branches `x` is directly control-dependent on, the
+    // blocks `a` with a successor `x` post-dominates and `a` itself is not
+    // strictly post-dominated by `x`.
+    let mut controls = vec![Vec::new(); n + 1];
+    for a in 0..n {
+        let Some(stop) = ipdom[a] else {
+            continue;
+        };
+        for &s in &succs[a] {
+            let mut r = s;
+            while r != stop {
+                if !controls[r].contains(&a) {
+                    controls[r].push(a);
+                }
+                match ipdom[r] {
+                    Some(up) if up != r => r = up,
+                    _ => break,
+                }
+            }
+        }
+    }
+    let mut out = HashSet::new();
+    for b in barriers {
+        let mut seen = vec![false; n + 1];
+        let mut stack = vec![b];
+        seen[b] = true;
+        'search: while let Some(cur) = stack.pop() {
+            for &a in &controls[cur] {
+                if divergent[a] {
+                    out.insert(b);
+                    break 'search;
+                }
+                if !seen[a] {
+                    seen[a] = true;
+                    stack.push(a);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Immediate post-dominators over `succs`/`preds` with `exit` as root
+/// (Cooper, Harvey and Kennedy's iteration on the reversed graph); `None`
+/// for a block that never reaches `exit`.
+fn post_dominators(succs: &[Vec<usize>], preds: &[Vec<usize>], exit: usize) -> Vec<Option<usize>> {
+    let m = succs.len();
+    // Postorder of the reversed graph from `exit`.
+    let mut order = Vec::with_capacity(m);
+    let mut seen = vec![false; m];
+    let mut stack = vec![(exit, 0usize)];
+    seen[exit] = true;
+    while let Some(top) = stack.last_mut() {
+        let (b, i) = *top;
+        if let Some(&pred) = preds[b].get(i) {
+            top.1 += 1;
+            if !seen[pred] {
+                seen[pred] = true;
+                stack.push((pred, 0));
+            }
+        } else {
+            order.push(b);
+            stack.pop();
+        }
+    }
+    let mut number = vec![usize::MAX; m];
+    for (k, &b) in order.iter().enumerate() {
+        number[b] = k;
+    }
+    let mut ipdom = vec![None; m];
+    ipdom[exit] = Some(exit);
+    let intersect = |ipdom: &[Option<usize>], mut a: usize, mut b: usize| {
+        while a != b {
+            while number[a] < number[b] {
+                a = ipdom[a].expect("processed");
+            }
+            while number[b] < number[a] {
+                b = ipdom[b].expect("processed");
+            }
+        }
+        a
+    };
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for &b in order.iter().rev() {
+            if b == exit {
+                continue;
+            }
+            let mut new = None;
+            for &s in &succs[b] {
+                if ipdom[s].is_some() {
+                    new = Some(new.map_or(s, |x| intersect(&ipdom, x, s)));
+                }
+            }
+            if new.is_some() && ipdom[b] != new {
+                ipdom[b] = new;
+                changed = true;
+            }
+        }
+    }
+    ipdom
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Lowered, Numeric, Parts, buffer_format, half_shift, image_address_place, lower};
@@ -8693,6 +8863,57 @@ mod tests {
     use crate::{io, ir, resource, structure};
 
     const S_ENDPGM: u32 = 0xBF81_0000;
+
+    /// The blocks of `words` (a wave32 program) whose `s_barrier` loses its
+    /// thread-group sync.
+    fn fence_only(words: &[u32]) -> Vec<usize> {
+        let code: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let p = ir::build(&code, false, 256).unwrap();
+        let st = structure::structure(&p).unwrap();
+        let mut out: Vec<_> = super::divergent_barriers(&p, &st, &Default::default())
+            .into_iter()
+            .collect();
+        out.sort();
+        out
+    }
+
+    // v_cmp_gt_u32 vcc, v0, v1; s_and_saveexec_b32 s0, vcc_lo: a per-lane if.
+    const PER_LANE_IF: [u32; 2] = [0x7D88_0300, 0xBE80_3C6A];
+    // s_or_b32 exec_lo, exec_lo, s0: the if's end.
+    const END_IF: u32 = 0x887E_007E;
+
+    /// A barrier inside a per-lane `if` runs in some lanes only.
+    #[test]
+    fn a_barrier_under_a_per_lane_branch_is_fence_only() {
+        let words = [
+            PER_LANE_IF[0],
+            PER_LANE_IF[1],
+            0xBF88_0001, // s_cbranch_execz over the barrier
+            0xBF8A_0000, // s_barrier
+            END_IF,
+            S_ENDPGM,
+        ];
+        assert_eq!(fence_only(&words).len(), 1);
+    }
+
+    /// A per-lane `if` that ends before a uniform `if` around the barrier
+    /// leaves the barrier to the uniform condition alone: every thread of
+    /// the group reaches it or none does, so it keeps its sync.
+    #[test]
+    fn a_barrier_after_a_reconverged_branch_keeps_its_sync() {
+        let words = [
+            PER_LANE_IF[0],
+            PER_LANE_IF[1],
+            0xBF88_0001, // s_cbranch_execz over the move
+            0x7E04_0300, // v_mov_b32 v2, v0
+            END_IF,
+            0xBF06_8001, // s_cmp_eq_u32 s1, 0
+            0xBF85_0001, // s_cbranch_scc1 over the barrier
+            0xBF8A_0000, // s_barrier
+            S_ENDPGM,
+        ];
+        assert_eq!(fence_only(&words), Vec::<usize>::new());
+    }
 
     /// Whether a synthetic compute program translates with these input registers.
     fn lowers(words: &[u32], rsrc2: u32) -> Result<(), crate::ShaderError> {
