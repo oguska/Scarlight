@@ -46,7 +46,7 @@ Last updated: 24 Nov 2026, Scarlight `fe552e4`.
 | Compute | 2,404 | 2,582 | `█████████░ 93%` |
 | Mesh | 8,396 | 8,713 | `██████████ 96%` |
 | **All programs** | **23,946** | **26,084** | `█████████░ 92%` |
-| World set, translate → SPIR-V → RADV pipeline | 692 | 768 | `█████████░ 92%` |
+| World set, translate → SPIR-V → RADV pipeline | 692 | 768 | `█████████░ 90%` |
 
 *Full archive: 26,084 programs, `translate-main.txt`, 4e7e6a3 (PR #704), 24 Nov 2026. World set: the 751 programs the world actually uses plus the 52-program BVH capture (768 once duplicate containers are skipped), each run through translation, SPIR-V validation and a real RADV pipeline (hub/main `c888a93`, 24 Nov 2026; also the report file `report-20261124-165507.tsv`) — every program that translates also validates and builds a pipeline, so the whole gap is translation. The 555 programs that are neither vertex/pixel, compute nor mesh are not emitted yet and count as untranslated.*
 
