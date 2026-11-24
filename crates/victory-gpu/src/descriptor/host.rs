@@ -571,7 +571,7 @@ impl HostHeap {
                 self.cpu(index),
             )
         };
-        self.keep(index, Some(buffer.clone()));
+        self.keep(index, Kept::Resource(buffer.clone()));
     }
 
     /// Makes slot `index` a raw buffer view that reads zeros.
@@ -594,7 +594,7 @@ impl HostHeap {
                 self.cpu(index),
             )
         };
-        self.keep(index, None);
+        self.keep(index, Kept::Empty);
     }
 
     /// Whether this is a sampler heap.

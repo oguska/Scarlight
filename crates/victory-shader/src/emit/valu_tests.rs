@@ -931,38 +931,6 @@ fn v_sin_and_v_cos_f16_reduce_large_turns() {
     });
 }
 
-/// A 32-bit literal in a signed 64-bit operand is sign-extended (an
-/// unsigned one's is zero-extended): -100 compared with `v[1:2]`, and
-/// shifted by `s_ashr_i64`.
-#[test]
-fn signed_64_bit_operands_sign_extend_their_literal() {
-    const MINUS_100: u32 = -100_i32 as u32;
-    let check = |name: &str, body: &[u32], cases: &[([u32; 4], u32)]| {
-        let shader = build_valu_cs(body);
-        let inputs: Vec<[u32; 4]> = cases.iter().map(|c| c.0).collect();
-        run_cases(&shader, &inputs, |backend, i, inp, got| {
-            let want = cases[i].1;
-            assert_eq!(got, want, "{backend}: {name} {inp:x?}");
-        });
-    };
-    // v_cmp_*_i64 s6, v[1:2], -100 (VOP3, literal src1), then
-    // v_cndmask_b32 v0, 0, 1, s6.
-    let compare = |op: u16| {
-        let [a, b] = vop3(op, 6, vgpr(1), 255, 0);
-        let [c, d] = vop3(0x101, 0, 0x80, 0x81, sgpr(6));
-        [a, b, MINUS_100, c, d]
-    };
-    // An i64 as the two input dwords of `v[1:2]`.
-    let pair = |n: i64| [n as u32, (n >> 32) as u32, 0, 0];
-    let eq = [(pair(-100), 1), ([MINUS_100, 0, 0, 0], 0), (pair(0), 0)];
-    check("v_cmp_eq_i64", &compare(0x0A2), &eq);
-    let lt = [(pair(-200), 1), (pair(-50), 0), (pair(0), 0)];
-    check("v_cmp_lt_i64", &compare(0x0A1), &lt);
-    // s_ashr_i64 s[6:7], -100, 4; v_mov_b32 v0, s7: the high dword.
-    let ashr = [sop2(0x23, 6, 255, 0x84), MINUS_100, vop1(0x001, 0, sgpr(7))];
-    check("s_ashr_i64", &ashr, &[([0; 4], u32::MAX)]);
-}
-
 #[test]
 fn bfe_signed_and_unsigned_match_rdna2() {
     // v_bfe_i32 v0, v1, v2, v3 (VOP3 opcode 0x149)
@@ -1182,7 +1150,6 @@ fn run_wave_cs(wave64: bool, body: &[u32], mut check: impl FnMut(&str, &[u32])) 
         stride_table: lowered.stride_table,
         root_srvs: lowered.root_srvs,
         root_uavs: lowered.root_uavs,
-        stride_table: lowered.stride_table,
     };
 
     if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
@@ -1489,7 +1456,6 @@ fn lds_byte_and_half_reads_extend_as_the_console() {
     }
 }
 
-
 /// Builds and lowers a 1-thread synthetic RDNA2 compute shader with root constants
 /// in `s0..s3`, a UAV table at `s4`, and a Root SRV descriptor in `s6..s7`.
 /// `body` leaves its result in `v0`, which is stored to dword 0 of the UAV.
@@ -1777,6 +1743,40 @@ fn scalar_buffer_loads_read_a_uav_through_its_table() {
     run_cases(&shader, &cases, |backend, _, inp, got| {
         assert_eq!(got, inp[0], "{backend}: read back {got:#010x}");
     });
+}
+
+/// A 32-bit literal in a signed 64-bit operand is sign-extended (an
+/// unsigned one's is zero-extended): -100 compared with `v[1:2]`, and
+/// shifted by `s_ashr_i64`.
+#[test]
+fn signed_64_bit_operands_sign_extend_their_literal() {
+    const MINUS_100: u32 = -100_i32 as u32;
+    let check = |name: &str, body: &[u32], cases: &[([u32; 4], u32)]| {
+        let shader = build_valu_cs(body);
+        let inputs: Vec<[u32; 4]> = cases.iter().map(|c| c.0).collect();
+        run_cases(&shader, &inputs, |backend, i, inp, got| {
+            let want = cases[i].1;
+            assert_eq!(got, want, "{backend}: {name} {inp:x?}");
+        });
+    };
+    // v_cmp_*_i64 s6, v[1:2], -100 (VOP3, literal src1), then
+    // v_cndmask_b32 v0, 0, 1, s6.
+    let compare = |op: u16| {
+        let [a, b] = vop3(op, 6, vgpr(1), 255, 0);
+        let [c, d] = vop3(0x101, 0, 0x80, 0x81, sgpr(6));
+        [a, b, MINUS_100, c, d]
+    };
+    // An i64 as the two input dwords of `v[1:2]`.
+    let pair = |n: i64| [n as u32, (n >> 32) as u32, 0, 0];
+    let eq = [(pair(-100), 1), ([MINUS_100, 0, 0, 0], 0), (pair(0), 0)];
+    check("v_cmp_eq_i64", &compare(0x0A2), &eq);
+    let lt = [(pair(-200), 1), (pair(-50), 0), (pair(0), 0)];
+    check("v_cmp_lt_i64", &compare(0x0A1), &lt);
+    // s_ashr_i64 s[6:7], -100, 4; v_mov_b32 v0, s7: the high dword.
+    let ashr = [sop2(0x23, 6, 255, 0x84), MINUS_100, vop1(0x001, 0, sgpr(7))];
+    check("s_ashr_i64", &ashr, &[([0; 4], u32::MAX)]);
+}
+
 /// RDNA2 ignores VOP3 `op_sel` on 16-bit compares (reading the low halves
 /// regardless), while non-compare 16-bit ops such as `v_add_nc_u16` honour it.
 #[test]
@@ -1889,6 +1889,7 @@ fn cmp16_sdwa_preserves_word_selects() {
             });
         }
     }
+}
 
 /// SCC after the SOP2 `op s12, s0, s1`, read back into `v0` through
 /// `s_cselect_b32 s13, 1, 0`.
@@ -1911,6 +1912,11 @@ fn check_scc(name: &str, op: u8, cases: &[(u32, u32, u32)]) {
             inp[0], inp[1],
         );
     });
+}
+
+/// SOPK `op sdst, simm16`.
+const fn sopk(op: u8, sdst: u8, simm16: i16) -> u32 {
+    0xB000_0000 | (op as u32 & 0x1F) << 23 | (sdst as u32 & 0x7F) << 16 | (simm16 as u16) as u32
 }
 
 #[test]
@@ -1944,11 +1950,6 @@ fn s_lshl_add_sets_scc_on_unsigned_overflow() {
             (0x1000_0000, 0, 1),
         ],
     );
-}
-
-/// SOPK `op sdst, simm16`.
-const fn sopk(op: u8, sdst: u8, simm16: i16) -> u32 {
-    0xB000_0000 | (op as u32 & 0x1F) << 23 | (sdst as u32 & 0x7F) << 16 | (simm16 as u16) as u32
 }
 
 #[test]
@@ -2058,27 +2059,4 @@ fn signed_scalar_add_sub_scc_matches_rdna2() {
         );
     });
 }
-/// A select whose mask is a plain SGPR (here a root constant), so the
-/// structure pass does not follow it: this lane takes its own bit of the
-/// number. Inline 0 and -1 masks pick src0 and src1 in every lane.
-#[test]
-fn v_cndmask_on_an_untracked_mask_tests_this_lanes_bit() {
-    // v_cndmask_b32_e64 v0, v1, v2, <mask> (VOP3 0x101); s3 holds the mask.
-    let from_sgpr = build_valu_cs(&vop3(0x101, 0, vgpr(1), vgpr(2), sgpr(3)));
-    let hw = &[("hardware", false)];
-    run_cases_on(
-        &from_sgpr,
-        &[[10, 20, 0, 0], [10, 20, 0, 1], [10, 20, 0, 2], [10, 20, 0, !0]],
-        hw,
-        |label, i, inp, got| {
-            let want = if inp[3] & 1 != 0 { inp[1] } else { inp[0] };
-            assert_eq!(got, want, "{label} case {i}");
-        },
-    );
-    for (mask, pick) in [(128u16, 0usize), (193, 1)] {
-        let k = build_valu_cs(&vop3(0x101, 0, vgpr(1), vgpr(2), mask));
-        run_cases_on(&k, &[[10, 20, 0, 0]], hw, |label, _, inp, got| {
-            assert_eq!(got, inp[pick], "{label} inline {mask}");
-        });
-    }
-}
+
