@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
 /// Counters since the last line.
-pub(crate) enum C {
+pub enum C {
     Submissions,
     Copies,
     CopyBytes,
@@ -131,7 +131,7 @@ pub(crate) enum C {
 const COUNTERS: usize = 80;
 static COUNT: [AtomicU64; COUNTERS] = [const { AtomicU64::new(0) }; COUNTERS];
 
-pub(crate) fn add(c: C, n: u64) {
+pub fn add(c: C, n: u64) {
     COUNT[c as usize].fetch_add(n, Relaxed);
 }
 
