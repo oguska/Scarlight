@@ -2772,6 +2772,32 @@ impl<'a> Lower<'a> {
         )
     }
 
+    /// The x then y gradients (three each, undefined past `coords`) of
+    /// float coordinates `coords` across this lane's quad: lane 1 less lane
+    /// 0, lane 2 less lane 0, as the hardware's coarse derivatives.
+    fn quad_gradients(&mut self, coords: &[V]) -> Vec<V> {
+        self.s.flags |= flags::WAVE_OPS;
+        let c = self.cur;
+        let fu = self.s.m.undef(self.s.t.f32);
+        let lane = self.lane_index();
+        let (not3, one, two) = (self.s.m.i32(!3), self.s.m.i32(1), self.s.m.i32(2));
+        let base = self.s.m.bin(c, Bin::And, lane, not3);
+        let right = self.s.m.bin(c, Bin::Or, base, one);
+        let below = self.s.m.bin(c, Bin::Or, base, two);
+        let mut g = vec![fu; 6];
+        for (k, &x) in coords.iter().enumerate().take(3) {
+            let xi = self.as_int(x);
+            let at = |l: &mut Self, lane: V| {
+                let v = l.read_lane(xi, lane);
+                l.as_float(v)
+            };
+            let (x0, x1, x2) = (at(self, base), at(self, right), at(self, below));
+            g[k] = self.s.m.bin(c, Bin::Sub, x1, x0);
+            g[3 + k] = self.s.m.bin(c, Bin::Sub, x2, x0);
+        }
+        g
+    }
+
     fn read_lane(&mut self, x: V, lane: V) -> V {
         self.s.op(
             self.cur,
@@ -8366,7 +8392,57 @@ impl<'a> Lower<'a> {
             };
             let mut args = vec![h, sh];
             args.extend(&cs);
+            // In compute shaders an implicit level of detail comes from
+            // the lanes' quads, as the hardware takes it: DXIL derivatives
+            // there need conditions the validator does not grant these
+            // programs, so the gradients are read from the quad and the
+            // sample takes them explicitly.
+            // The quad is the console lane's: `quad_gradients` finds the
+            // neighbours by host lane, which is the guest thread only under
+            // console lanes (`thread_id` relabels them so). Without them the
+            // guest quads have no lane relation to assume, so an implicit
+            // sample there stops instead.
+            let quad_grads = matches!(op, 60 | 61)
+                && self.s.threads.is_some()
+                && self.s.mesh.is_none()
+                && self.console_lanes
+                && kind != 5;
+            if matches!(op, 60 | 61)
+                && self.s.threads.is_some()
+                && self.s.mesh.is_none()
+                && !self.console_lanes
+                && kind != 5
+            {
+                return Err(
+                    "an implicit-derivative sample in a compute group whose lanes are not the console's",
+                );
+            }
             match op {
+                60 | 61 if quad_grads => {
+                    let mut g = self.quad_gradients(&cs[..spatial]);
+                    if op == 61 {
+                        // A bias scales the footprint by 2^bias.
+                        let bias = float(self, bias_at)?;
+                        let scale = self.unary(21, bias);
+                        for x in g.iter_mut().filter(|x| **x != fu) {
+                            *x = self.s.m.bin(c, Bin::Mul, *x, scale);
+                        }
+                    }
+                    // A per-lane texel offset at an implicit level has
+                    // already failed above (no level to shift by), so `os`
+                    // holds immediates here, as sampleGrad takes them.
+                    args.extend(&os);
+                    args.extend(g);
+                    args.push(clamp);
+                    self.s.op(
+                        c,
+                        "sampleGrad.f32",
+                        Attr::ReadOnly,
+                        self.s.t.res_ret,
+                        63,
+                        &args,
+                    )
+                }
                 60 => {
                     args.extend(&os);
                     args.push(clamp);
