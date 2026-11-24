@@ -68,6 +68,7 @@ pub struct Bools {
 
 /// The tables below have small integer keys; SipHash dominated run time.
 type Map<K, V> = HashMap<K, V, BuildHasherDefault<Fx>>;
+type Set<T> = HashSet<T, BuildHasherDefault<Fx>>;
 
 /// FxHash's multiply-rotate step.
 #[derive(Default)]
@@ -136,14 +137,17 @@ impl Bools {
     }
 
     fn vars(&self, b: Bool) -> Vec<u32> {
-        let (mut seen, mut vars, mut stack) = (Vec::new(), Vec::new(), vec![b]);
+        let mut seen = Set::default();
+        let mut has_var = vec![false; self.atoms.len()];
+        let mut vars = Vec::new();
+        let mut stack = vec![b];
         while let Some(b) = stack.pop() {
             let (v, lo, hi) = self.nodes[b.0 as usize];
-            if v == TERMINAL || seen.contains(&b) {
+            if v == TERMINAL || !seen.insert(b) {
                 continue;
             }
-            seen.push(b);
-            if !vars.contains(&v) {
+            if !has_var[v as usize] {
+                has_var[v as usize] = true;
                 vars.push(v);
             }
             stack.extend([lo, hi]);
@@ -186,9 +190,15 @@ impl Bools {
         }
     }
 
-    fn ite(&mut self, f: Bool, g: Bool, h: Bool) -> Bool {
+    fn ite(&mut self, mut f: Bool, mut g: Bool, mut h: Bool) -> Bool {
         if self.overflow {
             return Bool::FALSE;
+        }
+        if f == g {
+            g = Bool::TRUE;
+        }
+        if f == h {
+            h = Bool::FALSE;
         }
         if f == Bool::TRUE || g == h {
             return g;
@@ -198,6 +208,14 @@ impl Bools {
         }
         if (g, h) == (Bool::TRUE, Bool::FALSE) {
             return f;
+        }
+        if self.overflow {
+            return Bool::FALSE;
+        }
+        if h == Bool::FALSE && f > g {
+            std::mem::swap(&mut f, &mut g);
+        } else if g == Bool::TRUE && f > h {
+            std::mem::swap(&mut f, &mut h);
         }
         if let Some(&r) = self.memo.get(&(f, g, h)) {
             return r;
@@ -248,6 +266,13 @@ impl Bools {
             return false;
         }
         all.retain(|&(b, _)| b != Bool::FALSE && b != Bool::TRUE);
+        if all.len() > 1 {
+            all.sort_unstable();
+            all.dedup();
+            if all.windows(2).any(|w| w[0].0 == w[1].0) {
+                return false;
+            }
+        }
         if all.is_empty() || *budget == 0 {
             return true;
         }
@@ -266,9 +291,33 @@ impl Bools {
         })
     }
 
-    fn implies(&mut self, a: Bool, b: Bool) -> bool {
-        let nb = self.not(b);
-        self.and(a, nb) == Bool::FALSE
+    fn implies(&self, a: Bool, b: Bool) -> bool {
+        fn check(bools: &Bools, a: Bool, b: Bool, memo: &mut Map<(Bool, Bool), bool>) -> bool {
+            if a == Bool::FALSE || b == Bool::TRUE || a == b {
+                return true;
+            }
+            if a == Bool::TRUE || b == Bool::FALSE {
+                return false;
+            }
+            if let Some(&r) = memo.get(&(a, b)) {
+                return r;
+            }
+            let v = bools.nodes[a.0 as usize]
+                .0
+                .min(bools.nodes[b.0 as usize].0);
+            let ((a0, a1), (b0, b1)) = (bools.split(a, v), bools.split(b, v));
+            let r = check(bools, a0, b0, memo) && check(bools, a1, b1, memo);
+            memo.insert((a, b), r);
+            r
+        }
+
+        if a == Bool::FALSE || b == Bool::TRUE || a == b {
+            return true;
+        }
+        if a == Bool::TRUE || b == Bool::FALSE {
+            return false;
+        }
+        check(self, a, b, &mut Map::default())
     }
 
     /// `b` with every atom born at reverse-postorder index `from` or later
@@ -278,7 +327,7 @@ impl Bools {
             return Bool::FALSE;
         }
         let (v, lo, hi) = self.nodes[b.0 as usize];
-        if v == TERMINAL {
+        if v == TERMINAL || self.overflow {
             return b;
         }
         if let Some(&r) = memo.get(&b) {
@@ -295,36 +344,102 @@ impl Bools {
         r
     }
 
-    fn restrict(&mut self, b: Bool, v: u32, value: bool, memo: &mut Map<Bool, Bool>) -> Bool {
-        let (bv, lo, hi) = self.nodes[b.0 as usize];
-        if bv == TERMINAL || bv > v {
+    /// For each atom index, the value `known` decides it to, if any.
+    /// Empty when `known` forces no atom.
+    fn forced(&self, known: Bool) -> Vec<Option<bool>> {
+        let n = self.atoms.len();
+        if known == Bool::TRUE || n == 0 {
+            return Vec::new();
+        }
+        if known == Bool::FALSE {
+            return vec![Some(true); n];
+        }
+        let mut seen = Set::default();
+        let mut stack = vec![known];
+        let mut skip_diff = vec![0i32; n + 1];
+        let mut can_false = vec![false; n];
+        let mut can_true = vec![false; n];
+
+        let root_var = self.nodes[known.0 as usize].0 as usize;
+        if root_var > 0 {
+            skip_diff[0] += 1;
+            skip_diff[root_var] -= 1;
+        }
+
+        while let Some(u) = stack.pop() {
+            let (v, lo, hi) = self.nodes[u.0 as usize];
+            if v == TERMINAL || !seen.insert(u) {
+                continue;
+            }
+            let v = v as usize;
+            if lo != Bool::FALSE {
+                can_false[v] = true;
+                let lo_var = self.nodes[lo.0 as usize].0;
+                let end = if lo_var == TERMINAL { n } else { lo_var as usize };
+                if v + 1 < end {
+                    skip_diff[v + 1] += 1;
+                    skip_diff[end] -= 1;
+                }
+                stack.push(lo);
+            }
+            if hi != Bool::FALSE {
+                can_true[v] = true;
+                let hi_var = self.nodes[hi.0 as usize].0;
+                let end = if hi_var == TERMINAL { n } else { hi_var as usize };
+                if v + 1 < end {
+                    skip_diff[v + 1] += 1;
+                    skip_diff[end] -= 1;
+                }
+                stack.push(hi);
+            }
+        }
+
+        let mut out = Vec::with_capacity(n);
+        let mut skipped = 0i32;
+        let mut any = false;
+        for ((&diff, &f), &t) in skip_diff[..n].iter().zip(&can_false).zip(&can_true) {
+            skipped += diff;
+            let val = if skipped == 0 && f != t {
+                any = true;
+                Some(t)
+            } else {
+                None
+            };
+            out.push(val);
+        }
+        if !any {
+            out.clear();
+        }
+        out
+    }
+
+    fn restrict_many(
+        &mut self,
+        b: Bool,
+        forced: &[Option<bool>],
+        memo: &mut Map<Bool, Bool>,
+    ) -> Bool {
+        if forced.is_empty() || self.overflow {
             return b;
         }
-        if bv == v {
-            return if value { hi } else { lo };
+        let (bv, lo, hi) = self.nodes[b.0 as usize];
+        if bv == TERMINAL {
+            return b;
         }
         if let Some(&r) = memo.get(&b) {
             return r;
         }
-        let l = self.restrict(lo, v, value, memo);
-        let h = self.restrict(hi, v, value, memo);
-        let r = self.mk(bv, l, h);
+        let r = match forced[bv as usize] {
+            Some(true) => self.restrict_many(hi, forced, memo),
+            Some(false) => self.restrict_many(lo, forced, memo),
+            None => {
+                let l = self.restrict_many(lo, forced, memo);
+                let h = self.restrict_many(hi, forced, memo);
+                self.mk(bv, l, h)
+            }
+        };
         memo.insert(b, r);
         r
-    }
-
-    /// `b` with each atom that `known` decides replaced by its value.
-    fn given(&mut self, mut b: Bool, known: Bool) -> Bool {
-        for v in self.vars(b) {
-            let x = self.mk(v, Bool::FALSE, Bool::TRUE);
-            let nx = self.not(x);
-            if self.implies(known, x) {
-                b = self.restrict(b, v, true, &mut Map::default());
-            } else if self.implies(known, nx) {
-                b = self.restrict(b, v, false, &mut Map::default());
-            }
-        }
-        b
     }
 }
 
@@ -648,39 +763,56 @@ impl<'a> Lanes<'a> {
     ) -> Result<Structured, ShaderError> {
         let blocks = &self.p.blocks;
         let b = &mut self.b;
-        let guards = blocks
-            .iter()
-            .enumerate()
-            .map(|(n, block)| {
-                block
-                    .insts
-                    .iter()
-                    .zip(&execs[n])
-                    .map(|(inst, exec)| match (exec, &inst.fields) {
-                        (None, _)
-                        | (_, Fields::Sop { .. } | Fields::Sopp { .. } | Fields::Smem { .. }) => {
-                            None
+        let mut guards = Vec::with_capacity(blocks.len());
+        let mut exits = Vec::with_capacity(blocks.len());
+        let mut restrict_memo = Map::default();
+
+        for (n, block) in blocks.iter().enumerate() {
+            let reach = cond[n];
+            let forced = b.forced(reach);
+            restrict_memo.clear();
+            let mut last_exec: Option<(Bool, Option<Bool>)> = None;
+            let block_guards = block
+                .insts
+                .iter()
+                .zip(&execs[n])
+                .map(|(inst, exec)| match (exec, &inst.fields) {
+                    (None, _)
+                    | (_, Fields::Sop { .. } | Fields::Sopp { .. } | Fields::Smem { .. }) => None,
+                    (&Some(e), _) => {
+                        if let Some((prev, guard)) = last_exec
+                            && prev == e
+                        {
+                            return guard;
                         }
-                        (&Some(e), _) if b.implies(cond[n], e) => None,
-                        (&Some(e), _) => Some(b.given(e, cond[n])),
-                    })
-                    .collect()
-            })
-            .collect();
-        let exits = blocks
-            .iter()
-            .enumerate()
-            .map(|(n, block)| match block.exit {
+                        let guard = if b.implies(reach, e) {
+                            None
+                        } else {
+                            Some(b.restrict_many(e, &forced, &mut restrict_memo))
+                        };
+                        last_exec = Some((e, guard));
+                        guard
+                    }
+                })
+                .collect();
+            guards.push(block_guards);
+            let exit = match block.exit {
                 Exit::Jump(t) => LaneExit::Jump(t),
                 Exit::End => LaneExit::End,
                 Exit::Indirect => LaneExit::Indirect,
                 Exit::Branch { taken, not_taken } => LaneExit::Branch {
-                    when: b.given(self.when[n].unwrap_or(Bool::FALSE), cond[n]),
+                    when: b.restrict_many(
+                        self.when[n].unwrap_or(Bool::FALSE),
+                        &forced,
+                        &mut restrict_memo,
+                    ),
                     taken,
                     not_taken,
                 },
-            })
-            .collect();
+            };
+            exits.push(exit);
+        }
+
         if self.b.overflow {
             return Err(TOO_LARGE);
         }
@@ -1129,25 +1261,38 @@ impl<'a> Lanes<'a> {
     fn paths(&mut self) -> Result<Vec<Bool>, ShaderError> {
         let n = self.p.blocks.len();
         let mut cond = vec![Bool::FALSE; n];
+        let mut dirty = vec![false; n];
         if let Some(&entry) = self.order.first() {
             cond[entry] = Bool::TRUE;
+            for s in self.p.blocks[entry].exit.successors() {
+                dirty[s] = true;
+            }
         }
+        let mut forget_memo = Map::default();
         for _ in 0..MAX_ROUNDS {
             let mut changed = false;
             for i in 1..self.order.len() {
                 let s = self.order[i];
+                if !dirty[s] {
+                    continue;
+                }
+                dirty[s] = false;
                 let mut c = Bool::FALSE;
                 for k in 0..self.incoming[s].len() {
                     let (q, taken) = self.incoming[s][k];
                     let mut e = self.edge(cond[q], q, taken);
-                    if i <= self.index[q] {
-                        e = self.b.forget(e, i, &mut Map::default());
+                    if i <= self.index[q] && e != Bool::FALSE && e != Bool::TRUE {
+                        forget_memo.clear();
+                        e = self.b.forget(e, i, &mut forget_memo);
                     }
                     c = self.b.or(c, e);
                 }
                 if c != cond[s] {
                     cond[s] = c;
                     changed = true;
+                    for next in self.p.blocks[s].exit.successors() {
+                        dirty[next] = true;
+                    }
                 }
             }
             if self.b.overflow {
@@ -1195,6 +1340,89 @@ mod tests {
 
     fn guarded(s: &Structured) -> usize {
         s.guards.iter().flatten().filter(|g| g.is_some()).count()
+    }
+
+    fn eval(bools: &Bools, b: Bool, bits: u32) -> bool {
+        match bools.node(b) {
+            None => b == Bool::TRUE,
+            Some((Atom::Constant(idx), lo, hi)) => {
+                eval(bools, if (bits >> idx) & 1 != 0 { hi } else { lo }, bits)
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn forced_implies_and_restrict_many_match_truth_table() {
+        let mut b = Bools::new();
+        let a = [0, 1, 2, 3].map(|i| b.atom(Atom::Constant(i), i as usize));
+        let na0 = b.not(a[0]);
+        let na3 = b.not(a[3]);
+
+        let target = {
+            let p = b.or(a[0], a[1]);
+            let q = b.xor(a[2], a[3]);
+            b.and(p, q)
+        };
+        let cases = [
+            Bool::FALSE,
+            Bool::TRUE,
+            b.and(a[0], a[2]),
+            {
+                let l = b.and(a[0], a[1]);
+                let r = b.and(na0, a[2]);
+                b.or(l, r)
+            },
+            {
+                let t = b.and(a[0], a[1]);
+                let l = b.and(t, a[2]);
+                let r = b.and(na0, a[2]);
+                b.or(l, r)
+            },
+            {
+                let x = b.xor(a[0], a[1]);
+                b.and(x, na3)
+            },
+        ];
+
+        for known in cases {
+            let forced = b.forced(known);
+            let reduced = b.restrict_many(target, &forced, &mut Map::default());
+            for (i, &var) in a.iter().enumerate() {
+                let nvar = b.not(var);
+                let imp_t = (0..16u32).all(|bits| !eval(&b, known, bits) || eval(&b, var, bits));
+                let imp_f = (0..16u32).all(|bits| !eval(&b, known, bits) || eval(&b, nvar, bits));
+                assert_eq!(b.implies(known, var), imp_t);
+                assert_eq!(b.implies(known, nvar), imp_f);
+                let expected = if imp_t {
+                    Some(true)
+                } else if imp_f {
+                    Some(false)
+                } else {
+                    None
+                };
+                assert_eq!(forced.get(i).copied().flatten(), expected);
+            }
+            for bits in 0..16u32 {
+                if eval(&b, known, bits) {
+                    assert_eq!(eval(&b, reduced, bits), eval(&b, target, bits));
+                }
+            }
+            assert_eq!(
+                b.implies(known, target),
+                (0..16u32).all(|bits| !eval(&b, known, bits) || eval(&b, target, bits))
+            );
+        }
+    }
+
+    #[test]
+    fn meet_detects_direct_contradictions() {
+        let mut b = Bools::new();
+        let a = b.atom(Atom::Constant(0), 0);
+        let c = b.atom(Atom::Constant(1), 1);
+        let f = b.xor(a, c);
+        assert!(!b.meet(&[(f, true), (f, false)]));
+        assert!(b.meet(&[(f, true), (f, true)]));
     }
 
     #[test]
