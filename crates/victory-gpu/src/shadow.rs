@@ -252,40 +252,38 @@ impl Shadow {
             unchanged.begin(start + taken, start + taken + before.len());
             let before = &before[from - taken..to - taken];
             // By 64 KiB piece: the copy compared with its bytes before the
-            // submission, title memory read only where the GPU wrote.
+            // submission, title memory read only where the GPU wrote, a run
+            // of such pieces with one kernel call (a call costs tens to
+            // hundreds of microseconds however small; the world puts back
+            // ~650 pieces a frame).
             // An unchanged page is never modified by copy-back, so later
             // overlapping ranges can skip it for the rest of the submission.
-            let mut title = None;
+            // SAFETY: `[a, b)` is inside the mapping; only the submitting
+            // thread reads it.
+            let host_at = |a: usize, b: usize| unsafe { std::slice::from_raw_parts(self.data.add(a), b - a) };
+            let mut title = Vec::new();
             let mut synced = Vec::new();
             let mut at = from;
             while at < to {
                 let n = (PAGE - (start + at) % PAGE).min(to - at);
-                // SAFETY: inside the mapping; only the submitting thread
-                // writes it.
-                let host = unsafe { std::slice::from_raw_parts_mut(self.data.add(at), n) };
                 let old = &before[at - from..at - from + n];
-                if unchanged.differs(start + at, host, old)
-                    && let title = &mut title.get_or_insert_with(|| vec![0u8; PAGE])[..n]
-                    && crate::host::read_into((start + at) as *const u8, title)
-                {
-                    // Title memory with the GPU's bytes put in; the copy
-                    // takes the title's bytes in turn.
-                    let mut changed = false;
-                    for ((t, h), o) in title.iter_mut().zip(host.iter_mut()).zip(old) {
-                        if *h != *o && *t != *h {
-                            *t = *h;
-                            changed = true;
-                        }
-                        *h = *t;
-                    }
-                    if changed {
-                        crate::watch::writing(start + at, n);
-                        crate::host::write_mapped((start + at) as *mut u8, title.as_ptr(), n);
-                        written += n;
-                    }
-                    synced.push((start + at) / PAGE);
+                if !unchanged.differs(start + at, host_at(at, at + n), old) {
+                    at += n;
+                    continue;
                 }
-                at += n;
+                // Extend the run over the consecutive pages that changed too:
+                // one read and one write for the lot.
+                let mut end = at + n;
+                while end < to {
+                    let next = (PAGE - (start + end) % PAGE).min(to - end);
+                    let old = &before[end - from..end - from + next];
+                    if !unchanged.differs(start + end, host_at(end, end + next), old) {
+                        break;
+                    }
+                    end += next;
+                }
+                written += self.put_back(at, end, &before[at - from..end - from], &mut title, &mut synced);
+                at = end;
             }
             // Pages made equal to title memory are current in the copy, so
             // our own write is not taken for the title's; others keep what
@@ -312,6 +310,44 @@ impl Shadow {
         {
             unchanged.clear();
             give_back(bytes);
+        }
+        written
+    }
+
+    /// [`Shadow::copy_back`] for `[from, to)` of the copy, whole pieces but
+    /// for the range's ends, each changed by the GPU (`old` is the range
+    /// before the submission): title memory with the GPU's bytes put in,
+    /// the copy taking the title's bytes in turn. Pieces that cannot be
+    /// read are left alone; pieces read are noted in `synced`. Returns the
+    /// bytes written.
+    fn put_back(&self, from: usize, to: usize, old: &[u8], title: &mut Vec<u8>, synced: &mut Vec<usize>) -> usize {
+        let start = self.start as usize;
+        title.resize(to - from, 0);
+        if !crate::host::read_into((start + from) as *const u8, title) {
+            // Not all of it is mapped: piece by piece. A short range can
+            // still straddle a 64 KiB piece boundary.
+            let first = (PIECE - (start + from) % PIECE).min(to - from);
+            if first == to - from {
+                return 0;
+            }
+            let mut written = 0;
+            let mut at = from;
+            while at < to {
+                let end = (at + PIECE - (start + at) % PIECE).min(to);
+                written += self.put_back(at, end, &old[at - from..end - from], title, synced);
+                at = end;
+            }
+            return written;
+        }
+        // SAFETY: inside the mapping; only the submitting thread writes it.
+        let host = unsafe { std::slice::from_raw_parts_mut(self.data.add(from), to - from) };
+        let first = (PIECE - (start + from) % PIECE).min(to - from);
+        synced.extend((start + from) / PAGE..=(start + to - 1) / PAGE);
+        let mut written = 0;
+        for (a, b) in merge(title, host, old, first) {
+            crate::watch::writing(start + from + a, b - a);
+            crate::host::write_mapped((start + from + a) as *mut u8, title[a..].as_ptr(), b - a);
+            written += b - a;
         }
         written
     }
@@ -626,6 +662,38 @@ fn loose(address: u64, end: u64) -> Option<Arc<Shadow>> {
     Some(shadow)
 }
 
+/// Title memory and its copy are compared by piece.
+const PIECE: usize = 64 << 10;
+
+/// Puts the GPU's bytes (where `host` differs from `old`, the copy before
+/// the submission) into `title` where it lacks them, and `title` into
+/// `host`. Returns the runs of pieces (the first `first` bytes long, the
+/// rest [`PIECE`]) where `title` lacked a GPU byte, as offsets: only those
+/// go back, so title writes elsewhere are kept.
+fn merge(title: &mut [u8], host: &mut [u8], old: &[u8], first: usize) -> Vec<(usize, usize)> {
+    let len = title.len();
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    let mut at = 0;
+    while at < len {
+        let end = if at == 0 { first } else { at + PIECE }.min(len);
+        let mut changed = false;
+        for ((t, h), o) in title[at..end].iter_mut().zip(&mut host[at..end]).zip(&old[at..end]) {
+            if *h != *o && *t != *h {
+                *t = *h;
+                changed = true;
+            }
+            *h = *t;
+        }
+        match runs.last_mut() {
+            Some(run) if changed && run.1 == at => run.1 = end,
+            _ if changed => runs.push((at, end)),
+            _ => {}
+        }
+        at = end;
+    }
+    runs
+}
+
 /// For device-removed reports: the copy of title memory whose host range
 /// starts closest below host GPU address `va`, and where `va` is in it.
 pub(crate) fn near(va: u64) -> String {
@@ -792,5 +860,82 @@ mod tests {
             cached[2],
             baseline[2].as_secs_f64() / cached[2].as_secs_f64(),
         );
+    }
+
+    use super::{PIECE, merge};
+
+
+    /// GPU bytes go into title memory, which keeps its own writes; only
+    /// runs of pieces the title lacked a GPU byte in go back, joined.
+    #[test]
+    fn put_back_writes_joined_runs_of_pieces_the_gpu_changed() {
+        let len = 10 + 3 * PIECE;
+        let old = vec![0u8; len];
+        let mut host = old.clone();
+        let mut title = old.clone();
+        // The GPU wrote a byte in every piece.
+        for at in [2, 10 + 5, 10 + PIECE + 7, 10 + 2 * PIECE] {
+            host[at] = 1;
+        }
+        // The title has the second piece's byte already, and wrote its own
+        // byte there and in the third piece while the GPU ran.
+        title[10 + 5] = 1;
+        title[10 + 9] = 2;
+        title[10 + PIECE + 1] = 3;
+        let runs = merge(&mut title, &mut host, &old, 10);
+        assert_eq!(runs, [(0, 10), (10 + PIECE, len)]);
+        let mut want = old.clone();
+        for (at, v) in [(2, 1), (15, 1), (19, 2), (10 + PIECE + 1, 3), (10 + PIECE + 7, 1), (10 + 2 * PIECE, 1)] {
+            want[at] = v;
+        }
+        assert!(title == want, "title memory with the GPU's bytes put in");
+        assert!(host == want, "the copy takes the title's bytes");
+    }
+
+    /// A range brought up to date is not asked again in the same submission
+    /// until a step that may write title memory has run: lists of a submission
+    /// read the same big heap through many ranges.
+    #[test]
+    fn a_range_is_refreshed_once_until_the_title_may_have_written_it() {
+        let Some(host) = crate::host::host() else { return };
+        let mut title = [1u8, 2, 3, 4];
+        let start = title.as_mut_ptr() as usize;
+        let (buffer, data) = host.shared_buffer(4).unwrap();
+        let shadow = Arc::new(Shadow::new(buffer, data, 0, start as u64, 4));
+        let (other_buffer, other_data) = host.shared_buffer(4).unwrap();
+        let other = Arc::new(Shadow::new(other_buffer, other_data, 0, start as u64, 4));
+        let list = host.new_list().unwrap();
+        // Refreshed, and flushed by the next shader-write declaration.
+        list.defer_refresh(&shadow, start, 4);
+        list.defer_gpu_write(&other, start, 1);
+        // The title changes without the batch knowing (a host step): the
+        // second refresh of the same range is skipped.
+        // SAFETY: four bytes of mapped title memory, written by this thread.
+        list.defer_host(move || unsafe { (start as *mut u8).add(1).write(20) });
+        list.defer_refresh(&shadow, start, 3);
+        list.defer_gpu_write(&other, start + 1, 1);
+        let seen = shadow.clone();
+        list.defer_host(move || {
+            // SAFETY: four mapped bytes, used by this thread.
+            assert_eq!(unsafe { seen.data.add(1).read() }, 2, "skipped as fresh");
+        });
+        // A step writing title memory makes it due again: the copy follows.
+        // SAFETY: as above.
+        list.defer(move || unsafe { (start as *mut u8).add(2).write(30) });
+        list.defer_refresh(&shadow, start, 4);
+        list.defer_gpu_write(&other, start + 2, 1);
+        let seen = shadow.clone();
+        list.defer_host(move || {
+            // SAFETY: as above.
+            unsafe {
+                assert_eq!(seen.data.add(2).read(), 30, "refreshed after a title write");
+                // The earlier host write is picked up with it (whole range).
+                assert_eq!(seen.data.add(1).read(), 20);
+            }
+        });
+        list.close();
+        host.execute(&[&list]);
+        // A new submission starts over.
+        let _ = title;
     }
 }
