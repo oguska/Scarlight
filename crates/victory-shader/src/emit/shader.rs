@@ -471,6 +471,9 @@ impl Shader {
         let wave = self.wave_size.map_or("any".to_owned(), |n| n.to_string());
         let ops: Vec<&str> = self.ops.iter().map(String::as_str).collect();
         let summary = format!("{threads}wave size {wave}; ops: {}", ops.join(", "));
+        // Tests of the emitted shape read the instruction count off the end.
+        #[cfg(test)]
+        let summary = format!("{summary}; {} instructions", self.m.instructions());
         LAST.with(|l| *l.borrow_mut() = summary);
         let ud_size = (self.user_data * 4).next_multiple_of(16);
         self.fix_user_data_size(ud_size);

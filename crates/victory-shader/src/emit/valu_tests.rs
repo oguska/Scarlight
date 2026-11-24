@@ -387,6 +387,61 @@ fn max_and_min_order_negative_zero_below_positive_zero() {
 }
 
 #[test]
+fn med3_orders_negative_zero_below_positive_zero() {
+    // v_med3_f32 v0, v1, v2, v3 (VOP3 opcode 0x157). The ISA's median is
+    // v_max_f32(v_min_f32(a, b), v_min_f32(v_max_f32(a, b), c)) over
+    // comparisons that order -0 below +0, so of three zeros the median is the
+    // one two of them share. DXIL's FMin/FMax give either zero.
+    let (pz, nz) = (0_u32, 0x8000_0000_u32);
+    let f = f32::to_bits;
+    let cases: &[([u32; 4], u32)] = &[
+        ([nz, pz, nz, 0], nz),     // -0, +0, -0
+        ([pz, nz, pz, 0], pz),     // +0, -0, +0
+        ([nz, pz, pz, 0], pz),     // -0, +0, +0
+        ([pz, nz, nz, 0], nz),     // +0, -0, -0
+        ([nz, nz, nz, 0], nz),     // -0, -0, -0
+        ([pz, pz, pz, 0], pz),     // +0, +0, +0
+        ([nz, pz, f(1.0), 0], pz), // -0, +0, 1: -0 < +0 < 1
+        ([nz, f(-1.0), pz, 0], nz), // -0, -1, +0: -1 < -0 < +0
+        ([pz, f(1.0), nz, 0], pz), // +0, 1, -0: -0 < +0 < 1
+    ];
+    let shader = build_valu_cs(&vop3(0x157, 0, vgpr(1), vgpr(2), vgpr(3)));
+    let inputs: Vec<[u32; 4]> = cases.iter().map(|c| c.0).collect();
+    run_cases(&shader, &inputs, |backend, i, inp, got| {
+        let want = cases[i].1;
+        assert_eq!(
+            got, want,
+            "{backend}: v_med3_f32({:#010x}, {:#010x}, {:#010x}) = {got:#010x}, want {want:#010x}",
+            inp[0], inp[1], inp[2],
+        );
+    });
+
+    // The same in halves: -0 is 0x8000, +0 is 0x0000 (VOP3 opcode 0x357).
+    let h1 = 0x3C00u32; // 1.0
+    let hn1 = 0xBC00u32; // -1.0
+    let (hpz, hnz) = (0x0000_u32, 0x8000_u32);
+    let cases16: &[([u32; 4], u32)] = &[
+        ([hnz, hpz, hnz, 0], hnz),
+        ([hpz, hnz, hpz, 0], hpz),
+        ([hnz, hpz, hpz, 0], hpz),
+        ([hpz, hnz, hnz, 0], hnz),
+        ([hnz, hpz, h1, 0], hpz),
+        ([hnz, hn1, hpz, 0], hnz),
+        ([hpz, h1, hnz, 0], hpz),
+    ];
+    let shader = build_valu_cs(&vop3(0x357, 0, vgpr(1), vgpr(2), vgpr(3)));
+    let inputs: Vec<[u32; 4]> = cases16.iter().map(|c| c.0).collect();
+    run_cases(&shader, &inputs, |backend, i, inp, got| {
+        let want = cases16[i].1 as u16;
+        assert_eq!(
+            got as u16, want,
+            "{backend}: v_med3_f16({:#06x}, {:#06x}, {:#06x}) = {:#06x}, want {want:#06x}",
+            inp[0] as u16, inp[1] as u16, inp[2] as u16, got as u16,
+        );
+    });
+}
+
+#[test]
 fn v_med3_f16_matches_rdna2_with_nan() {
     // v_med3_f16 v0, v1, v2, v3 (VOP3 opcode 0x357)
     let shader = build_valu_cs(&vop3(0x357, 0, vgpr(1), vgpr(2), vgpr(3)));
@@ -1049,6 +1104,9 @@ fn run_wave_cs(wave64: bool, body: &[u32], mut check: impl FnMut(&str, &[u32])) 
         outputs: Vec::new(),
         prims: Vec::new(),
         mesh_stride: 0,
+        target: super::Target::ANY,
+        console_cf: false,
+        per_lane_only: false,
     })
     .expect("lower");
 
@@ -1060,6 +1118,7 @@ fn run_wave_cs(wave64: bool, body: &[u32], mut check: impl FnMut(&str, &[u32])) 
         static_samplers: Vec::new(),
         root_cbvs: lowered.root_cbvs,
         root_srvs: lowered.root_srvs,
+        stride_table: lowered.stride_table,
     };
 
     if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
@@ -1341,6 +1400,7 @@ fn lds_byte_and_half_writes_keep_the_rest_of_the_dword() {
 }
 
 #[test]
+#[allow(clippy::type_complexity)]
 fn lds_byte_and_half_reads_extend_as_the_console() {
     // [0] = s0, then each read of it.
     let reads: [(u8, u16, fn(u32) -> u32); 6] = [
