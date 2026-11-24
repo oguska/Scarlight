@@ -599,6 +599,54 @@ impl Layout {
         })
     }
 
+    /// The byte ranges of tiled memory that [`Layout::detile`] reads for
+    /// mip `mip` of array slice `slice` (3D: every depth slice of the mip,
+    /// `slice` 0): sorted, disjoint, one per depth slice or slab at most.
+    /// A mip in the tail gets the part of the tail block its elements span,
+    /// which other tail mips may share; a write outside every range leaves
+    /// the subresource's detiled contents as they were.
+    pub fn extents(&self, mip: u32, slice: u32) -> Result<Vec<std::ops::Range<u64>>, Error> {
+        let m = self.mips.get(mip as usize).ok_or(Error::Invalid)?;
+        let bytes = m.width as usize * self.desc.element_bytes as usize;
+        let depth_pitch = bytes * m.height as usize;
+        let mut spans: Vec<std::ops::Range<u64>> = Vec::new();
+        let z_of = |linear: usize| linear / depth_pitch;
+        let mut current: Option<(usize, std::ops::Range<u64>)> = None;
+        self.walk(
+            self.size as usize,
+            mip,
+            slice,
+            usize::MAX,
+            bytes,
+            depth_pitch,
+            |tiled, linear, len| {
+                let z = z_of(linear);
+                let run = tiled as u64..(tiled + len) as u64;
+                match &mut current {
+                    Some((at, r)) if *at == z => {
+                        r.start = r.start.min(run.start);
+                        r.end = r.end.max(run.end);
+                    }
+                    _ => {
+                        if let Some((_, r)) = current.replace((z, run)) {
+                            spans.push(r);
+                        }
+                    }
+                }
+            },
+        )?;
+        spans.extend(current.map(|(_, r)| r));
+        spans.sort_by_key(|r| r.start);
+        let mut merged: Vec<std::ops::Range<u64>> = Vec::with_capacity(spans.len());
+        for r in spans {
+            match merged.last_mut() {
+                Some(last) if r.start <= last.end => last.end = last.end.max(r.end),
+                _ => merged.push(r),
+            }
+        }
+        Ok(merged)
+    }
+
     /// The reverse of [`Layout::detile`]: linear rows into tiled memory.
     pub fn tile(
         &self,
@@ -944,6 +992,85 @@ mod tests {
         }
     }
 
+    /// A subresource's extents hold every element it detiles, and bytes
+    /// outside them do not change what it detiles to.
+    #[test]
+    fn extents_hold_what_a_subresource_detiles() {
+        let cases = [
+            desc(64, 64, 7, 16, Swizzle::SW_64KB_D),
+            desc(100, 60, 7, 4, Swizzle::SW_64KB_D),
+            desc(250, 175, 8, 8, Swizzle::SW_4KB_S),
+            desc(33, 17, 6, 1, Swizzle::SW_4KB_D),
+            desc(30, 20, 5, 4, Swizzle::LINEAR),
+            desc(83, 31, 6, 1, Swizzle::SW_256B_S),
+            Desc {
+                depth: 3,
+                ..desc(70, 70, 4, 16, Swizzle::SW_4KB_S)
+            },
+            Desc {
+                depth: 4,
+                ..desc(30, 20, 3, 4, Swizzle::LINEAR)
+            },
+            Desc {
+                dimension: Dimension::Tex3d,
+                depth: 16,
+                ..desc(64, 32, 7, 4, Swizzle::SW_4KB_S)
+            },
+        ];
+        for d in cases {
+            let l = Layout::new(&d).unwrap();
+            let size = l.size as usize;
+            let tiled: Vec<u8> = (0..size).map(|i| (i * 31 + i / 251) as u8).collect();
+            let slices = if d.dimension == Dimension::Tex3d {
+                1
+            } else {
+                d.depth
+            };
+            for slice in 0..slices {
+                for mip in 0..d.mips {
+                    let e = l.extents(mip, slice).unwrap();
+                    assert!(!e.is_empty(), "{d:?} mip {mip} slice {slice}");
+                    for w in e.windows(2) {
+                        assert!(w[0].end < w[1].start, "{d:?} mip {mip}: {e:?}");
+                    }
+                    assert!(e.iter().all(|r| r.start < r.end && r.end <= l.size));
+                    let inside = |at: u64| e.iter().any(|r| r.contains(&at));
+                    let m = l.mips[mip as usize];
+                    let n = u64::from(d.element_bytes);
+                    // Outside the tail a 2D mip's extent is its own blocks.
+                    if m.tail.is_none() && d.dimension != Dimension::Tex3d {
+                        let total: u64 = e.iter().map(|r| r.end - r.start).sum();
+                        let own = u64::from(m.pitch) * u64::from(m.rows) * n;
+                        assert!(total <= own, "{d:?} mip {mip}: {total} > {own}");
+                    }
+                    for z in 0..m.depth {
+                        for y in 0..m.height {
+                            for x in 0..m.width {
+                                let at = l.offset(mip, x, y, slice + z).unwrap();
+                                assert!(inside(at) && inside(at + n - 1), "{d:?} mip {mip}");
+                            }
+                        }
+                    }
+                    let row = m.width as usize * n as usize;
+                    let plane = row * m.height as usize;
+                    let mut before = vec![0; plane * m.depth as usize];
+                    l.detile(&tiled, mip, slice, &mut before, row, plane)
+                        .unwrap();
+                    let mut changed = tiled.clone();
+                    for (i, b) in changed.iter_mut().enumerate() {
+                        if !inside(i as u64) {
+                            *b = !*b;
+                        }
+                    }
+                    let mut after = vec![0; before.len()];
+                    l.detile(&changed, mip, slice, &mut after, row, plane)
+                        .unwrap();
+                    assert_eq!(before, after, "{d:?} mip {mip} slice {slice}");
+                }
+            }
+        }
+    }
+
     /// Hand-checked: in a 64 KiB `D` block of 4-byte elements, x bits go to
     /// address bits 2, 3, 6, 9, 11, 13, 15 and y bits to 4, 5, 7, 8, 10, 12,
     /// 14; a 4 KiB `S` block of 16-byte elements is 16x16 with y first.
@@ -1008,6 +1135,90 @@ mod tests {
         assert_eq!(t.planes[1].offset, t.planes[0].layout.size);
         assert_eq!(t.planes[1].layout.size, 2048 * 1280);
         assert!(!t.planes[0].layout.addressable());
+    }
+
+    /// Timing, not correctness: `cargo test --release -p victory-formats --
+    /// --ignored --nocapture detile_costs` prints MB/s for full and
+    /// per-subresource detiles and the cost of `Layout::extents`.
+    #[test]
+    #[ignore]
+    fn detile_costs() {
+        use std::time::Instant;
+        // A 2048x2048 BC7 chain in 64 KiB `D`: 16 MiB of console memory.
+        let d = Desc {
+            block: 4,
+            ..desc(2048, 2048, 12, 16, Swizzle::SW_64KB_D)
+        };
+        let l = Layout::new(&d).unwrap();
+        let size = l.size as usize;
+        let tiled: Vec<u8> = (0..size).map(|i| (i * 31 + i / 251) as u8).collect();
+        // The linear form: rows of `width` elements, `height` of them.
+        let row_of = |mip: u32| l.mips[mip as usize].width as usize * d.element_bytes as usize;
+        let plane_of = |mip: u32| row_of(mip) * l.mips[mip as usize].height as usize;
+        let mut out: Vec<Vec<u8>> = (0..d.mips).map(|mip| vec![0u8; plane_of(mip)]).collect();
+        let n = 20;
+        let mb = size as f64 / 1e6;
+        let t = Instant::now();
+        for _ in 0..n {
+            for mip in 0..d.mips {
+                let out = &mut out[mip as usize];
+                let (row, plane) = (row_of(mip), plane_of(mip));
+                l.detile(&tiled, mip, 0, out, row, plane).unwrap();
+            }
+        }
+        let full = t.elapsed().as_secs_f64() / f64::from(n);
+        let t = Instant::now();
+        let (row, plane) = (row_of(0), plane_of(0));
+        for _ in 0..n {
+            let out = &mut out[0];
+            l.detile(&tiled, 0, 0, out, row, plane).unwrap();
+        }
+        let mip0 = t.elapsed().as_secs_f64() / f64::from(n);
+        let mip0_mb = plane_of(0) as f64 / 1e6;
+        // Which mips are the slow ones: the chain whole, then each alone.
+        let mut per: Vec<String> = Vec::new();
+        for mip in 0..d.mips {
+            let (row, plane) = (row_of(mip), plane_of(mip));
+            let t = Instant::now();
+            for _ in 0..n {
+                let out = &mut out[mip as usize];
+                l.detile(&tiled, mip, 0, out, row, plane).unwrap();
+            }
+            let us = t.elapsed().as_secs_f64() / f64::from(n) * 1e6;
+            let tail = l.mips[mip as usize].tail.is_some();
+            per.push(format!(
+                "{mip}:{us:.0}us{}{tail}",
+                0,
+                tail = if tail { "T" } else { "" }
+            ));
+        }
+        let t = Instant::now();
+        for _ in 0..n {
+            for mip in 0..d.mips {
+                let (row, plane) = (row_of(mip), plane_of(mip));
+                let out = &mut out[mip as usize];
+                l.detile(&tiled, mip, 0, out, row, plane).unwrap();
+            }
+        }
+        let full2 = t.elapsed().as_secs_f64() / f64::from(n);
+        let t = Instant::now();
+        let all: Vec<_> = (0..d.mips).map(|m| l.extents(m, 0).unwrap()).collect();
+        let extents = t.elapsed().as_secs_f64();
+        println!(
+            "detile: {mb:.1} MB whole chain {:.2} ms ({:.0} MB/s); mip 0 {mip0_mb:.1} MB {:.2} ms \
+             ({:.0} MB/s); extents of {} mips in {:.0} us",
+            full * 1e3,
+            mb / full,
+            mip0 * 1e3,
+            mip0_mb / mip0,
+            all.len(),
+            extents * 1e6,
+        );
+        println!(
+            "chain again {:.2} ms; per mip (T = in the tail): {}",
+            full2 * 1e3,
+            per.join(" ")
+        );
     }
 
     #[test]
