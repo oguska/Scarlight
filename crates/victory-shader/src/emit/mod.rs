@@ -1470,4 +1470,96 @@ mod barycentric_tests {
         let words = [0xC812_0000, e0, e1, S_ENDPGM];
         assert!(pixel(&words, PERSP_CENTER).is_err());
     }
+
+    /// `v_interp_p1ll_f16` writes all 32 bits; it does not preserve the old
+    /// high half. When a paired p2 represents the interpolation, a following
+    /// mixed-precision FMA must therefore zero an unavailable preserved half,
+    /// not resurrect bits from before p1ll. Cover both result halves.
+    #[test]
+    fn mixed_precision_fmas_accept_an_unavailable_interpolation_half() {
+        fn translate(opcode: u32) {
+            let words = [
+                0x7E10_0280u32, // v_mov_b32 v8, 0
+                0x7E20_0280,    // v_mov_b32 v16, 0
+                0x7E16_02FF,
+                0xFFFF_0000, // v_mov_b32 v11, 0xffff0000
+                0xD742_000B,
+                0x0002_0102, // v_interp_p1ll_f16 v11, v0, attr2.x high
+                0xD75A_000F,
+                0x042E_0302, // v_interp_p2_f16 v15, v1, attr2.x, v11 high
+                opcode,
+                0x0A02_2108, // v_fma_mix{lo,hi}_f16 v11, sel_lo(v8), v16, 0
+                0xF800_1801,
+                0x0000_000B, // exp mrt0, v11, off, off, off done vm
+                0xBF81_0000, // s_endpgm
+            ];
+            let native = NativeProgram {
+                stage: HwStage::Ps,
+                wave64: false,
+                vgprs: 17,
+                layout: vec![],
+                used: vec![],
+                io: StageIo::Ps {
+                    inputs: vec![crate::native::PsInput {
+                        usage: crate::native::Usage::Generic,
+                        row: 2,
+                        mask: 3,
+                        attr: 2,
+                        flat: false,
+                        fp16: true,
+                        pack2: true,
+                        row2: 2,
+                    }],
+                    input_addr: 2,
+                    db_shader_control: 0,
+                    patches: vec![],
+                },
+                code: words.iter().flat_map(|w| w.to_le_bytes()).collect(),
+            };
+            let input = SigElement {
+                name: "TEXCOORD".into(),
+                index: 0,
+                kind: 0,
+                comp: 9,
+                interp: 0,
+                row: Some(2),
+                col: 0,
+                cols: 2,
+                usage: 0,
+                half: false,
+            };
+            let output = SigElement {
+                name: "SV_Target".into(),
+                index: 0,
+                kind: 16,
+                comp: 9,
+                interp: 0,
+                row: Some(0),
+                col: 0,
+                cols: 1,
+                usage: 1,
+                half: false,
+            };
+            let isg1 = super::container::signature(&[input], true);
+            let osg1 = super::container::signature(&[output], false);
+            let bytes =
+                crate::dxbc::build(&[(super::FourCC::ISG1, &isg1), (super::FourCC::OSG1, &osg1)]);
+            let c = Container::parse(&bytes).unwrap();
+            let p = ir::build(&native.patched_code(), native.wave64, native.vgprs).unwrap();
+            let res = resource::track(&p, &native.layout, native.stage, None).unwrap();
+            let io = io::raise(&p, &native).unwrap();
+            let st = structure::structure(&p).unwrap();
+            let mut host = emit(&c, &native, &p, &st, &io, &res, Target::ANY).unwrap();
+            #[cfg(windows)]
+            if let Ok(mut v) = super::validator::Validator::load(
+                super::validator::Validator::default_path().as_deref(),
+            ) {
+                v.validate(&mut host.dxil).unwrap();
+            }
+        }
+
+        for opcode in [0xCC21_000B, 0xCC22_000B] {
+            translate(opcode);
+        }
+    }
 }
