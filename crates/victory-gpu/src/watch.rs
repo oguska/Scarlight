@@ -277,8 +277,10 @@ pub(crate) fn writes(start: usize, end: usize, guarded: bool) -> Option<(u64, Ve
     query(start, end, guarded, false, 0, None)
 }
 
-/// Export the first mapping checked for the guard fallback to buffer
-/// refreshes, which can reuse it without another VirtualQuery.
+/// One answer for the whole of `[start, end)`, exporting the first mapping
+/// checked for the guard fallback (what [`shadow_writes_parts`] answers per
+/// allocation).
+#[cfg(test)]
 pub(crate) fn shadow_writes(
     start: usize,
     end: usize,
@@ -286,6 +288,47 @@ pub(crate) fn shadow_writes(
     region: &mut Option<MemoryRegion>,
 ) -> Option<(u64, Vec<(usize, u64)>)> {
     query(start, end, true, false, after, Some(region))
+}
+
+/// What [`shadow_writes_parts`] answers for one allocation of the range:
+/// the bytes of the part and the answer for it, `None` if it cannot be
+/// answered (not write-watched, or not mapped).
+pub(crate) type Part = (usize, usize, Option<(u64, Vec<(usize, u64)>)>);
+
+/// [`shadow_writes`] with one answer per allocation of `[start, end)`: a part
+/// that cannot be answered does not make the others unknown (a buffer over a
+/// watched reservation and an unwatched one next to it copies only the
+/// unwatched part). `after(from, to)` is the generation the copy took each
+/// part at. Every part is its own question, so each answer's generation
+/// covers the changes journalled for that part up to it.
+pub(crate) fn shadow_writes_parts(
+    start: usize,
+    end: usize,
+    after: impl Fn(usize, usize) -> u64,
+    region: &mut Option<MemoryRegion>,
+) -> Vec<Part> {
+    let (first, last) = (start / PAGE, end.div_ceil(PAGE));
+    // A range every block of which is clean answers from the journal,
+    // before any region is looked up.
+    {
+        let mut j = JOURNAL.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(answer) = j.clean_guarded(first, last, after(start, end)) {
+            return vec![(start, end, Some(answer))];
+        }
+    }
+    let parts = page_parts(first, last);
+    let whole = parts.len() <= 1;
+    let mut first_region = Some(region);
+    parts
+        .into_iter()
+        .enumerate()
+        .map(|(i, (from, to))| {
+            let (a, b) = ((from * PAGE).max(start), (to * PAGE).min(end));
+            let region = if i == 0 { first_region.take() } else { None };
+            let answer = ask_span(from, to, true, false, after(a, b), region, whole);
+            (a, b, answer)
+        })
+        .collect()
 }
 
 /// One fresh observation for a group of requested ranges. The caller
@@ -323,22 +366,31 @@ fn query(
     mut first_region: Option<&mut Option<MemoryRegion>>,
 ) -> Option<(u64, Vec<(usize, u64)>)> {
     let (first, last) = (start / PAGE, end.div_ceil(PAGE));
+    // A range of clean guarded blocks answers from the journal, without
+    // looking up its regions.
+    if guarded {
+        let mut j = JOURNAL.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(answer) = j.clean_guarded(first, last, after) {
+            return Some(answer);
+        }
+    }
     let parts = page_parts(first, last);
     match parts.as_slice() {
-        [] | [_] => ask_span(first, last, guarded, preflight, after, first_region),
+        [] | [_] => ask_span(first, last, guarded, preflight, after, first_region, true),
         parts => {
             // Every part is asked (and its dirty bits cleared) before the
-            // answer is merged, so no page is reported twice or lost.
-            let mut now = 0;
-            let mut pages = Vec::new();
+            // answer is read, so no page is reported twice or lost.
             for (i, &(from, to)) in parts.iter().enumerate() {
                 let region = if i == 0 { first_region.take() } else { None };
-                let (asked, found) = ask_span(from, to, guarded, preflight, after, region)?;
-                now = now.max(asked);
-                pages.extend(found);
+                ask_span(from, to, guarded, preflight, after, region, false)?;
             }
-            pages.sort_unstable_by_key(|&(page, _)| page);
-            Some((now, pages))
+            // The answer for the whole interval comes from the journal in
+            // one read: it holds what every part found and what was
+            // remapped between the parts, at one generation. (Merging the
+            // parts' own answers would report the latest part's generation
+            // without an earlier part's remap.)
+            let j = JOURNAL.lock().unwrap_or_else(|e| e.into_inner());
+            Some(j.since(first, last, after))
         }
     }
 }
@@ -366,12 +418,16 @@ fn ask_span(
     preflight: bool,
     after: u64,
     first_region: Option<&mut Option<MemoryRegion>>,
+    clean_checked: bool,
 ) -> Option<(u64, Vec<(usize, u64)>)> {
     use windows_sys::Win32::System::Memory::GetWriteWatch;
     const WRITE_WATCH_FLAG_RESET: u32 = 1;
     let mut j = JOURNAL.lock().unwrap_or_else(|e| e.into_inner());
     let j = &mut *j;
-    if guarded && let Some(answer) = j.clean_guarded(first, last, after) {
+    if guarded
+        && !clean_checked
+        && let Some(answer) = j.clean_guarded(first, last, after)
+    {
         return Some(answer);
     }
     let capacity = (last - first) * PAGE / KERNEL_PAGE;
@@ -1429,7 +1485,9 @@ pub(crate) mod tests {
         // SAFETY: the last byte of the live watched reservation.
         unsafe { first.0.cast::<u8>().add(watched - 1).write(9) };
         assert_eq!(shadow.update(start + watched - 4, 8), 8);
-        assert_eq!(shadow.update(start, watched), PAGE - 4);
+        // The page the write is in was copied in part (a page only partly in
+        // a range stays stale for the rest), so it is copied whole now.
+        assert_eq!(shadow.update(start, watched), PAGE);
         assert_eq!(shadow.update(start, watched), 0);
     }
 

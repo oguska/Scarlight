@@ -463,40 +463,55 @@ impl Shadow {
 
     fn update_free(&self, from: usize, to: usize) -> usize {
         let watched = self.watched.load(Ordering::Relaxed);
-        if watched != NOT_WATCHED {
-            let mut region = None;
-            if let Some((now, written)) =
-                crate::watch::shadow_writes(from, to, self.floor(from, to), &mut region)
-            {
+        if watched == NOT_WATCHED {
+            return self.copy_unverified(from, to);
+        }
+        let mut region = None;
+        let parts =
+            crate::watch::shadow_writes_parts(from, to, |a, b| self.floor(a, b), &mut region);
+        let whole = parts.len() == 1;
+        let mut copied = 0;
+        for (a, b, answer) in parts {
+            if let Some((now, written)) = answer {
                 self.watched.store(WATCHED, Ordering::Relaxed);
-                let copied = self.copy_stale(from, to, now, &written);
+                let c = self.copy_stale(a, b, now, &written);
                 #[cfg(feature = "diagnostics")]
                 {
                     use crate::copystat::{C, add};
-                    add(C::Checked, (to - from) as u64);
-                    add(C::Unchanged, (to - from).saturating_sub(copied) as u64);
+                    add(C::Checked, (b - a) as u64);
+                    add(C::Unchanged, (b - a).saturating_sub(c) as u64);
                 }
-                return copied;
+                copied += c;
+                continue;
             }
             // A question that failed does not make the whole copy unwatched:
-            // it may have crossed a region boundary or met an unmapped page.
-            // Only a copy wholly inside one committed private region is, and
-            // only when it was never seen watched: a sub-range that lands in
-            // an unmapped hole inside an already-watched view pool must not
-            // disable write-watching for the rest of the pool (JMAN #13,
-            // fever308).
+            // it may have crossed a region boundary or met an unmapped page,
+            // and the parts of the range in other allocations were answered
+            // on their own. Only a copy wholly inside one committed private
+            // region is, and only when it was never seen watched: a
+            // sub-range that lands in an unmapped hole inside an
+            // already-watched view pool must not disable write-watching for
+            // the rest of the pool (JMAN #13, fever308).
             let (start, end) = (self.start as usize, (self.start + self.len) as usize);
-            if watched == WATCH_UNKNOWN && crate::watch::private_region_covers(start, end, region) {
+            if whole
+                && watched == WATCH_UNKNOWN
+                && crate::watch::private_region_covers(start, end, region)
+            {
                 let _ = self.watched.compare_exchange(
                     WATCH_UNKNOWN,
                     NOT_WATCHED,
                     Ordering::Relaxed,
                     Ordering::Relaxed,
                 );
-            } else {
-                return self.copy(from, to);
             }
+            copied += self.copy_unverified(a, b);
         }
+        copied
+    }
+
+    /// [`Shadow::copy`] of `[from, to)` whose writes since the last copy are
+    /// unknown (the memory could not be asked): counted as such.
+    fn copy_unverified(&self, from: usize, to: usize) -> usize {
         #[cfg(feature = "diagnostics")]
         crate::copystat::add(crate::copystat::C::Unverified, (to - from) as u64);
         self.copy(from, to)
