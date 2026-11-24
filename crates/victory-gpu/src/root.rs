@@ -139,23 +139,76 @@ fn serialize_with(
         flags = format_args!("{:#x}", desc.flags),
         "host refused the heap-directly-indexed root signature flags; retrying without them"
     );
-    retry_without_heap_flags(serialize, &desc, version, blob, error)
-}
-
-/// The second attempt of [`serialize_with`], with [`HEAP_FLAGS`] cleared.
-fn retry_without_heap_flags(
-    serialize: Serialize,
-    desc: &Desc,
-    version: u32,
-    blob: *mut *mut c_void,
-    error: *mut *mut c_void,
-) -> HRESULT {
     let stripped = Desc {
         flags: desc.flags & !HEAP_FLAGS,
-        ..*desc
+        ..desc
     };
-    // SAFETY: as in [`serialize_with`]: the same host export.
-    unsafe { serialize(&stripped, version, blob, error) }
+    let (mut retry_blob, mut retry_error) = (std::ptr::null_mut(), std::ptr::null_mut());
+    // SAFETY: as above: the same host export. The retry writes only through its
+    // own out slots, so the first attempt's diagnostic stays readable if the
+    // retry fails too.
+    let retried = unsafe { serialize(&stripped, version, &mut retry_blob, &mut retry_error) };
+    // SAFETY: the caller's out slots (null tolerated) and the host's blobs.
+    unsafe { finish_retry(blob, error, result, retried, retry_blob, retry_error) }
+}
+
+/// Hands the caller the retry's results when it succeeded, releasing the first
+/// attempt's diagnostic blob; otherwise keeps the first attempt's HRESULT and
+/// diagnostic, and releases the retry's.
+///
+/// # Safety
+/// `blob` and `error` are the caller's out slots (null tolerated); `retry_blob`
+/// and `retry_error` are the `ID3DBlob`s the host returned on the retry, or null.
+unsafe fn finish_retry(
+    blob: *mut *mut c_void,
+    error: *mut *mut c_void,
+    first: HRESULT,
+    retried: HRESULT,
+    retry_blob: *mut c_void,
+    retry_error: *mut c_void,
+) -> HRESULT {
+    if retried < 0 {
+        // SAFETY: a host blob or null.
+        unsafe { release_blob(retry_error) };
+        return first;
+    }
+    // SAFETY: the caller's out slot, unless it passed null.
+    let first_error = if error.is_null() {
+        std::ptr::null_mut()
+    } else {
+        // SAFETY: as above: a non-null caller slot.
+        unsafe { *error }
+    };
+    // SAFETY: a host blob or null.
+    unsafe { release_blob(first_error) };
+    if !error.is_null() {
+        // SAFETY: the caller's out slot.
+        unsafe { *error = retry_error };
+    }
+    if !blob.is_null() {
+        // SAFETY: the caller's out slot.
+        unsafe { *blob = retry_blob };
+    }
+    retried
+}
+
+/// Releases a blob the host returned, through its `IUnknown` vtable.
+///
+/// # Safety
+/// `blob` is a host `ID3DBlob` (`D3D12Serialize*RootSignature`'s `error`
+/// output) or null; it must not be used afterwards.
+unsafe fn release_blob(blob: *mut c_void) {
+    if blob.is_null() {
+        return;
+    }
+    // SAFETY: a host blob is a COM object, whose vtable's third slot is
+    // `Release`; this is the only reference we release.
+    unsafe {
+        let vtable = *(blob as *const *const usize);
+        let release: unsafe extern "system" fn(*mut c_void) -> u32 =
+            std::mem::transmute(*vtable.add(2));
+        release(blob);
+    }
 }
 
 /// `d3d12_xs!D3D12SerializeVersionedRootSignature`.
@@ -206,8 +259,11 @@ fn serialize_versioned_with(
         },
         ..desc
     };
-    // SAFETY: as above: the same host export.
-    unsafe { serialize(&stripped, blob, error) }
+    let (mut retry_blob, mut retry_error) = (std::ptr::null_mut(), std::ptr::null_mut());
+    // SAFETY: as above: the same host export, writing only its own out slots.
+    let retried = unsafe { serialize(&stripped, &mut retry_blob, &mut retry_error) };
+    // SAFETY: the caller's out slots (null tolerated) and the host's blobs.
+    unsafe { finish_retry(blob, error, result, retried, retry_blob, retry_error) }
 }
 
 type Deserialize =
@@ -394,6 +450,13 @@ mod tests {
     /// The flags the fake host was asked to serialize, in order.
     static SEEN: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
 
+    /// Calls made by [`refuses_flags_then_runs_out`].
+    static CALLS: std::sync::Mutex<u32> = std::sync::Mutex::new(0);
+
+    /// `E_OUTOFMEMORY`, which the retry of a heap-flag refusal must not report
+    /// in place of the first failure's HRESULT.
+    const E_OUTOFMEMORY: HRESULT = 0x8007_000E_u32 as HRESULT;
+
     fn plain(flags: u32) -> Desc {
         Desc {
             parameter_count: 0,
@@ -449,6 +512,26 @@ mod tests {
         E_INVALIDARG
     }
 
+    /// A host that refuses the heap-directly-indexed flags, then fails the
+    /// retry for an unrelated reason.
+    unsafe extern "system" fn refuses_flags_then_runs_out(
+        desc: *const Desc,
+        _: u32,
+        _: *mut *mut c_void,
+        _: *mut *mut c_void,
+    ) -> HRESULT {
+        // SAFETY: the tests pass a live description.
+        let flags = unsafe { (*desc).flags };
+        let mut calls = CALLS.lock().unwrap();
+        *calls += 1;
+        if *calls == 1 {
+            assert!(flags & HEAP_FLAGS != 0, "the first attempt keeps the flags");
+            E_INVALIDARG
+        } else {
+            E_OUTOFMEMORY
+        }
+    }
+
     /// A refusal of the heap-directly-indexed flags is retried without them,
     /// and nothing else is retried or changed.
     #[test]
@@ -491,5 +574,24 @@ mod tests {
             E_INVALIDARG,
             "a refusal that is not about the flags comes back unchanged"
         );
+    }
+
+    /// The first refusal's HRESULT survives a retry that fails for another
+    /// reason, so an older host is not reported as out of memory.
+    #[test]
+    fn a_failed_retry_reports_the_first_hresult() {
+        let (mut blob, mut error) = (std::ptr::null_mut(), std::ptr::null_mut());
+        *CALLS.lock().unwrap() = 0;
+        assert_eq!(
+            serialize_with(
+                refuses_flags_then_runs_out,
+                plain(0xc01),
+                1,
+                &mut blob,
+                &mut error
+            ),
+            E_INVALIDARG
+        );
+        assert_eq!(*CALLS.lock().unwrap(), 2, "both attempts were made");
     }
 }
