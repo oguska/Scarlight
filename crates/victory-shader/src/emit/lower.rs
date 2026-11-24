@@ -3710,7 +3710,8 @@ impl<'a> Lower<'a> {
     /// ([`Self::mask_dword`]). False if the op is not one.
     fn mask_op(&mut self, inst: &Inst) -> Result<bool, Why> {
         let name = inst.name();
-        let save = name.contains("_saveexec") || name.contains("_wrexec");
+        let saveexec = name.contains("_saveexec");
+        let wrexec = name.contains("_wrexec");
         let (op, flip) = match name {
             "s_mov_b32" | "s_mov_b64" => (MaskOp::Move, false),
             "s_and_b32" | "s_and_b64" => (MaskOp::And, false),
@@ -3733,10 +3734,11 @@ impl<'a> Lower<'a> {
         };
         let c = self.cur;
         let t = self.s.m.bool(true);
-        // A save form AND/OR/XORs (or ANDN2/ORN2s) the source with the EXEC it
-        // reads, and its destination saves that same old EXEC, so neither is
-        // the source nor every lane.
-        let old_exec = if save {
+        // A saveexec or wrexec form AND/OR/XORs (or ANDN2/ORN2s) the source
+        // with the EXEC it reads, so neither is the source nor every lane. A
+        // saveexec form's destination saves that same old EXEC; a wrexec
+        // form's writes the result, as EXEC gets it.
+        let old_exec = if saveexec || wrexec {
             Some(self.exec_bit(inst)?)
         } else {
             None
@@ -3779,12 +3781,12 @@ impl<'a> Lower<'a> {
         } else {
             x
         };
-        // A saved destination holds the EXEC the instruction read (each lane
-        // its own bit, false for a lane that was not in it); EXEC holds the
-        // op's result.
+        // A saveexec destination holds the EXEC the instruction read (each
+        // lane its own bit, false for a lane that was not in it); EXEC and a
+        // wrexec destination hold the op's result.
         let exec_write = inst.write(Reg::S(EXEC));
         for &(_, v) in &inst.writes {
-            let bit = if Some(v) == exec_write {
+            let bit = if Some(v) == exec_write || !saveexec {
                 x
             } else if let Some(e) = old_exec {
                 e
