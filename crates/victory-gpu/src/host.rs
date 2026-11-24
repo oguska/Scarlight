@@ -635,8 +635,16 @@ impl Host {
         }
         for (shadow, address, len) in &back {
             let (address, len) = (*address, *len);
+            #[cfg(feature = "diagnostics")]
+            let each = std::time::Instant::now();
             let written = shadow.copy_back(address, len);
             COPY_BACK[1].fetch_add(written as u64, Ordering::Relaxed);
+            #[cfg(feature = "diagnostics")]
+            crate::copystat::kind(
+                crate::copystat::Kind::CopyBack,
+                written,
+                each.elapsed().as_micros() as u64,
+            );
         }
         COPY_BACK[0].fetch_add(copying.elapsed().as_micros() as u64, Ordering::Relaxed);
         for list in runs {
@@ -1219,6 +1227,12 @@ impl HostList {
                     }
                     batch.title_written();
                     copy_mapped(dst as *mut u8, src as *const u8, len, true);
+                    #[cfg(feature = "diagnostics")]
+                    crate::copystat::kind(
+                        crate::copystat::Kind::TitleCopy,
+                        len,
+                        started.elapsed().as_micros() as u64,
+                    );
                     len
                 }
                 &Step::Fill(dst, src, len) => {
@@ -1228,6 +1242,12 @@ impl HostList {
                         add(C::CopyBytes, len as u64);
                     }
                     copy_mapped(dst as *mut u8, src as *const u8, len, false);
+                    #[cfg(feature = "diagnostics")]
+                    crate::copystat::kind(
+                        crate::copystat::Kind::TitleCopy,
+                        len,
+                        started.elapsed().as_micros() as u64,
+                    );
                     len
                 }
                 Step::Refresh(shadow, address, len) => {
@@ -1364,12 +1384,17 @@ impl Batch {
         };
         let us = started.elapsed().as_micros() as u64;
         #[cfg(feature = "diagnostics")]
-        for (_, ranges) in &refreshes {
-            for &(from, to) in ranges {
-                // One copy's time is its own; a shared question's is not.
-                let us = if refreshes.len() == 1 { us } else { 0 };
-                crate::copystat::range(from, to - from, us, 0);
+        {
+            for (_, ranges) in &refreshes {
+                for &(from, to) in ranges {
+                    // One copy's time is its own; a shared question's is not.
+                    let us = if refreshes.len() == 1 { us } else { 0 };
+                    crate::copystat::range(from, to - from, us, 0);
+                }
             }
+            // One call per submission's coalesced refresh set: the range
+            // count is `refreshes` in the copystat line.
+            crate::copystat::kind(crate::copystat::Kind::Buffer, copied, us);
         }
         PREPARING[0].fetch_add(us, Ordering::Relaxed);
         PREPARING[1].fetch_add(copied as u64, Ordering::Relaxed);

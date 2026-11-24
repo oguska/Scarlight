@@ -456,6 +456,12 @@ struct Guards {
     /// Starting blocks positively identified as section views. Remap and
     /// allocation notices invalidate these observations.
     views: BTreeSet<usize>,
+    /// Blocks found *not* to be in a view, and the region found then, until
+    /// the runtime remaps them. Without it every asking for such a range
+    /// asked the system again, and the world asks about thousands of small
+    /// ranges per frame; the region saves the write-watch side from asking
+    /// as well ([`forget_views`] forgets these like `views`).
+    plain: BTreeMap<usize, MemoryRegion>,
 }
 
 static GUARDS: Mutex<Guards> = Mutex::new(Guards {
@@ -463,6 +469,7 @@ static GUARDS: Mutex<Guards> = Mutex::new(Guards {
     clean: BTreeSet::new(),
     absent: BTreeSet::new(),
     views: BTreeSet::new(),
+    plain: BTreeMap::new(),
 });
 
 fn guards() -> std::sync::MutexGuard<'static, Guards> {
@@ -485,6 +492,15 @@ fn view_memory(first: usize, out: Option<&mut Option<MemoryRegion>>) -> bool {
     if guards().views.contains(&first) {
         return true;
     }
+    // The answer is asked for once per block: a range that is not a view
+    // was otherwise asked about again on every copy, and each query walks
+    // the pages of its region.
+    if let Some(&region) = guards().plain.get(&first) {
+        if let Some(out) = out {
+            *out = Some(region);
+        }
+        return false;
+    }
     let Some(region) = view_region(first * PAGE) else {
         return false;
     };
@@ -492,6 +508,7 @@ fn view_memory(first: usize, out: Option<&mut Option<MemoryRegion>>) -> bool {
         *out = Some(region);
     }
     if !region.mapped || region.reserved {
+        guards().plain.insert(first, region);
         return false;
     }
     guards().views.insert(first);
@@ -502,7 +519,16 @@ fn view_memory(first: usize, out: Option<&mut Option<MemoryRegion>>) -> bool {
 fn view_region(at: usize) -> Option<MemoryRegion> {
     #[cfg(test)]
     tests::QUERIED.with(|n| n.set(n.get() + 1));
-    memory_region(at)
+    #[cfg(feature = "diagnostics")]
+    let started = std::time::Instant::now();
+    let region = memory_region(at);
+    #[cfg(feature = "diagnostics")]
+    {
+        use crate::copystat::{C, add};
+        add(C::Queries, 1);
+        add(C::QueryUs, started.elapsed().as_micros() as u64);
+    }
+    region
 }
 
 fn guard_blocks(start: usize, end: usize) -> Vec<usize> {
@@ -656,6 +682,9 @@ pub fn title_memory_allocation_changed(at: usize, len: usize) {
 fn forget_views(guards: &mut Guards, first: usize, last: usize) {
     while let Some(block) = guards.views.range(first..last).next().copied() {
         guards.views.remove(&block);
+    }
+    while let Some((&block, _)) = guards.plain.range(first..last).next() {
+        guards.plain.remove(&block);
     }
 }
 
@@ -1263,8 +1292,8 @@ pub(crate) mod tests {
         unmap(v, 2);
     }
 
-    /// A view is asked about once per block an asking starts in, again
-    /// only after the runtime remapped it; other memory every time.
+    /// A view, and plain memory, are asked about once per block an asking
+    /// starts in, again only after the runtime remapped it.
     #[test]
     fn views_are_queried_once_until_remapped() {
         use windows_sys::Win32::System::Memory::{
@@ -1297,10 +1326,21 @@ pub(crate) mod tests {
         title_memory_remapped(view, BLOCK);
         assert!(guard(view, view + 2 * BLOCK).is_some());
         assert_eq!(queried(), at + 3);
-        // Private memory is not a view, however often asked.
+        // Private memory is not a view, and is asked about once however
+        // often the range is asked: the world asks about thousands of
+        // small ranges per frame, and each system query walks the pages of
+        // its region (0.3-0.4 ms in the title's big pools).
         let plain = vec![0u8; 2 * BLOCK];
         let p = plain.as_ptr() as usize;
+        // Whatever an earlier test learned about this block goes (tests
+        // share the process).
+        title_memory_remapped(p, 16);
         assert!(guard(p, p + 16).is_none());
+        assert_eq!(queried(), at + 4);
+        assert!(guard(p, p + 16).is_none());
+        assert_eq!(queried(), at + 4);
+        // The runtime remapped there: the answer is asked for again.
+        title_memory_remapped(p, 16);
         assert!(guard(p, p + 16).is_none());
         assert_eq!(queried(), at + 5);
         // SAFETY: our view.

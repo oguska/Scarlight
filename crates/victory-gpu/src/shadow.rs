@@ -452,6 +452,8 @@ impl Shadow {
                 return self.copy(from, to);
             }
         }
+        #[cfg(feature = "diagnostics")]
+        crate::copystat::add(crate::copystat::C::Unverified, (to - from) as u64);
         self.copy(from, to)
     }
 
@@ -481,12 +483,23 @@ impl Shadow {
                     *at = now;
                 }
                 run.get_or_insert(page);
-            } else if let Some(first) = run.take() {
-                bytes += self.copy((first * PAGE).max(from), (page * PAGE).min(to));
+            } else {
+                #[cfg(feature = "diagnostics")]
+                crate::copystat::add(crate::copystat::C::CleanPages, 1);
+                if let Some(first) = run.take() {
+                    #[cfg(feature = "diagnostics")]
+                    crate::copystat::add(crate::copystat::C::StalePages, (page - first) as u64);
+                    bytes += self.copy((first * PAGE).max(from), (page * PAGE).min(to));
+                }
             }
         }
         // Cut to the range: next to it shaders may be writing the copy.
         if let Some(first) = run {
+            #[cfg(feature = "diagnostics")]
+            crate::copystat::add(
+                crate::copystat::C::StalePages,
+                (last + 1 - first) as u64,
+            );
             bytes += self.copy((first * PAGE).max(from), ((last + 1) * PAGE).min(to));
         }
         bytes

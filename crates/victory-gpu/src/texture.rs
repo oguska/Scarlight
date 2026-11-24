@@ -177,8 +177,11 @@ impl Staging {
         let started = std::time::Instant::now();
         let read = self.refresh_now();
         let preparing = &crate::host::PREPARING;
-        preparing[2].fetch_add(started.elapsed().as_micros() as u64, Relaxed);
+        let us = started.elapsed().as_micros() as u64;
+        preparing[2].fetch_add(us, Relaxed);
         preparing[3].fetch_add(read as u64, Relaxed);
+        #[cfg(feature = "diagnostics")]
+        crate::copystat::kind(crate::copystat::Kind::Texture, read, us);
     }
 
     /// Returns the bytes of title memory read.
