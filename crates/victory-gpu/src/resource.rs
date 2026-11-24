@@ -833,9 +833,42 @@ fn host_texture(
     if d.flags & UNORDERED != 0 && SRGB.iter().any(|&(srgb, _)| srgb == d.format) {
         d.format = family(d.format);
     }
+    // Some console formats (such as B5G5R5A1_UNORM) allow unordered access
+    // or render-target flags on the console that PC GPUs refuse; drop
+    // unsupported flags on typed formats so the host copy is still created.
+    const RENDER_TARGET: u32 = 1;
+    let typeless = family(d.format) == d.format && family(d.format + 1) == d.format;
+    if !typeless && d.flags & (RENDER_TARGET | UNORDERED) != 0 {
+        let mut support = D3D12_FEATURE_DATA_FORMAT_SUPPORT {
+            Format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT(d.format as i32),
+            ..Default::default()
+        };
+        // SAFETY: plain feature query into our struct.
+        let ok = unsafe {
+            host.device.CheckFeatureSupport(
+                D3D12_FEATURE_FORMAT_SUPPORT,
+                (&raw mut support).cast(),
+                size_of::<D3D12_FEATURE_DATA_FORMAT_SUPPORT>() as u32,
+            )
+        }
+        .is_ok();
+        if ok {
+            if d.flags & UNORDERED != 0
+                && support.Support1.0 & D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW.0 == 0
+            {
+                d.flags &= !UNORDERED;
+            }
+            if d.flags & RENDER_TARGET != 0
+                && support.Support1.0 & D3D12_FORMAT_SUPPORT1_RENDER_TARGET.0 == 0
+            {
+                d.flags &= !RENDER_TARGET;
+            }
+        }
+    }
     // The clear value names the format too: format, then color or depth
-    // and stencil (5 words).
-    let clear_value = (!clear.is_null()).then(|| {
+    // and stencil (5 words). D3D12 requires a null optimized clear value
+    // when neither render-target nor depth-stencil is set (id=815).
+    let clear_value = (!clear.is_null() && d.flags & (RENDER_TARGET | DEPTH) != 0).then(|| {
         // SAFETY: the title passes a whole clear value.
         let mut value = unsafe { clear.cast::<[u32; 5]>().read_unaligned() };
         value[0] = pc_format(value[0]);
@@ -1839,5 +1872,52 @@ mod tests {
         // The resource keeps the heap alive.
         assert_eq!(slot::<Release>(heap, 0x10)(heap), 1);
         assert_eq!(slot::<Release>(placed, 0x10)(placed), 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn host_texture_drops_unsupported_uav_flag_for_b5g5r5a1() {
+        use windows::Win32::Graphics::Direct3D12::*;
+        if crate::host::host().is_none() {
+            return; // no host GPU here
+        }
+        let make = |format: u32, flags: u32| ResourceDesc {
+            dimension: 3, // TEXTURE2D
+            alignment: 0,
+            width: 64,
+            height: 64,
+            depth_or_array_size: 1,
+            mip_levels: 1,
+            format,
+            sample_count: 1,
+            sample_quality: 0,
+            layout: 0,
+            flags,
+        };
+        // B5G5R5A1_UNORM (86) with ALLOW_RENDER_TARGET | ALLOW_UNORDERED_ACCESS (5):
+        // PC refuses typed UAV on this format; dropping UAV lets the host copy succeed.
+        let b5g5r5a1 = host_texture(&make(86, 5), 0, std::ptr::null())
+            .expect("B5G5R5A1_UNORM texture should be created without UAV flag");
+        // SAFETY: live D3D12 resource.
+        let d = unsafe { b5g5r5a1.GetDesc() };
+        assert_eq!(d.Flags.0 & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS.0, 0);
+        assert_ne!(d.Flags.0 & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET.0, 0);
+
+        // B4G4R4A4_UNORM (115) with ALLOW_RENDER_TARGET (1) and a non-null
+        // clear value: dropping RENDER_TARGET must also omit pOptimizedClearValue
+        // so CreateCommittedResource succeeds without id=815.
+        let clear = [115u32, 0, 0, 0, 0];
+        let b4g4r4a4 = host_texture(&make(115, 1), 0, clear.as_ptr().cast())
+            .expect("B4G4R4A4_UNORM texture should succeed with clear value dropped");
+        // SAFETY: live D3D12 resource.
+        let bd = unsafe { b4g4r4a4.GetDesc() };
+        assert_eq!(bd.Flags.0 & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET.0, 0);
+
+        // R8G8B8A8_TYPELESS (27) with flags=5 must keep ALLOW_UNORDERED_ACCESS.
+        let typeless = host_texture(&make(27, 5), 0, std::ptr::null())
+            .expect("R8G8B8A8_TYPELESS texture should succeed");
+        // SAFETY: live D3D12 resource.
+        let td = unsafe { typeless.GetDesc() };
+        assert_ne!(td.Flags.0 & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS.0, 0);
     }
 }
