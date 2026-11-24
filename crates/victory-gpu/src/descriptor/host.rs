@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use victory_shader::emit::{RawWindow, StrideEntry};
 use windows::Win32::Graphics::Direct3D12::*;
@@ -26,6 +27,11 @@ struct UnalignedCopy {
     len: usize,
 }
 
+struct LiveSlots {
+    seen: Vec<bool>,
+    slots: Vec<u32>,
+}
+
 pub(crate) struct HostHeap {
     pub(crate) heap: ID3D12DescriptorHeap,
     cpu: usize,
@@ -38,6 +44,11 @@ pub(crate) struct HostHeap {
     sampler: bool,
     /// The record (view index and generation) each slot was last made from.
     made: Mutex<Vec<u64>>,
+    /// Title slots in this view heap that have held a view, for bindless
+    /// refresh before draws/dispatches.
+    live: Mutex<LiveSlots>,
+    /// Incremented whenever the title writes or updates a view in this heap.
+    generation: AtomicU64,
     /// The host resource each slot views, held while the slot does: shaders
     /// index heaps directly, so a slot the title has not rewritten since it
     /// released the resource may still be read, and a freed host resource
@@ -260,6 +271,11 @@ impl HostHeap {
             dynamic: extra,
             sampler,
             made: Mutex::new(vec![0; count as usize]),
+            live: Mutex::new(LiveSlots {
+                seen: vec![false; if sampler { 0 } else { count as usize }],
+                slots: Vec::new(),
+            }),
+            generation: AtomicU64::new(0),
             kept: Mutex::new(vec![None; (count + extra) as usize]),
             unaligned: Mutex::new(HashMap::new()),
             next: Mutex::new((0, vec![false; extra as usize])),
@@ -648,10 +664,16 @@ impl HostHeap {
             if made[index as usize] != 0 {
                 made[index as usize] = 0;
                 self.make_null(index);
+                if !self.sampler {
+                    self.generation.fetch_add(1, Ordering::Release);
+                }
+            } else if !for_draw && !self.sampler {
+                self.generation.fetch_add(1, Ordering::Release);
             }
             return None;
         };
-        if made[index as usize] != key {
+        let changed = made[index as usize] != key;
+        if changed {
             let later = !for_draw && view.is_buffer();
             made[index as usize] = if later { 0 } else { key };
             let kept = if later {
@@ -665,7 +687,30 @@ impl HostHeap {
             self.note_view(index, &view, kept.as_ref());
             self.keep(index, kept.unwrap_or(Kept::Empty));
         }
+        if !self.sampler && (!for_draw || changed) {
+            let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(seen) = live.seen.get_mut(index as usize)
+                && !*seen
+            {
+                *seen = true;
+                live.slots.push(index);
+            }
+            drop(live);
+            self.generation.fetch_add(1, Ordering::Release);
+        }
         Some(view)
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn live_slots(&self) -> Vec<u32> {
+        self.live
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .slots
+            .clone()
     }
 
     /// The view host slot `index` was made from, in a few words, with the

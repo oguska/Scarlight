@@ -384,6 +384,14 @@ fn record(handle: u64, view: View) {
     mirror(handle);
 }
 
+#[cfg(windows)]
+static FORGOTTEN_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(windows)]
+pub(crate) fn forgotten_epoch() -> u64 {
+    FORGOTTEN_EPOCH.load(std::sync::atomic::Ordering::Acquire)
+}
+
 /// The title released `resource`: the views naming it go stale.
 pub(crate) fn forget(resource: usize) {
     let mut views = VIEWS.lock().unwrap_or_else(|e| e.into_inner());
@@ -403,6 +411,8 @@ pub(crate) fn forget(resource: usize) {
         // `forget` of that resource skips.
         views.free.push(i);
     }
+    #[cfg(windows)]
+    FORGOTTEN_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Release);
 }
 
 /// The view of entry `i` if `generation` is still its own.
@@ -791,5 +801,43 @@ mod tests {
         // A size that does not match the count is not a placement.
         assert_eq!(create(desc, Placement { address, size: 7 }, &mut h), S_OK);
         assert_ne!(slot::<extern "system" fn(This) -> u64>(h, 0x48)(h), address);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn shader_visible_heap_tracks_live_slots_and_generation() {
+        let null = std::ptr::null();
+        let desc = HeapDesc {
+            kind: VIEWS_KIND,
+            count: 16,
+            flags: SHADER_VISIBLE,
+            nodes: 1,
+        };
+        let mut h = std::ptr::null();
+        assert_eq!(create(desc, Placement { address: 0, size: 0 }, &mut h), S_OK);
+        let heap_ref = heap(h);
+        let Some(host) = heap_ref.host() else {
+            return; // no host GPU here
+        };
+        let gen0 = host.generation();
+        assert!(host.live_slots().is_empty());
+        let slot5 = heap_ref.start + 5 * 32;
+        let slot9 = heap_ref.start + 9 * 32;
+        create_srv(null, null, std::ptr::null(), slot5);
+        create_uav(null, null, null, std::ptr::null(), slot9);
+        let gen1 = host.generation();
+        assert!(gen1 > gen0);
+        let mut slots = host.live_slots();
+        slots.sort_unstable();
+        assert_eq!(slots, vec![5, 9]);
+        // Overwriting slot 5 and clearing slot 9 to unwritten bumps generation.
+        create_uav(null, null, null, std::ptr::null(), slot5);
+        let gen2 = host.generation();
+        assert!(gen2 > gen1);
+        // SAFETY: slot9 is inside the heap's memory.
+        unsafe { (slot9 as *mut [u32; 3]).write_unaligned([0, 0, 0]) };
+        mirror(slot9);
+        assert!(host.generation() > gen2);
+        assert_eq!(slot::<extern "system" fn(This) -> u32>(h, 0x10)(h), 0);
     }
 }
