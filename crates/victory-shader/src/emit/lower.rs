@@ -197,6 +197,30 @@ fn buffer_format(format: u8) -> Option<(&'static [u32], Numeric)> {
     None
 }
 
+/// The slot of the immediate sampler `words` in `samplers`, used as a
+/// comparison sampler when `cmp`: an existing slot of the same words and
+/// mode, else a new one. `cmp_samplers` holds the mode of each slot in a
+/// `u64`, so a 65th slot has nowhere to record it.
+fn immediate_sampler_slot(
+    samplers: &mut Vec<[u32; 4]>,
+    cmp_samplers: u64,
+    words: [u32; 4],
+    cmp: bool,
+) -> Result<usize, Why> {
+    let found = samplers
+        .iter()
+        .enumerate()
+        .position(|(n, w)| *w == words && (cmp_samplers >> n & 1 != 0) == cmp);
+    if let Some(n) = found {
+        return Ok(n);
+    }
+    if samplers.len() >= u64::BITS as usize {
+        return Err("more than 64 immediate samplers");
+    }
+    samplers.push(words);
+    Ok(samplers.len() - 1)
+}
+
 /// How far a float channel of `width` bits (16, or the unsigned 11- and
 /// 10-bit floats of the packed formats) shifts up to be a half:
 /// the small floats are a half's exponent (5 bits, biased 15) and the top
@@ -4918,15 +4942,8 @@ impl<'a> Lower<'a> {
                 // need two slots (DXIL rejects either handle in the other's
                 // operation), and two either way still share one.
                 let cmp = props.0 & 0x8000 != 0;
-                let n = match self.samplers.iter().enumerate().position(|(n, w)| {
-                    *w == words && (self.s.cmp_samplers >> n & 1 != 0) == cmp
-                }) {
-                    Some(n) => n,
-                    None => {
-                        self.samplers.push(words);
-                        self.samplers.len() - 1
-                    }
-                };
+                let n =
+                    immediate_sampler_slot(&mut self.samplers, self.s.cmp_samplers, words, cmp)?;
                 if cmp {
                     self.s.cmp_samplers |= 1 << n;
                 }
@@ -7949,10 +7966,9 @@ impl<'a> Lower<'a> {
             // (DirectX-Specs, HLSL SM 6.6 Derivatives).
             let derivatives = self.s.pixel
                 || self.s.mesh.is_none()
-                    && self
-                        .s
-                        .threads
-                        .is_some_and(|[x, y, z]| x % 4 == 0 && y == 1 && z == 1 || x % 2 == 0 && y % 2 == 0);
+                    && self.s.threads.is_some_and(|[x, y, z]| {
+                        x % 4 == 0 && y == 1 && z == 1 || x % 2 == 0 && y % 2 == 0
+                    });
             // The DXIL operation. SM 6.6 has no comparison at a level, with
             // a bias or with gradients (SampleCmpLevel is SM 6.7,
             // SampleCmpBias and SampleCmpGrad 6.8) and gathers level 0 only;
@@ -8104,9 +8120,10 @@ impl<'a> Lower<'a> {
                     // take any, per lane). At a level known here, the
                     // coordinates move by offset / that level's size instead:
                     // the same texels, the coordinate rounded once more (the
-                    // console adds the offset to the texel coordinate). A
-                    // sampler whose LOD clamp or bias moves the sampled
-                    // level away from the one given, or a level past the
+                    // console adds the offset to the texel coordinate).
+                    // shortcut: a sampler whose LOD clamp or bias moves the
+                    // sampled level away from the one given (the shift is
+                    // that level's, not the one read), or a level past the
                     // view's last, differs.
                     let Some(n) = level.filter(|n| *n >= 0.0 && n.fract() == 0.0) else {
                         return Err(
@@ -9707,7 +9724,8 @@ fn image_address_place(k: usize, extras: usize, grads: usize, a16: bool) -> (usi
 #[cfg(test)]
 mod tests {
     use super::{
-        Lowered, Numeric, Parts, buffer_format, f16_to_f32, half_shift, image_address_place, lower,
+        Lowered, Numeric, Parts, buffer_format, f16_to_f32, half_shift, image_address_place,
+        immediate_sampler_slot, lower,
     };
     use crate::native::{
         ComputeIo, HwStage, NativeProgram, ResourceType, RootParam, RootType, StageIo, UsedResource,
@@ -9733,6 +9751,34 @@ mod tests {
             assert_eq!(f16_to_f32(bits), want, "{bits:#06x}");
         }
         assert!(f16_to_f32(0x7E00).is_nan());
+    }
+
+    #[test]
+    fn immediate_samplers_share_a_slot_by_words_and_mode_up_to_64() {
+        let mut slots = Vec::new();
+        let mut mask = 0u64;
+        let w = |k: u32| [k, 0, 0, 0];
+        // The same words used both ways take two slots; a repeat reuses one.
+        assert_eq!(immediate_sampler_slot(&mut slots, mask, w(1), false), Ok(0));
+        assert_eq!(immediate_sampler_slot(&mut slots, mask, w(1), true), Ok(1));
+        mask |= 1 << 1;
+        assert_eq!(immediate_sampler_slot(&mut slots, mask, w(1), false), Ok(0));
+        assert_eq!(immediate_sampler_slot(&mut slots, mask, w(1), true), Ok(1));
+        // Fill the 64 slots the mask can describe; a 65th is refused, and
+        // the existing ones still answer.
+        for k in 2..64 {
+            assert_eq!(
+                immediate_sampler_slot(&mut slots, mask, w(k), false),
+                Ok(k as usize)
+            );
+        }
+        assert_eq!(slots.len(), 64);
+        assert!(immediate_sampler_slot(&mut slots, mask, w(99), false).is_err());
+        assert_eq!(slots.len(), 64);
+        assert_eq!(
+            immediate_sampler_slot(&mut slots, mask, w(63), false),
+            Ok(63)
+        );
     }
 
     #[test]
