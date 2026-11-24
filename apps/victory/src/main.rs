@@ -129,6 +129,8 @@ enum Console {
 
 fn main() -> Result<()> {
     victory_core::logging::init("info");
+    #[cfg(victory_agility)]
+    agility::check_runtime();
     // The audio recorder `run` starts for `VICTORY_AUDIO_CAPTURE`.
     #[cfg(all(windows, feature = "diagnostics"))]
     if victory_hle::modules::audio::capture::child() {
@@ -233,4 +235,51 @@ pub(crate) fn default_paths(paths: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
         "no paths given and none configured (see victory.example.toml)"
     );
     Ok(all)
+}
+
+/// Opt in to the Agility SDK runtime, when this build was configured for one.
+///
+/// The host loader reads the `D3D12SDKVersion` and `D3D12SDKPath` exports
+/// when `d3d12.dll` is loaded into the process, so they must be part of the
+/// image itself; `build.rs` emits the `/EXPORT` arguments only when a runtime
+/// sits next to the output binary, and this module is compiled only then.
+#[cfg(victory_agility)]
+mod agility {
+    /// Agility SDK version, matching `D3D12Core.dll` `1.614.1`.
+    #[unsafe(no_mangle)]
+    pub static D3D12SDKVersion: u32 = 614;
+
+    /// Path the loader appends to the executable's directory.
+    const SDK_PATH: &[u8] = b".\\D3D12\\\0";
+
+    /// A `static` may not hold a raw pointer directly (it is not `Sync`), but
+    /// the loader wants the export's contents to be one, so wrap it.
+    #[repr(transparent)]
+    pub struct SdkPath(*const u8);
+
+    // SAFETY: the pointer targets immutable static bytes and is never written.
+    unsafe impl Sync for SdkPath {}
+
+    /// The loader reads this export as a `const char*`: a pointer to a
+    /// NUL-terminated path relative to the executable.
+    #[unsafe(no_mangle)]
+    pub static D3D12SDKPath: SdkPath = SdkPath(SDK_PATH.as_ptr());
+
+    /// Point a missing runtime out before a device-creation failure does.
+    pub fn check_runtime() {
+        let Ok(exe) = std::env::current_exe() else {
+            return;
+        };
+        let Some(dir) = exe.parent() else {
+            return;
+        };
+        let runtime = dir.join("D3D12").join("D3D12Core.dll");
+        if !runtime.is_file() {
+            eprintln!(
+                "victory: this build opted into the D3D12 Agility SDK runtime, but {} is \
+                 missing; copy D3D12Core.dll from Microsoft.Direct3D.D3D12 into that directory",
+                runtime.display()
+            );
+        }
+    }
 }

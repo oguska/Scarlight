@@ -24,6 +24,16 @@ Requirements: Windows 10/11 x64, a CPU with AVX2, a Direct3D 12 GPU with
 shader model 6.6 (and mesh shaders for the world), Rust (pinned in
 `rust-toolchain.toml`).
 
+The translated shaders need shader model 6.6, which Windows 10's inbox D3D12
+runtime does not expose (it stops at 6.5). On such a system, put Microsoft's
+Agility SDK runtime next to the built executable: download
+`Microsoft.Direct3D.D3D12` 1.614.1 from NuGet, copy
+`build/native/bin/x64/D3D12Core.dll` to `target\release\D3D12\`, then build.
+The build detects that file and exports the loader's opt-in symbols
+(`D3D12SDKVersion` 614 and `D3D12SDKPath`); without the file the build uses
+the system runtime unchanged. `cargo clean` removes the folder, so copy it
+again before rebuilding.
+
 The title also needs several GiB of available Windows commit at startup.
 Check **Committed** under **Task Manager → Performance → Memory**. If
 `crashes.log` reports Windows error 1455, close other applications or increase
