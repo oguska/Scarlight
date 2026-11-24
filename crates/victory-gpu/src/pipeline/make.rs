@@ -7,27 +7,55 @@
 //! title's GPU watchdog ended the run (decision 0007, "Pipelines made off
 //! the title's threads").
 //!
-//! A first use queues the pipeline and waits for it within a budget per
-//! frame, so the cheap ones (menus, one-off passes such as a colour-grading
-//! bake) are there at once as before; past the budget a draw or dispatch
-//! whose pipeline is not ready is dropped, as an untranslated one is.
+//! A first use queues the pipeline on a repeat-demand priority queue and
+//! waits for it within a budget per frame, so the cheap ones (menus,
+//! one-off passes such as a colour-grading bake) are there at once as before;
+//! pipelines demanded again by recurring draws/dispatches jump ahead of
+//! single-hit entries (with non-mesh tie-breaking and bounded anti-starvation
+//! fairness) and ahead of speculative early pre-warms; past the budget a
+//! draw or dispatch whose pipeline is not ready is dropped, as an
+//! untranslated one is.
 //!
 //! shortcut: the budget (half a second of waiting per title frame) is a
 //! guess; a pass the title runs only once and whose pipeline takes longer
 //! is lost.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::collections::{BinaryHeap, VecDeque};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use super::Shader;
 use super::host::{GraphicsState, HostPipeline};
 
+const UNQUEUED: u8 = 0;
+const EARLY: u8 = 1;
+const DEMAND: u8 = 2;
+/// Highest priority bucket (`hits >= 256`); caps duplicate heap pushes per item.
+const MAX_TIER: u8 = 10;
+/// Maximum consecutive higher-tier (`tier >= 2`) pops before serving one oldest
+/// waiting demand entry.
+const FAIR_STRIDE: u32 = 16;
+
+fn demand_tier(hits: u32) -> u8 {
+    match hits {
+        0 => 0,
+        1..=3 => hits as u8,
+        n => (33 - n.leading_zeros()).min(u32::from(MAX_TIER)) as u8,
+    }
+}
+
 /// What a host pipeline is made from, and the host pipeline once made.
 pub(crate) struct Pending {
     shaders: Vec<Arc<Shader>>,
     pub(crate) graphics: Option<Box<GraphicsState>>,
-    queued: AtomicBool,
+    non_mesh: bool,
+    lane: AtomicU8,
+    hits: AtomicU32,
+    tier_queued: AtomicU8,
+    counted: AtomicBool,
+    in_fair: AtomicBool,
+    started: AtomicBool,
     made: OnceLock<Option<HostPipeline>>,
     /// What identifies it across runs (shader containers and state), and
     /// whether a draw has used it yet.
@@ -43,6 +71,15 @@ unsafe impl Sync for Pending {}
 
 impl Pending {
     pub(crate) fn new(shaders: Vec<Arc<Shader>>, graphics: Option<Box<GraphicsState>>) -> Pending {
+        let non_mesh = !shaders.iter().any(|s| s.stage == "mesh");
+        Self::with_non_mesh(shaders, graphics, non_mesh)
+    }
+
+    fn with_non_mesh(
+        shaders: Vec<Arc<Shader>>,
+        graphics: Option<Box<GraphicsState>>,
+        non_mesh: bool,
+    ) -> Pending {
         let mut key = blake3::Hasher::new();
         for s in &shaders {
             key.update(s.stage.as_bytes());
@@ -52,11 +89,26 @@ impl Pending {
         Pending {
             shaders,
             graphics,
-            queued: AtomicBool::new(false),
+            non_mesh,
+            lane: AtomicU8::new(UNQUEUED),
+            hits: AtomicU32::new(0),
+            tier_queued: AtomicU8::new(0),
+            counted: AtomicBool::new(false),
+            in_fair: AtomicBool::new(false),
+            started: AtomicBool::new(false),
             made: OnceLock::new(),
             key: key.finalize().to_hex()[..32].to_owned(),
             used: AtomicBool::new(false),
         }
+    }
+
+    #[cfg(test)]
+    fn is_queued(&self) -> bool {
+        self.lane.load(Ordering::Relaxed) != UNQUEUED
+    }
+
+    fn claim(&self) -> bool {
+        !self.started.swap(true, Ordering::AcqRel)
     }
 
     fn make(&self) {
@@ -106,10 +158,11 @@ pub(crate) fn waiting() -> u64 {
 }
 
 /// The host pipeline if it is made (or is made within the frame's budget);
-/// queues it on first use.
+/// queues it on first use, promotes queued early pipelines, and upgrades
+/// priority on repeat demand.
 pub(crate) fn ready(p: &Arc<Pending>) -> Option<&HostPipeline> {
     if p.made.get().is_none() {
-        start(p);
+        start(p, true);
         wait(p, crate::frame::current());
     }
     let made = p.made.get()?.as_ref();
@@ -119,20 +172,64 @@ pub(crate) fn ready(p: &Arc<Pending>) -> Option<&HostPipeline> {
     made
 }
 
-/// Queues `p` for the workers, once.
-fn start(p: &Arc<Pending>) {
-    if !p.queued.swap(true, Ordering::Relaxed) {
-        PEAK.fetch_max(WAITING.fetch_add(1, Ordering::Relaxed) + 1, Ordering::Relaxed);
-        queue(p.clone());
+/// Queues `p` for the workers on the demand or early lane (and promotes
+/// unstarted early pipelines to demand without double-counting `WAITING`).
+fn start(p: &Arc<Pending>, is_demand: bool) {
+    enqueue_on(p, is_demand, &WAITING, &PEAK, work_queue());
+}
+
+fn bump_hit(hits: &AtomicU32) -> u32 {
+    match hits.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1)) {
+        Ok(prev) => prev + 1,
+        Err(max) => max,
     }
 }
 
-/// At the title's creation of a pipeline: starts it at once if an earlier
-/// run drew with it (during loading, so the world's first frames find it).
+fn enqueue_on(
+    p: &Arc<Pending>,
+    is_demand: bool,
+    waiting: &AtomicU64,
+    peak: &AtomicU64,
+    queue: &WorkQueue,
+) {
+    if !is_demand {
+        if p.lane
+            .compare_exchange(UNQUEUED, EARLY, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            queue.push_early(p.clone(), waiting, peak);
+        }
+        return;
+    }
+
+    if p.started.load(Ordering::Acquire) {
+        return;
+    }
+    let _ = p
+        .lane
+        .compare_exchange(UNQUEUED, DEMAND, Ordering::AcqRel, Ordering::Acquire)
+        .or_else(|_| {
+            p.lane
+                .compare_exchange(EARLY, DEMAND, Ordering::AcqRel, Ordering::Acquire)
+        });
+    if p.started.load(Ordering::Acquire) {
+        return;
+    }
+    let hits = bump_hit(&p.hits);
+    let tier = demand_tier(hits);
+    let prev = p.tier_queued.fetch_max(tier, Ordering::AcqRel);
+    if prev < tier {
+        queue.push_demand(p.clone(), tier, waiting, peak);
+    }
+}
+
+/// At the title's creation of a pipeline: starts it at once on the lower-priority
+/// lane if an earlier run drew with it (during loading, so the world's first
+/// frames find it without delaying live draws).
 pub(crate) fn early(p: &Arc<Pending>) {
     if !p.shaders.is_empty() && super::library::wanted_early(&p.key) {
         super::library::EARLY.fetch_add(1, Ordering::Relaxed);
-        start(p);
+        start(p, false);
     }
 }
 
@@ -157,16 +254,198 @@ fn wait(p: &Pending, frame: u64) {
     WAITED_US.fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
 }
 
-/// Hands `p` to the workers (half the logical processors, 2 to 8), started
-/// on first use.
-fn queue(p: Arc<Pending>) {
-    static SENDER: OnceLock<std::sync::mpsc::Sender<Arc<Pending>>> = OnceLock::new();
-    let sender = SENDER.get_or_init(|| {
-        let (sender, receiver) = std::sync::mpsc::channel::<Arc<Pending>>();
-        let receiver = Arc::new(Mutex::new(receiver));
+struct WorkItem {
+    tier: u8,
+    non_mesh: bool,
+    seq: u64,
+    pending: Arc<Pending>,
+}
+
+impl Ord for WorkItem {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.tier
+            .cmp(&other.tier)
+            .then_with(|| self.non_mesh.cmp(&other.non_mesh))
+            .then_with(|| other.seq.cmp(&self.seq))
+    }
+}
+
+impl PartialOrd for WorkItem {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Eq for WorkItem {}
+
+impl PartialEq for WorkItem {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == std::cmp::Ordering::Equal
+    }
+}
+
+struct Queues {
+    next_seq: u64,
+    high_streak: u32,
+    demand: BinaryHeap<WorkItem>,
+    fair_fifo: VecDeque<Arc<Pending>>,
+    early: VecDeque<Arc<Pending>>,
+}
+
+impl Queues {
+    const fn new() -> Self {
+        Self {
+            next_seq: 0,
+            high_streak: 0,
+            demand: BinaryHeap::new(),
+            fair_fifo: VecDeque::new(),
+            early: VecDeque::new(),
+        }
+    }
+
+    /// Pops the highest-priority unclaimed pipeline: repeat-demanded entries
+    /// (with non-mesh, oldest-queued tie-break) ahead of 1-hit demand entries,
+    /// interleaving an oldest waiting demand entry after `FAIR_STRIDE` high-tier
+    /// pops so 1-hit work cannot permanently starve, and draining `early` last.
+    fn pop_claimed(&mut self) -> Option<Arc<Pending>> {
+        while self
+            .fair_fifo
+            .front()
+            .is_some_and(|p| p.started.load(Ordering::Acquire))
+        {
+            self.fair_fifo.pop_front();
+        }
+        if self.high_streak >= FAIR_STRIDE && !self.fair_fifo.is_empty() {
+            while let Some(p) = self.fair_fifo.pop_front() {
+                if p.claim() {
+                    self.high_streak = 0;
+                    return Some(p);
+                }
+            }
+        }
+        while let Some(item) = self.demand.pop() {
+            if item.pending.claim() {
+                if item.tier >= 2 {
+                    self.high_streak += 1;
+                } else {
+                    self.high_streak = 0;
+                }
+                return Some(item.pending);
+            }
+        }
+        self.high_streak = 0;
+        while let Some(p) = self.early.pop_front() {
+            if p.claim() {
+                return Some(p);
+            }
+        }
+        None
+    }
+}
+
+struct WorkQueue {
+    state: Mutex<Queues>,
+    ready: Condvar,
+    workers_alive: AtomicBool,
+}
+
+impl WorkQueue {
+    fn new(workers_alive: bool) -> Self {
+        Self {
+            state: Mutex::new(Queues::new()),
+            ready: Condvar::new(),
+            workers_alive: AtomicBool::new(workers_alive),
+        }
+    }
+
+    fn make_inline(p: &Pending, waiting: &AtomicU64, peak: &AtomicU64) {
+        if p.claim() {
+            if !p.counted.swap(true, Ordering::Relaxed) {
+                peak.fetch_max(waiting.fetch_add(1, Ordering::Relaxed) + 1, Ordering::Relaxed);
+            }
+            p.make();
+            if waiting.fetch_sub(1, Ordering::Relaxed) == 1 {
+                drained();
+            }
+        }
+    }
+
+    fn push_demand(&self, p: Arc<Pending>, tier: u8, waiting: &AtomicU64, peak: &AtomicU64) {
+        if !self.workers_alive.load(Ordering::Acquire) {
+            Self::make_inline(&p, waiting, peak);
+            return;
+        }
+        let mut queues = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if p.started.load(Ordering::Acquire) {
+            return;
+        }
+        if !p.counted.swap(true, Ordering::Relaxed) {
+            peak.fetch_max(waiting.fetch_add(1, Ordering::Relaxed) + 1, Ordering::Relaxed);
+        }
+        let seq = queues.next_seq;
+        queues.next_seq = queues.next_seq.wrapping_add(1);
+        if queues.demand.is_empty() && tier <= 1 {
+            queues.high_streak = 0;
+        }
+        if !p.in_fair.swap(true, Ordering::Relaxed) {
+            queues.fair_fifo.push_back(p.clone());
+        }
+        queues.demand.push(WorkItem {
+            tier,
+            non_mesh: p.non_mesh,
+            seq,
+            pending: p,
+        });
+        drop(queues);
+        self.ready.notify_one();
+    }
+
+    fn push_early(&self, p: Arc<Pending>, waiting: &AtomicU64, peak: &AtomicU64) {
+        if !self.workers_alive.load(Ordering::Acquire) {
+            Self::make_inline(&p, waiting, peak);
+            return;
+        }
+        let mut queues = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if p.started.load(Ordering::Acquire) {
+            return;
+        }
+        if !p.counted.swap(true, Ordering::Relaxed) {
+            peak.fetch_max(waiting.fetch_add(1, Ordering::Relaxed) + 1, Ordering::Relaxed);
+        }
+        queues.early.push_back(p);
+        drop(queues);
+        self.ready.notify_one();
+    }
+
+    fn recv(&self) -> Arc<Pending> {
+        let mut queues = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if let Some(p) = queues.pop_claimed() {
+                return p;
+            }
+            queues = self.ready.wait(queues).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+
+    #[cfg(test)]
+    fn try_pop(&self) -> Option<Arc<Pending>> {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pop_claimed()
+    }
+}
+
+/// Shared priority queue and workers (half the logical processors, 2 to 8),
+/// started on first use.
+fn work_queue() -> &'static WorkQueue {
+    static QUEUE: OnceLock<Arc<WorkQueue>> = OnceLock::new();
+    QUEUE.get_or_init(|| {
+        let queue = Arc::new(WorkQueue::new(false));
         let workers = std::thread::available_parallelism().map_or(2, |n| (n.get() / 2).clamp(2, 8));
+        let mut alive = false;
         for i in 0..workers {
-            let receiver = receiver.clone();
+            let worker_queue = queue.clone();
             let spawned = std::thread::Builder::new()
                 .name(format!("victory-pipelines-{i}"))
                 .spawn(move || {
@@ -177,8 +456,7 @@ fn queue(p: Arc<Pending>) {
                         let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
                     }
                     loop {
-                        let next = receiver.lock().unwrap_or_else(|e| e.into_inner()).recv();
-                        let Ok(p) = next else { return };
+                        let p = worker_queue.recv();
                         p.make();
                         if WAITING.fetch_sub(1, Ordering::Relaxed) == 1 {
                             drained();
@@ -187,17 +465,14 @@ fn queue(p: Arc<Pending>) {
                         }
                     }
                 });
-            if let Err(e) = spawned {
-                tracing::warn!(error = %e, "no pipeline worker");
+            match spawned {
+                Ok(_) => alive = true,
+                Err(e) => tracing::warn!(error = %e, "no pipeline worker"),
             }
         }
-        sender
-    });
-    if let Err(e) = sender.send(p) {
-        // No worker: made here instead.
-        e.0.make();
-        WAITING.fetch_sub(1, Ordering::Relaxed);
-    }
+        queue.workers_alive.store(alive, Ordering::Release);
+        queue
+    })
 }
 
 /// The most pipelines waiting at once since the workers last ran out.
@@ -228,11 +503,133 @@ mod tests {
     fn first_use_is_made_by_a_worker() {
         let p = Arc::new(Pending::new(Vec::new(), None));
         assert!(ready(&p).is_none());
-        assert!(p.queued.load(Ordering::Relaxed));
+        assert!(p.is_queued());
         let started = Instant::now();
         while p.made.get().is_none() && started.elapsed() < Duration::from_secs(10) {
             std::thread::yield_now();
         }
         assert!(matches!(p.made.get(), Some(None)));
+    }
+
+    #[test]
+    fn priority_queue_runs_ready_and_promoted_before_early() {
+        let q = WorkQueue::new(true);
+        let waiting = AtomicU64::new(0);
+        let peak = AtomicU64::new(0);
+
+        let e1 = Arc::new(Pending::new(Vec::new(), None));
+        let e2 = Arc::new(Pending::new(Vec::new(), None));
+        let e3 = Arc::new(Pending::new(Vec::new(), None));
+        let d1 = Arc::new(Pending::new(Vec::new(), None));
+
+        enqueue_on(&e1, false, &waiting, &peak, &q);
+        enqueue_on(&e2, false, &waiting, &peak, &q);
+        enqueue_on(&e3, false, &waiting, &peak, &q);
+        assert_eq!(waiting.load(Ordering::Relaxed), 3);
+
+        // Promoting an unstarted early pipeline pushes it onto demand without double-counting.
+        enqueue_on(&e2, true, &waiting, &peak, &q);
+        assert_eq!(waiting.load(Ordering::Relaxed), 3);
+
+        // A direct demand pipeline queues ahead of remaining early pipelines too.
+        enqueue_on(&d1, true, &waiting, &peak, &q);
+        assert_eq!(waiting.load(Ordering::Relaxed), 4);
+        assert_eq!(peak.load(Ordering::Relaxed), 4);
+
+        let pop_ptr = || q.try_pop().map(|p| Arc::as_ptr(&p));
+        assert_eq!(pop_ptr(), Some(Arc::as_ptr(&e2)));
+        assert_eq!(pop_ptr(), Some(Arc::as_ptr(&d1)));
+        assert_eq!(pop_ptr(), Some(Arc::as_ptr(&e1)));
+        assert_eq!(pop_ptr(), Some(Arc::as_ptr(&e3)));
+        assert_eq!(pop_ptr(), None, "promoted duplicate in early lane must be skipped");
+
+        // Re-requesting an already claimed pipeline does not re-queue it.
+        enqueue_on(&e2, true, &waiting, &peak, &q);
+        assert_eq!(waiting.load(Ordering::Relaxed), 4);
+        assert!(q.try_pop().is_none());
+    }
+
+    #[test]
+    fn repeated_demand_jumps_ahead_of_hundreds_of_single_hit_pipelines() {
+        let q = WorkQueue::new(true);
+        let waiting = AtomicU64::new(0);
+        let peak = AtomicU64::new(0);
+
+        let one_hit: Vec<_> = (0..500)
+            .map(|i| Arc::new(Pending::with_non_mesh(Vec::new(), None, i % 2 == 0)))
+            .collect();
+        for p in &one_hit {
+            enqueue_on(p, true, &waiting, &peak, &q);
+        }
+        let hot = Arc::new(Pending::with_non_mesh(Vec::new(), None, false));
+        let hotter = Arc::new(Pending::with_non_mesh(Vec::new(), None, false));
+        enqueue_on(&hot, true, &waiting, &peak, &q);
+        enqueue_on(&hot, true, &waiting, &peak, &q);
+        for _ in 0..4 {
+            enqueue_on(&hotter, true, &waiting, &peak, &q);
+        }
+        assert_eq!(waiting.load(Ordering::Relaxed), 502);
+
+        assert_eq!(q.try_pop().map(|p| Arc::as_ptr(&p)), Some(Arc::as_ptr(&hotter)));
+        assert_eq!(q.try_pop().map(|p| Arc::as_ptr(&p)), Some(Arc::as_ptr(&hot)));
+
+        let mut drained_single = 0usize;
+        while let Some(p) = q.try_pop() {
+            assert_ne!(Arc::as_ptr(&p), Arc::as_ptr(&hot));
+            assert_ne!(Arc::as_ptr(&p), Arc::as_ptr(&hotter));
+            drained_single += 1;
+        }
+        assert_eq!(drained_single, 500, "every 1-hit pipeline must still complete");
+    }
+
+    #[test]
+    fn tie_breaks_favor_non_mesh_and_fair_stride_prevents_starvation() {
+        let q = WorkQueue::new(true);
+        let waiting = AtomicU64::new(0);
+        let peak = AtomicU64::new(0);
+
+        let mesh_a = Arc::new(Pending::with_non_mesh(Vec::new(), None, false));
+        let mesh_b = Arc::new(Pending::with_non_mesh(Vec::new(), None, false));
+        let compute_a = Arc::new(Pending::with_non_mesh(Vec::new(), None, true));
+        let pixel_b = Arc::new(Pending::with_non_mesh(Vec::new(), None, true));
+
+        enqueue_on(&mesh_a, true, &waiting, &peak, &q);
+        enqueue_on(&mesh_b, true, &waiting, &peak, &q);
+        enqueue_on(&compute_a, true, &waiting, &peak, &q);
+        enqueue_on(&pixel_b, true, &waiting, &peak, &q);
+
+        assert_eq!(q.try_pop().map(|p| Arc::as_ptr(&p)), Some(Arc::as_ptr(&compute_a)));
+        assert_eq!(q.try_pop().map(|p| Arc::as_ptr(&p)), Some(Arc::as_ptr(&pixel_b)));
+        assert_eq!(q.try_pop().map(|p| Arc::as_ptr(&p)), Some(Arc::as_ptr(&mesh_a)));
+        assert_eq!(q.try_pop().map(|p| Arc::as_ptr(&p)), Some(Arc::as_ptr(&mesh_b)));
+        assert!(q.try_pop().is_none());
+
+        // Anti-starvation: after `FAIR_STRIDE` consecutive high-tier pops, one oldest
+        // 1-hit item is served instead of starving forever under continuous repeat demand.
+        let old_one_hit = Arc::new(Pending::with_non_mesh(Vec::new(), None, false));
+        enqueue_on(&old_one_hit, true, &waiting, &peak, &q);
+        let hot: Vec<_> = (0..=FAIR_STRIDE as usize)
+            .map(|_| {
+                let p = Arc::new(Pending::with_non_mesh(Vec::new(), None, true));
+                enqueue_on(&p, true, &waiting, &peak, &q);
+                enqueue_on(&p, true, &waiting, &peak, &q);
+                p
+            })
+            .collect();
+
+        for _ in 0..FAIR_STRIDE {
+            let popped = q.try_pop().expect("high-tier pop");
+            assert_ne!(Arc::as_ptr(&popped), Arc::as_ptr(&old_one_hit));
+        }
+        assert_eq!(
+            q.try_pop().map(|p| Arc::as_ptr(&p)),
+            Some(Arc::as_ptr(&old_one_hit)),
+            "oldest 1-hit pipeline must make forward progress after FAIR_STRIDE high pops"
+        );
+        assert_eq!(
+            q.try_pop().map(|p| Arc::as_ptr(&p)),
+            Some(Arc::as_ptr(&hot[FAIR_STRIDE as usize]))
+        );
+        assert!(q.try_pop().is_none());
     }
 }
