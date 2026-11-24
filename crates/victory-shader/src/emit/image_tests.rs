@@ -51,15 +51,35 @@ const fn mimg(op: u32, vdata: u8, vaddr: u8, a16: bool) -> [u32; 2] {
     ]
 }
 
+/// The same, with the dimension field `dim` (1 is 2D, 2 is 3D, 3 is cube).
+const fn mimg_dim(op: u32, vdata: u8, vaddr: u8, dim: u32) -> [u32; 2] {
+    [
+        0x3C << 26 | op << 18 | 1 << 8 | dim << 3,
+        vaddr as u32 | (vdata as u32) << 8 | (16 >> 2) << 16 | (24 >> 2) << 21,
+    ]
+}
+
+const IMAGE_SAMPLE: u32 = 0x20;
 const IMAGE_SAMPLE_D_CL: u32 = 0x23;
 const IMAGE_SAMPLE_L_O: u32 = 0x34;
 const IMAGE_SAMPLE_LZ_O: u32 = 0x37;
+const IMAGE_SAMPLE_C_LZ_O: u32 = 0x3f;
 
 /// A 1-thread compute program: root constants in `s0..s3`, the view table
 /// address in `s4`, the sampler table's in `s5`. It loads the UAV (view
 /// 0), the 2D texture (view 1) and sampler 0, sets the VGPRs `setup` lists
 /// ((VGPR, literal)), runs `sample` (its result in `v0`) and stores `v0`.
 fn build(setup: &[(u8, u32)], sample: [u32; 2]) -> HostShader {
+    build_group([1, 1, 1], setup, sample).expect("lower")
+}
+
+/// The same program in a compute group of `threads`, lowered and validated
+/// when the lowering succeeds: a refused form has no DXIL to validate.
+fn build_group(
+    threads: [u32; 3],
+    setup: &[(u8, u32)],
+    sample: [u32; 2],
+) -> Result<HostShader, String> {
     let mut words = vec![
         s_mov_b32(6, 4),
         s_mov_b32(7, ZERO),
@@ -117,14 +137,15 @@ fn build(setup: &[(u8, u32)], sample: [u32; 2]) -> HostShader {
         ],
         io: StageIo::Cs(ComputeIo {
             rsrc2: 6 << 1, // 6 user SGPRs: s0..s5
-            threads: [1, 1, 1],
+            threads,
         }),
         code: words.iter().flat_map(|w| w.to_le_bytes()).collect(),
     };
     let p = ir::build(&native.code, native.wave64, native.vgprs).expect("ir::build");
-    let res = resource::track(&p, &native.layout, native.stage).expect("resource::track");
-    let io = io::raise(&p, &native).expect("io::raise");
     let st = structure::structure(&p).expect("structure");
+    let res =
+        resource::track(&p, &native.layout, native.stage, Some(&st)).expect("resource::track");
+    let io = io::raise(&p, &native).expect("io::raise");
     let lowered = lower::lower(&lower::Parts {
         native: &native,
         p: &p,
@@ -135,8 +156,11 @@ fn build(setup: &[(u8, u32)], sample: [u32; 2]) -> HostShader {
         outputs: Vec::new(),
         prims: Vec::new(),
         mesh_stride: 0,
+        target: super::Target::ANY,
+        console_cf: false,
+        per_lane_only: false,
     })
-    .expect("lower");
+    .map_err(|e| e.to_string())?;
     let shader = HostShader {
         stage: HwStage::Cs,
         dxil: lowered.dxil,
@@ -144,13 +168,15 @@ fn build(setup: &[(u8, u32)], sample: [u32; 2]) -> HostShader {
         samplers: lowered.samplers,
         static_samplers: Vec::new(),
         root_cbvs: lowered.root_cbvs,
+        stride_table: lowered.stride_table,
         root_srvs: lowered.root_srvs,
+        root_uavs: lowered.root_uavs,
     };
     if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
         let mut copy = shader.dxil.clone();
         v.validate(&mut copy).expect("DXIL validation failed");
     }
-    shader
+    Ok(shader)
 }
 
 /// A 4×4 texture whose texel (x, y) is `10 y + x` in every channel.
@@ -295,4 +321,27 @@ fn a_gradient_sample_with_a_clamp_reads_the_coordinates_after_the_gradients() {
     for (backend, got) in run(&shader) {
         assert_eq!(got, 21.0, "{backend}: texel (1, 2)");
     }
+}
+
+/// DXIL's comparison samples are of 2D images and cubes: the validator
+/// refuses SampleCmp* on a Texture3D, so the translation does too.
+#[test]
+fn a_comparison_sample_of_a_3d_image_is_refused() {
+    let e = match build_group([1, 1, 1], &[], mimg_dim(IMAGE_SAMPLE_C_LZ_O, 0, 3, 2)) {
+        Ok(_) => panic!("a 3D comparison sample translated"),
+        Err(e) => e,
+    };
+    assert!(e.contains("3D"), "{e}");
+}
+
+/// Implicit derivatives are the pixel shader's, or a compute group's in the
+/// shapes the SM 6.6 rules allow (X a multiple of 4 with Y and Z 1, or X and
+/// Y both even): a group of 6 threads is neither.
+#[test]
+fn implicit_derivatives_need_a_quad_shaped_group() {
+    let e = match build_group([6, 1, 1], &[], mimg(IMAGE_SAMPLE, 0, 3, false)) {
+        Ok(_) => panic!("a sample with implicit derivatives translated in a [6, 1, 1] group"),
+        Err(e) => e,
+    };
+    assert!(e.contains("implicit-derivative sample"), "{e}");
 }

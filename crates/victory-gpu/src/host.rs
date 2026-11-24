@@ -1270,9 +1270,12 @@ impl HostList {
     }
 }
 
-/// A submission's refreshes not done yet, merged per buffer copy into the
-/// range that covers them: done before a step that writes title memory or
-/// gives a range to shaders, and before the lists run.
+/// A submission's refreshes not done yet, per buffer copy, merged where
+/// they share or touch a 64 KiB page: done before a step that writes title
+/// memory or gives a range to shaders, and before the lists run. Ranges
+/// pages apart stay apart: one range covering a big buffer's low and high
+/// ends would have its untouched middle checked (and its stale pages
+/// copied) too.
 ///
 /// Also the textures brought up to date in the submission so far: most
 /// lists of a world submission sample the same textures, and a texture in
@@ -1280,21 +1283,43 @@ impl HostList {
 /// once, it is checked again only after a step that writes title memory.
 #[derive(Default)]
 struct Batch {
-    refreshes: Vec<(std::sync::Arc<crate::shadow::Shadow>, usize, usize)>,
+    /// Per copy, `[from, to)` ranges in the order they came.
+    refreshes: Vec<(std::sync::Arc<crate::shadow::Shadow>, Ranges)>,
     /// Staging buffers (by address) refreshed since the last title write.
     textures: std::collections::HashSet<usize>,
 }
 
+/// `[from, to)` ranges of title memory.
+type Ranges = Vec<(usize, usize)>;
+
+/// Sorts `[from, to)` ranges and merges those whose `page`-sized pages
+/// overlap or touch; empty ranges go.
+fn coalesce_ranges(ranges: &mut Ranges, page: usize) {
+    ranges.retain(|&(from, to)| from < to);
+    ranges.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(ranges.len());
+    for &(from, to) in ranges.iter() {
+        match merged.last_mut() {
+            Some((_, end)) if from / page <= end.div_ceil(page) => *end = (*end).max(to),
+            _ => merged.push((from, to)),
+        }
+    }
+    *ranges = merged;
+}
+
 impl Batch {
     fn add(&mut self, shadow: &std::sync::Arc<crate::shadow::Shadow>, address: usize, len: usize) {
-        let end = address + len;
+        if len == 0 {
+            return;
+        }
+        let range = (address, address.saturating_add(len));
         match self
             .refreshes
             .iter_mut()
-            .find(|(s, ..)| std::sync::Arc::ptr_eq(s, shadow))
+            .find(|(s, _)| std::sync::Arc::ptr_eq(s, shadow))
         {
-            Some((_, from, to)) => (*from, *to) = ((*from).min(address), (*to).max(end)),
-            None => self.refreshes.push((shadow.clone(), address, end)),
+            Some((_, ranges)) => ranges.push(range),
+            None => self.refreshes.push((shadow.clone(), vec![range])),
         }
     }
 
@@ -1312,14 +1337,17 @@ impl Batch {
     }
 
     fn flush(&mut self) {
-        for (shadow, from, to) in self.refreshes.drain(..) {
-            let started = std::time::Instant::now();
-            let copied = shadow.update(from, to - from);
-            let us = started.elapsed().as_micros() as u64;
-            #[cfg(feature = "diagnostics")]
-            crate::copystat::range(from, to - from, us, 0);
-            PREPARING[0].fetch_add(us, Ordering::Relaxed);
-            PREPARING[1].fetch_add(copied as u64, Ordering::Relaxed);
+        for (shadow, mut ranges) in self.refreshes.drain(..) {
+            coalesce_ranges(&mut ranges, crate::watch::PAGE);
+            for (from, to) in ranges {
+                let started = std::time::Instant::now();
+                let copied = shadow.update(from, to - from);
+                let us = started.elapsed().as_micros() as u64;
+                #[cfg(feature = "diagnostics")]
+                crate::copystat::range(from, to - from, us, 0);
+                PREPARING[0].fetch_add(us, Ordering::Relaxed);
+                PREPARING[1].fetch_add(copied as u64, Ordering::Relaxed);
+            }
         }
     }
 }
@@ -2103,8 +2131,58 @@ fn pump() {
 
 #[cfg(test)]
 mod batch {   // Batch::texture_due lives here; `mod tests` is already taken at the top of this file
-    use super::Batch;
+    use super::{Batch, coalesce_ranges};
     use std::sync::Arc;
+
+    const PAGE: usize = crate::watch::PAGE;
+
+    fn coalesced(mut ranges: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
+        coalesce_ranges(&mut ranges, PAGE);
+        ranges
+    }
+
+    #[test]
+    fn empty_ranges_are_dropped() {
+        assert_eq!(coalesced(vec![]), []);
+        assert_eq!(coalesced(vec![(5, 5), (PAGE, PAGE)]), []);
+        assert_eq!(coalesced(vec![(10, 10), (20, 30)]), [(20, 30)]);
+    }
+
+    #[test]
+    fn ranges_in_one_page_merge() {
+        assert_eq!(coalesced(vec![(100, 200), (10, 20), (150, 400)]), [(10, 400)]);
+        // Nested and repeated.
+        assert_eq!(coalesced(vec![(0, PAGE), (8, 16), (0, PAGE)]), [(0, PAGE)]);
+    }
+
+    #[test]
+    fn ranges_in_touching_pages_merge() {
+        // Ends in page 0, starts in page 1.
+        assert_eq!(coalesced(vec![(PAGE + 8, PAGE + 16), (0, 8)]), [(0, PAGE + 16)]);
+        // Ends exactly at page 1's start, starts in page 1.
+        assert_eq!(coalesced(vec![(0, PAGE), (PAGE + 100, 2 * PAGE)]), [(0, 2 * PAGE)]);
+        // A chain of ranges each in the page after the last.
+        let chain: Vec<_> = (0..8).map(|p| (p * PAGE + 10, p * PAGE + 20)).collect();
+        assert_eq!(coalesced(chain), [(10, 7 * PAGE + 20)]);
+    }
+
+    #[test]
+    fn ranges_pages_apart_stay_apart() {
+        // A whole untouched page between them.
+        assert_eq!(coalesced(vec![(2 * PAGE, 2 * PAGE + 1), (0, 1)]), [(0, 1), (2 * PAGE, 2 * PAGE + 1)]);
+        // The low and high ends of a 256 MiB buffer.
+        let (low, high) = (1 << 30, (1 << 30) + (256 << 20) - 64);
+        assert_eq!(
+            coalesced(vec![(high, high + 64), (low, low + 64), (low + 32, low + 128)]),
+            [(low, low + 128), (high, high + 64)]
+        );
+    }
+
+    #[test]
+    fn ranges_at_the_top_of_the_address_space_do_not_overflow() {
+        let top = usize::MAX;
+        assert_eq!(coalesced(vec![(top - 8, top), (top - 100, top - 50)]), [(top - 100, top)]);
+    }
 
     #[test]
     fn a_texture_is_checked_once_per_submission() {

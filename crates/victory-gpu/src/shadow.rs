@@ -42,7 +42,51 @@ pub(crate) struct Shadow {
     pending: Mutex<Vec<(usize, usize)>>,
     /// The copy's bytes before the submission ran, from an offset on,
     /// covering the ranges its shaders write: what the GPU wrote differs.
-    before: Mutex<Option<(usize, Vec<u8>)>>,
+    before: Mutex<Before>,
+}
+
+#[derive(Default)]
+struct Before {
+    snapshot: Option<(usize, Vec<u8>)>,
+    unchanged: UnchangedPages,
+}
+
+/// Pages already compared in full against this submission's snapshot.
+#[derive(Default)]
+struct UnchangedPages {
+    start: usize,
+    end: usize,
+    pages: Vec<bool>,
+}
+
+impl UnchangedPages {
+    fn begin(&mut self, start: usize, end: usize) {
+        if self.pages.is_empty() {
+            self.start = start;
+            self.end = end;
+            self.pages.resize(end.div_ceil(PAGE) - start / PAGE, false);
+        }
+    }
+
+    fn differs(&mut self, address: usize, current: &[u8], before: &[u8]) -> bool {
+        let page = address / PAGE;
+        let unchanged = &mut self.pages[page - self.start / PAGE];
+        if *unchanged {
+            return false;
+        }
+        if current != before {
+            return true;
+        }
+        // A later range can touch bytes a partial comparison missed. At
+        // the edges, only bytes covered by the snapshot can be compared.
+        *unchanged = address == (page * PAGE).max(self.start)
+            && address + current.len() == ((page + 1) * PAGE).min(self.end);
+        false
+    }
+
+    fn clear(&mut self) {
+        self.pages.clear();
+    }
 }
 
 /// Snapshot memory kept for reuse (already touched, so no page faults).
@@ -155,8 +199,10 @@ impl Shadow {
             .push((address, address + len));
         let (from, to) = self.inside(address, len);
         // SAFETY: inside the mapping.
-        let host = |a: usize, b: usize| unsafe { std::slice::from_raw_parts(self.data.add(a), b - a) };
+        let host =
+            |a: usize, b: usize| unsafe { std::slice::from_raw_parts(self.data.add(a), b - a) };
         let mut before = self.before.lock().unwrap_or_else(|e| e.into_inner());
+        let before = &mut before.snapshot;
         let (start, end) = match &*before {
             Some((at, bytes)) => ((*at).min(from), (at + bytes.len()).max(to)),
             None => (from, to),
@@ -188,7 +234,11 @@ impl Shadow {
     /// records (a fence list read as -1, title+0x4e9b54a). Returns the bytes
     /// written.
     pub(crate) fn copy_back(&self, address: usize, len: usize) -> usize {
-        let mut snapshot = self.before.lock().unwrap_or_else(|e| e.into_inner());
+        let mut before = self.before.lock().unwrap_or_else(|e| e.into_inner());
+        let Before {
+            snapshot,
+            unchanged,
+        } = &mut *before;
         let mut written = 0;
         let (from, to) = self.inside(address, len);
         let start = self.start as usize;
@@ -197,21 +247,25 @@ impl Shadow {
             && to <= taken + before.len()
             && from < to
         {
+            unchanged.begin(start + taken, start + taken + before.len());
             let before = &before[from - taken..to - taken];
             // By 64 KiB piece: the copy compared with its bytes before the
             // submission, title memory read only where the GPU wrote.
-            const PIECE: usize = 64 << 10;
-            let mut title = vec![0u8; PIECE];
+            // An unchanged page is never modified by copy-back, so later
+            // overlapping ranges can skip it for the rest of the submission.
+            let mut title = None;
             let mut synced = Vec::new();
             let mut at = from;
             while at < to {
-                let n = (PIECE - (start + at) % PIECE).min(to - at);
+                let n = (PAGE - (start + at) % PAGE).min(to - at);
                 // SAFETY: inside the mapping; only the submitting thread
                 // writes it.
                 let host = unsafe { std::slice::from_raw_parts_mut(self.data.add(at), n) };
                 let old = &before[at - from..at - from + n];
-                let title = &mut title[..n];
-                if host != old && crate::host::read_into((start + at) as *const u8, title) {
+                if unchanged.differs(start + at, host, old)
+                    && let title = &mut title.get_or_insert_with(|| vec![0u8; PAGE])[..n]
+                    && crate::host::read_into((start + at) as *const u8, title)
+                {
                     // Title memory with the GPU's bytes put in; the copy
                     // takes the title's bytes in turn.
                     let mut changed = false;
@@ -254,6 +308,7 @@ impl Shadow {
         if pending.is_empty()
             && let Some((_, bytes)) = snapshot.take()
         {
+            unchanged.clear();
             give_back(bytes);
         }
         written
@@ -496,4 +551,141 @@ pub(crate) fn near(va: u64) -> String {
         ));
     }
     text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ops::Range;
+
+    #[test]
+    fn partial_match_leaves_unchecked_bytes_visible() {
+        let mut unchanged = UnchangedPages::default();
+        let before = vec![0; PAGE];
+        let mut host = before.clone();
+        host[PAGE - 1] = 1;
+        unchanged.begin(PAGE, 2 * PAGE);
+
+        assert!(!unchanged.differs(PAGE, &host[..4], &before[..4]));
+        assert!(!unchanged.pages[0]);
+        assert!(unchanged.differs(PAGE, &host, &before));
+        assert!(!unchanged.pages[0]);
+    }
+
+    #[test]
+    fn snapshot_edges_are_cacheable_and_survive_later_ranges() {
+        let mut unchanged = UnchangedPages::default();
+        unchanged.begin(PAGE - 3, PAGE + 4);
+        assert!(!unchanged.differs(PAGE - 3, &[1; 3], &[1; 3]));
+        assert!(!unchanged.differs(PAGE, &[2; 4], &[2; 4]));
+        assert_eq!(unchanged.pages, [true, true]);
+
+        unchanged.begin(PAGE - 3, PAGE + 4);
+        assert!(!unchanged.differs(PAGE - 2, &[1; 2], &[1; 2]));
+        assert!(!unchanged.differs(PAGE + 1, &[2; 2], &[2; 2]));
+        assert_eq!(unchanged.pages, [true, true]);
+    }
+
+    #[test]
+    fn next_submission_checks_the_same_page_again() {
+        let mut unchanged = UnchangedPages::default();
+        unchanged.begin(0, 4);
+        assert!(!unchanged.differs(0, &[0; 4], &[0; 4]));
+        unchanged.clear();
+        unchanged.begin(0, 4);
+        assert!(unchanged.differs(0, &[0, 0, 0, 1], &[0; 4]));
+    }
+
+    // Both versions walk exactly the same declared ranges, in their
+    // original order. Only the page comparison differs.
+    fn scan(
+        host: &[u8],
+        before: &[u8],
+        ranges: &[Range<usize>],
+        mut differs: impl FnMut(usize, &[u8], &[u8]) -> bool,
+    ) -> usize {
+        let mut changed = 0;
+        for range in ranges {
+            let mut at = range.start;
+            while at < range.end {
+                let n = (PAGE - at % PAGE).min(range.end - at);
+                changed += usize::from(differs(at, &host[at..at + n], &before[at..at + n]));
+                at += n;
+            }
+        }
+        changed
+    }
+
+    #[test]
+    fn overlapping_ranges_match_uncached_comparisons() {
+        let before = vec![0; 4 * PAGE];
+        let mut host = before.clone();
+        for at in [2, PAGE - 1, PAGE + 5, 3 * PAGE + 7] {
+            host[at] = 1;
+        }
+        let ranges = [
+            0..4,
+            2..2 * PAGE + 3,
+            PAGE - 2..4 * PAGE,
+            2 * PAGE..3 * PAGE,
+        ];
+        let uncached = scan(&host, &before, &ranges, |_, host, before| host != before);
+        let mut unchanged = UnchangedPages::default();
+        unchanged.begin(0, before.len());
+        let cached = scan(&host, &before, &ranges, |at, host, before| {
+            unchanged.differs(at, host, before)
+        });
+        assert_eq!(uncached, 6);
+        assert_eq!(cached, uncached);
+        assert_eq!(unchanged.pages, [false, false, true, false]);
+    }
+
+    // cargo test --release -p victory-gpu benchmark_overlapping_copy_back -- --ignored --nocapture
+    #[test]
+    #[ignore = "synthetic CPU release benchmark"]
+    fn benchmark_overlapping_copy_back() {
+        use std::hint::black_box;
+        use std::time::{Duration, Instant};
+
+        const SIZE: usize = 128 << 20;
+        let before = vec![0xA5; SIZE];
+        let mut host = before.clone();
+        for page in (0..SIZE / PAGE).step_by(64) {
+            host[page * PAGE + PAGE / 2] ^= 0xFF;
+        }
+        let ranges: Vec<_> = (0..24).map(|i| i * PAGE + i..SIZE - i * 13).collect();
+        let mut baseline = [Duration::ZERO; 5];
+        let mut cached = [Duration::ZERO; 5];
+        let mut unchanged = UnchangedPages::default();
+        for (baseline, cached) in baseline.iter_mut().zip(&mut cached) {
+            let started = Instant::now();
+            let expected = scan(
+                black_box(&host),
+                black_box(&before),
+                black_box(&ranges),
+                |_, host, before| host != before,
+            );
+            *baseline = started.elapsed();
+
+            unchanged.clear();
+            let started = Instant::now();
+            unchanged.begin(0, before.len());
+            let actual = scan(
+                black_box(&host),
+                black_box(&before),
+                black_box(&ranges),
+                |at, host, before| unchanged.differs(at, host, before),
+            );
+            *cached = started.elapsed();
+            assert_eq!(actual, expected);
+        }
+        baseline.sort_unstable();
+        cached.sort_unstable();
+        println!(
+            "median of five runs, 24 overlapping ranges across 128 MiB: {:?} -> {:?} ({:.1}x)",
+            baseline[2],
+            cached[2],
+            baseline[2].as_secs_f64() / cached[2].as_secs_f64(),
+        );
+    }
 }

@@ -5,7 +5,7 @@
 //! `v_med3_f32`/`v_med3_f16` with NaN operands, `v_fract_f32`/`v_fract_f16`
 //! near `1.0`, and turn-range reduction for `v_sin_*`/`v_cos_*`.
 
-use super::host::{Dispatch, Host, Root, View};
+use super::host::{Dispatch, Host, Root, Unavailable, View};
 use super::{HostShader, lower, validator};
 use crate::native::{
     ComputeIo, HwStage, NativeProgram, ResourceType, RootParam, RootType, StageIo, UsedResource,
@@ -28,6 +28,16 @@ const fn sop2(op: u8, sdst: u8, src0: u8, src1: u8) -> u32 {
         | src0 as u32
 }
 
+/// SOPC `op src0, src1`.
+const fn sopc(op: u8, src0: u8, src1: u8) -> u32 {
+    0xBF00_0000 | (op as u32 & 0x7F) << 16 | (src1 as u32) << 8 | src0 as u32
+}
+
+/// SOPP `op simm16`.
+const fn sopp(op: u8, simm16: i16) -> u32 {
+    0xBF80_0000 | (op as u32 & 0x7F) << 16 | simm16 as u16 as u32
+}
+
 /// SMEM `s_load_dwordx4 s[dst:dst+3], s[base:base+1], 0` (soffset = null).
 const fn s_load_dwordx4(dst: u8, base: u8) -> [u32; 2] {
     [
@@ -41,11 +51,32 @@ const fn vop1(op: u16, vdst: u8, src0: u16) -> u32 {
     0x7E00_0000 | (vdst as u32) << 17 | (op as u32) << 9 | (src0 as u32 & 0x1FF)
 }
 
+/// VOP2 `op vdst, src0, vsrc1`.
+const fn vop2(op: u8, vdst: u8, src0: u16, vsrc1: u8) -> u32 {
+    (op as u32 & 0x3F) << 25 | (vdst as u32) << 17 | (vsrc1 as u32) << 9 | (src0 as u32 & 0x1FF)
+}
+
 /// VOP3 `op vdst, src0, src1, src2` (no modifiers).
 const fn vop3(op: u16, vdst: u8, src0: u16, src1: u16, src2: u16) -> [u32; 2] {
     [
         0x35 << 26 | (op as u32 & 0x3FF) << 16 | vdst as u32,
         (src0 as u32 & 0x1FF) | (src1 as u32 & 0x1FF) << 9 | (src2 as u32 & 0x1FF) << 18,
+    ]
+}
+
+/// VOP3B `op vdst, sdst, src0, src1, src2`.
+const fn vop3b(op: u16, vdst: u8, sdst: u8, src0: u16, src1: u16, src2: u16) -> [u32; 2] {
+    [
+        0x35 << 26 | (op as u32 & 0x3FF) << 16 | (sdst as u32 & 0x7F) << 8 | vdst as u32,
+        (src0 as u32 & 0x1FF) | (src1 as u32 & 0x1FF) << 9 | (src2 as u32 & 0x1FF) << 18,
+    ]
+}
+
+/// GLOBAL `global_load_dword vdst, vaddr, saddr` (`saddr = 125` for null).
+const fn global_load_dword(vdst: u8, vaddr: u8, saddr: u8, offset: i16) -> [u32; 2] {
+    [
+        0x37 << 26 | 0x0C << 18 | 2 << 14 | (offset as u32 & 0xFFF),
+        (vdst as u32) << 24 | (saddr as u32 & 0x7F) << 16 | vaddr as u32,
     ]
 }
 
@@ -57,10 +88,6 @@ const fn buffer_store_dword(vdata: u8, srsrc: u8, byte_off: u16) -> [u32; 2] {
     ]
 }
 
-/// VOP2 `op vdst, src0, vsrc1`.
-const fn vop2(op: u8, vdst: u8, src0: u16, vsrc1: u8) -> u32 {
-    (op as u32 & 0x3F) << 25 | (vdst as u32) << 17 | (vsrc1 as u32) << 9 | (src0 as u32 & 0x1FF)
-}
 
 /// VOPC `op vcc, src0, vsrc1`.
 const fn vopc(op: u8, src0: u16, vsrc1: u8) -> u32 {
@@ -187,6 +214,8 @@ fn build_cs(body: &[u32], lds_blocks: u32) -> HostShader {
         static_samplers: Vec::new(),
         root_cbvs: lowered.root_cbvs,
         root_srvs: lowered.root_srvs,
+        stride_table: lowered.stride_table,
+        root_uavs: lowered.root_uavs,
     };
 
     if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
@@ -227,9 +256,16 @@ fn run_cases_on(
     let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     let mut ran = 0;
     for &(label, warp) in backends {
-        let Ok(host) = Host::new(warp) else {
-            eprintln!("no SM 6.6 {label} device; skipped");
-            continue;
+        // Only a missing adapter (a runner without a GPU, or a platform
+        // without WARP) and a device below SM 6.6 skip: a DXGI or D3D12
+        // failure on a machine that has one fails the test.
+        let host = match Host::new(warp) {
+            Ok(host) => host,
+            Err(Unavailable::NoSm66Adapter | Unavailable::BelowSm66(_)) => {
+                eprintln!("no SM 6.6 {label} device; skipped");
+                continue;
+            }
+            Err(e) => panic!("{label}: {e}"),
         };
         let (root, pso) = host
             .compute_pipeline(shader)
@@ -259,7 +295,12 @@ fn run_cases_on(
         }
         ran += 1;
     }
-    assert!(ran > 0, "no SM 6.6 device of {backends:?} available");
+    if ran == 0 {
+        // A runner without an SM 6.6 adapter (CI, a headless box) skips, as
+        // the other device tests here do; a machine that has one still fails
+        // on the first mismatched case.
+        eprintln!("no SM 6.6 device of {backends:?}; skipped");
+    }
 }
 
 fn is_f16_nan(bits: u16) -> bool {
@@ -1048,6 +1089,9 @@ fn run_wave_cs(wave64: bool, body: &[u32], mut check: impl FnMut(&str, &[u32])) 
         outputs: Vec::new(),
         prims: Vec::new(),
         mesh_stride: 0,
+        target: super::Target::ANY,
+        console_cf: false,
+        per_lane_only: false,
     })
     .expect("lower");
 
@@ -1058,7 +1102,9 @@ fn run_wave_cs(wave64: bool, body: &[u32], mut check: impl FnMut(&str, &[u32])) 
         samplers: lowered.samplers,
         static_samplers: Vec::new(),
         root_cbvs: lowered.root_cbvs,
+        stride_table: lowered.stride_table,
         root_srvs: lowered.root_srvs,
+        root_uavs: lowered.root_uavs,
     };
 
     if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
@@ -1069,9 +1115,13 @@ fn run_wave_cs(wave64: bool, body: &[u32], mut check: impl FnMut(&str, &[u32])) 
     let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     let mut ran = 0;
     for (label, warp) in [("hardware", false), ("warp", true)] {
-        let Ok(host) = Host::new(warp) else {
-            eprintln!("no SM 6.6 {label} device; skipped");
-            continue;
+        let host = match Host::new(warp) {
+            Ok(host) => host,
+            Err(Unavailable::NoSm66Adapter | Unavailable::BelowSm66(_)) => {
+                eprintln!("no SM 6.6 {label} device; skipped");
+                continue;
+            }
+            Err(e) => panic!("{label}: {e}"),
         };
         let (root, pso) = match host.compute_pipeline(&shader) {
             Ok(p) => p,
@@ -1287,7 +1337,10 @@ const fn ds(op: u8, vdst: u8, addr: u8, data0: u8, offset: u16) -> [u32; 2] {
     ]
 }
 
-/// LDS programs here are one wave: wave 32, which WARP cannot run.
+/// LDS programs here are one wave: wave 32, which WARP cannot run, so these
+/// cases run on the hardware adapter only. A machine without a GPU (a CI
+/// runner) has no hardware adapter at all: `Host::new(false)` finds none and
+/// they skip.
 const HARDWARE: &[(&str, bool)] = &[("hardware", false)];
 
 const DS_WRITE_B32: u8 = 0x0d;
@@ -1339,10 +1392,14 @@ fn lds_byte_and_half_writes_keep_the_rest_of_the_dword() {
     );
 }
 
+/// (opcode, offset, the read's result from s0 in the low dword)
+type HalfRead = (u8, u16, fn(u32) -> u32);
+
 #[test]
+#[allow(clippy::type_complexity)]
 fn lds_byte_and_half_reads_extend_as_the_console() {
     // [0] = s0, then each read of it.
-    let reads: [(u8, u16, fn(u32) -> u32); 6] = [
+    let reads: [HalfRead; 6] = [
         (DS_READ_U8, 1, |w| w >> 8 & 0xFF),
         (DS_READ_I8, 1, |w| (w >> 8) as u8 as i8 as i32 as u32),
         (DS_READ_U16, 2, |w| w >> 16),
@@ -1361,6 +1418,304 @@ fn lds_byte_and_half_reads_extend_as_the_console() {
             assert_eq!(got, want(s0), "{backend}: op {op:#x} of {s0:#010x}");
         });
     }
+}
+
+/// Builds and lowers a 1-thread synthetic RDNA2 compute shader with root constants
+/// in `s0..s3`, a UAV table at `s4`, and a Root SRV descriptor in `s6..s7`.
+/// `body` leaves its result in `v0`, which is stored to dword 0 of the UAV.
+fn build_root_srv_cs(body: &[u32]) -> HostShader {
+    let mut words = Vec::new();
+    // s[4:5] = descriptor table address (heap index 0 -> byte offset 0).
+    words.push(s_mov_b32(5, 0x80)); // inline constant 0
+    words.extend_from_slice(&s_load_dwordx4(8, 4));
+    // Copy root constants s0..s3 into v1..v4 for VALU address expressions.
+    for i in 0..4u8 {
+        words.push(vop1(0x001, i + 1, sgpr(i))); // v_mov_b32
+    }
+    words.extend_from_slice(body);
+    words.extend_from_slice(&buffer_store_dword(0, 8, 0));
+    words.push(S_ENDPGM);
+
+    let code: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let native = NativeProgram {
+        stage: HwStage::Cs,
+        wave64: false,
+        vgprs: 8,
+        layout: vec![
+            RootParam {
+                root: RootType::Constants,
+                table_offset_dwords: 0,
+                sgprs: 4,
+                base_register: 0,
+                user_data: 0,
+                slot: 0,
+            },
+            RootParam {
+                root: RootType::Table,
+                table_offset_dwords: 0,
+                sgprs: 1,
+                base_register: 0,
+                user_data: 4,
+                slot: 1,
+            },
+            RootParam {
+                root: RootType::Descriptor,
+                table_offset_dwords: 0,
+                sgprs: 2,
+                base_register: 0,
+                user_data: 6,
+                slot: 2,
+            },
+        ],
+        used: vec![
+            UsedResource {
+                kind: ResourceType::Uav,
+                root: RootType::Table,
+                table_offset_dwords: 0,
+                lower_bound: 0,
+                stride: 0,
+                dwords: 4,
+                user_data: 4,
+                slot: 1,
+            },
+            UsedResource {
+                kind: ResourceType::Srv,
+                root: RootType::Descriptor,
+                table_offset_dwords: 0,
+                lower_bound: 0,
+                stride: 0,
+                dwords: 4,
+                user_data: 6,
+                slot: 2,
+            },
+        ],
+        io: StageIo::Cs(ComputeIo {
+            rsrc2: 8 << 1, // 8 user SGPRs: s0..s7
+            threads: [1, 1, 1],
+        }),
+        code,
+    };
+
+    let p = ir::build(&native.code, native.wave64, native.vgprs).expect("ir::build");
+    let st = structure::structure(&p).expect("structure");
+    let res =
+        resource::track(&p, &native.layout, native.stage, Some(&st)).expect("resource::track");
+    let io = io::raise(&p, &native).expect("io::raise");
+    let lowered = lower::lower(&lower::Parts {
+        native: &native,
+        p: &p,
+        st: &st,
+        io: &io,
+        res: &res,
+        inputs: Vec::new(),
+        outputs: Vec::new(),
+        prims: Vec::new(),
+        mesh_stride: 0,
+        target: super::Target::ANY,
+        console_cf: false,
+        per_lane_only: false,
+    })
+    .expect("lower");
+
+    let shader = HostShader {
+        stage: HwStage::Cs,
+        dxil: lowered.dxil,
+        user_data: lowered.user_data,
+        samplers: lowered.samplers,
+        static_samplers: Vec::new(),
+        root_cbvs: lowered.root_cbvs,
+        root_srvs: lowered.root_srvs,
+        root_uavs: lowered.root_uavs,
+        stride_table: lowered.stride_table,
+    };
+
+    if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
+        let mut copy = shader.dxil.clone();
+        let ours = copy[4..20].to_vec();
+        v.validate(&mut copy).expect("DXIL validation failed");
+        assert_eq!(copy[4..20], ours[..], "container hash mismatch");
+    }
+
+    shader
+}
+
+/// Runs a Root SRV compute shader on available SM 6.6 devices (hardware GPU and WARP).
+fn run_root_srv_cases(
+    shader: &HostShader,
+    srv_data: &[u32],
+    cases: &[[u32; 4]],
+    mut check: impl FnMut(&str, usize, [u32; 4], u32),
+) {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let mut ran = 0;
+    for (label, warp) in [("hardware", false), ("warp", true)] {
+        // Same rule as `run_cases_on`: only a missing adapter or a device
+        // below SM 6.6 skips, a DXGI or D3D12 failure fails the test.
+        let host = match Host::new(warp) {
+            Ok(host) => host,
+            Err(Unavailable::NoSm66Adapter | Unavailable::BelowSm66(_)) => {
+                eprintln!("no SM 6.6 {label} device; skipped");
+                continue;
+            }
+            Err(e) => panic!("{label}: {e}"),
+        };
+        let (root, pso) = host
+            .compute_pipeline(shader)
+            .unwrap_or_else(|e| panic!("{label}: compute_pipeline failed: {e}"));
+        for (i, &inputs) in cases.iter().enumerate() {
+            let mut ud = vec![0u32; shader.user_data_dwords().max(1) as usize];
+            for u in &shader.user_data {
+                ud[u.index as usize] = match (u.root, u.slot) {
+                    (RootType::Constants, 0) => inputs[u.dword as usize],
+                    (RootType::Table, 1) => 0,
+                    other => panic!("unexpected user data {other:?}"),
+                };
+            }
+            let out = host
+                .dispatch(
+                    &root,
+                    &pso,
+                    &Dispatch {
+                        roots: vec![
+                            (0, Root::Constants(ud)),
+                            (
+                                1,
+                                Root::View {
+                                    srv: true,
+                                    data: srv_data.to_vec(),
+                                },
+                            ),
+                        ],
+                        views: &[View::RawUav(1)],
+                        samplers: &[],
+                        groups: [1, 1, 1],
+                    },
+                )
+                .unwrap_or_else(|e| panic!("{label}: dispatch failed: {e}"));
+            check(label, i, inputs, out[0][0]);
+        }
+        ran += 1;
+    }
+    if ran == 0 {
+        eprintln!("no SM 6.6 hardware or WARP device; skipped");
+    }
+}
+
+#[test]
+fn root_srv_s_lshl2_add_u32_with_root_constant_dword0() {
+    // s_lshl2_add_u32 s12, s0, s6; s_add_u32 s12, s12, s1; s_addc_u32 s13, s7, 0;
+    // v_mov_b32 v5, 0; global_load_dword v0, v5, s[12:13]
+    let shader = build_root_srv_cs(&[
+        sop2(0x2F, 12, 0, 6),
+        sop2(0x00, 12, 12, 1),
+        sop2(0x04, 13, 7, 0x80),
+        vop1(0x001, 5, 0x80),
+        global_load_dword(0, 5, 12, 0)[0],
+        global_load_dword(0, 5, 12, 0)[1],
+    ]);
+    let srv_data: Vec<u32> = (0..16).map(|i| 0x1000_0000 + i * 0x0101_0101).collect();
+    let cases = [[0, 0, 0, 0], [3, 0, 0, 0], [5, 8, 0, 0], [11, 16, 0, 0]];
+    run_root_srv_cases(&shader, &srv_data, &cases, |backend, _, inp, got| {
+        let want = srv_data[(inp[0] + inp[1] / 4) as usize];
+        assert_eq!(
+            got, want,
+            "{backend}: s_lshl2_add_u32 index {} + {}B = {got:#010x}, want {want:#010x}",
+            inp[0], inp[1],
+        );
+    });
+}
+
+#[test]
+fn root_srv_two_term_v_add_co_and_v_lshl_add() {
+    // v_add_co_u32 v5, vcc, s6, v1
+    // v_add_co_ci_u32 v6, vcc, s7, 0, vcc (VOP3B op 0x128)
+    // v_lshl_add_u32 v5, v2, 2, v5
+    // global_load_dword v0, v[5:6], off
+    let add_co = vop3b(0x30F, 5, 106, sgpr(6), vgpr(1), 0);
+    let add_ci = vop3b(0x128, 6, 106, sgpr(7), 0x80, sgpr(106));
+    let lshl_add = vop3(0x346, 5, vgpr(2), 0x82, vgpr(5));
+    let load = global_load_dword(0, 5, 125, 0);
+    let shader = build_root_srv_cs(&[
+        add_co[0],
+        add_co[1],
+        add_ci[0],
+        add_ci[1],
+        lshl_add[0],
+        lshl_add[1],
+        load[0],
+        load[1],
+    ]);
+    let srv_data: Vec<u32> = (0..24).map(|i| 0xA000_0000 ^ (i * 0x0011_2233)).collect();
+    let cases = [[0, 0, 0, 0], [8, 1, 0, 0], [4, 5, 0, 0], [16, 7, 0, 0]];
+    run_root_srv_cases(&shader, &srv_data, &cases, |backend, _, inp, got| {
+        let idx = (inp[0] / 4 + inp[1]) as usize;
+        let want = srv_data[idx];
+        assert_eq!(
+            got, want,
+            "{backend}: two-term v_add_co + v_lshl_add (off={}, idx={}) = {got:#010x}, want {want:#010x}",
+            inp[0], inp[1],
+        );
+    });
+}
+
+#[test]
+fn root_srv_loop_carried_pointer_induction_phi() {
+    // s12, s13 = root_srv + (s0 << 2); s14 = 0; v0 = 0; v5 = 0;
+    // loop:
+    //   global_load_dword v6, v5, s[12:13]   (2 dwords)
+    //   v_add_nc_u32 v0, v0, v6              (1 dword)
+    //   s_add_u32 s12, s12, 4                (1 dword)
+    //   s_addc_u32 s13, s13, 0               (1 dword)
+    //   s_add_u32 s14, s14, 1                (1 dword)
+    //   s_cmp_lt_u32 s14, 4                  (1 dword)
+    //   s_cbranch_scc1 -8                    (jumps back 8 dwords -> start of loop)
+    let load = global_load_dword(6, 5, 12, 0);
+    let shader = build_root_srv_cs(&[
+        sop2(0x2F, 12, 0, 6),      // s_lshl2_add_u32 s12, s0, s6
+        s_mov_b32(13, 7),          // s_mov_b32 s13, s7
+        s_mov_b32(14, 0x80),       // s_mov_b32 s14, 0
+        vop1(0x001, 0, 0x80),      // v_mov_b32 v0, 0
+        vop1(0x001, 5, 0x80),      // v_mov_b32 v5, 0
+        load[0],                   // loop start (-7 before branch)
+        load[1],                   // (-6)
+        vop2(0x25, 0, vgpr(0), 6), // v_add_nc_u32 v0, v0, v6 (-5)
+        sop2(0x00, 12, 12, 0x84),  // s_add_u32 s12, s12, 4 (-4)
+        sop2(0x04, 13, 13, 0x80),  // s_addc_u32 s13, s13, 0 (-3)
+        sop2(0x00, 14, 14, 0x81),  // s_add_u32 s14, s14, 1 (-2)
+        sopc(0x0A, 14, 0x84),      // s_cmp_lt_u32 s14, 4 (-1)
+        sopp(0x05, -8),            // s_cbranch_scc1 loop
+    ]);
+    let srv_data: Vec<u32> = (0..16).map(|i| 100 + i * 17).collect();
+    let cases = [[0, 0, 0, 0], [2, 0, 0, 0], [5, 0, 0, 0], [11, 0, 0, 0]];
+    run_root_srv_cases(&shader, &srv_data, &cases, |backend, _, inp, got| {
+        let start = inp[0] as usize;
+        let want: u32 = srv_data[start..start + 4]
+            .iter()
+            .fold(0u32, |a, &x| a.wrapping_add(x));
+        assert_eq!(
+            got, want,
+            "{backend}: loop phi sum starting at {start} = {got}, want {want}",
+        );
+    });
+}
+
+#[test]
+fn scalar_buffer_loads_read_a_uav_through_its_table() {
+    // The UAV is the one `build_valu_cs` stores to: write root constant 0
+    // to its dword 0, read it back with a scalar buffer load, and store
+    // that.
+    let body = [
+        0xE070_0000,
+        0x8002_0100, // buffer_store_dword v1, off, s[8:11], 0
+        0xF420_0304,
+        0xFA00_0000, // s_buffer_load_dword s12, s[8:11], null
+        0x7E00_020C, // v_mov_b32 v0, s12
+    ];
+    let shader = build_valu_cs(&body);
+    let cases = [[0x1234_5678, 0, 0, 0], [0xDEAD_BEEF, 0, 0, 0]];
+    run_cases(&shader, &cases, |backend, _, inp, got| {
+        assert_eq!(got, inp[0], "{backend}: read back {got:#010x}");
+    });
 }
 
 fn build_wave32_cs(body: &[u32]) -> HostShader {
