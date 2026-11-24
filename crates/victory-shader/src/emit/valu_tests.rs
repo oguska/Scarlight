@@ -1544,11 +1544,18 @@ fn run_root_srv_cases(
     cases: &[[u32; 4]],
     mut check: impl FnMut(&str, usize, [u32; 4], u32),
 ) {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     let mut ran = 0;
     for (label, warp) in [("hardware", false), ("warp", true)] {
-        let Ok(host) = Host::new(warp) else {
-            eprintln!("no SM 6.6 {label} device; skipped");
-            continue;
+        // Same rule as `run_cases_on`: only a missing adapter or a device
+        // below SM 6.6 skips, a DXGI or D3D12 failure fails the test.
+        let host = match Host::new(warp) {
+            Ok(host) => host,
+            Err(Unavailable::NoSm66Adapter | Unavailable::BelowSm66(_)) => {
+                eprintln!("no SM 6.6 {label} device; skipped");
+                continue;
+            }
+            Err(e) => panic!("{label}: {e}"),
         };
         let (root, pso) = host
             .compute_pipeline(shader)
@@ -1587,7 +1594,9 @@ fn run_root_srv_cases(
         }
         ran += 1;
     }
-    assert!(ran > 0, "neither hardware nor WARP SM 6.6 device available");
+    if ran == 0 {
+        eprintln!("no SM 6.6 hardware or WARP device; skipped");
+    }
 }
 
 #[test]

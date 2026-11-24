@@ -619,6 +619,38 @@ impl<'a> Tracer<'a> {
         }
     }
 
+    /// Whether the instruction defining `v` runs under a per-lane guard, so
+    /// its write leaves the lanes it skipped the value they held before.
+    /// (Console-flow writes under narrowed EXEC are tracked by
+    /// [`Structured::execs`](crate::structure::Structured); refusing those
+    /// here cost 23 of the 768 programs of the offline corpus, so the
+    /// straight-line form stays as it was.)
+    fn skips_lanes(&self, v: Value) -> bool {
+        let Some(lanes) = self.lanes else {
+            return false;
+        };
+        let Some(site) = self.defs[v.0 as usize] else {
+            return false;
+        };
+        let inst = &self.p.blocks[site.0].insts[site.1];
+        // Lane reads and writes ignore EXEC on the console.
+        let ignores = matches!(
+            inst.name(),
+            "v_readlane_b32" | "v_writelane_b32" | "v_readfirstlane_b32"
+        ) || matches!(
+            inst.fields,
+            Fields::Sop { .. } | Fields::Sopp { .. } | Fields::Smem { .. }
+        );
+        if ignores {
+            return false;
+        }
+        lanes
+            .guards
+            .get(site.0)
+            .and_then(|g| g.get(site.1))
+            .is_some_and(|g| g.is_some())
+    }
+
     fn strip_va_mask(&self, mut t: Term) -> Term {
         while let Term::Value(v) = t {
             if let Some(x) = self.va_masked(v) {
@@ -831,6 +863,12 @@ impl<'a> Tracer<'a> {
         let Some(inst) = self.def(v) else {
             return (plain_dynamic, true);
         };
+        // A write that may skip lanes (narrowed EXEC) leaves their old
+        // value in the register: fold nothing through it, or the lanes it
+        // excluded would get the sum its active lanes computed.
+        if self.skips_lanes(v) {
+            return (plain_dynamic, true);
+        }
 
         if let Some((_, f)) = self.valu_ops(v, &["v_mov_b32"])
             && matches!(f.dst, Some(Operand::Vector { .. }))
@@ -1012,15 +1050,44 @@ impl<'a> Tracer<'a> {
         }
 
         if let Some([a, b, c]) = self.valu_tri(v, &["v_add3_u32"]) {
-            let ta = self.sum_rec(a, visiting, frames);
-            let tb = self.sum_rec(b, visiting, frames);
-            let tc = self.sum_rec(c, visiting, frames);
-            let ptrs =
-                usize::from(ta.has_ptr()) + usize::from(tb.has_ptr()) + usize::from(tc.has_ptr());
+            let ts = [
+                self.sum_rec(a, visiting, frames),
+                self.sum_rec(b, visiting, frames),
+                self.sum_rec(c, visiting, frames),
+            ];
+            let ptrs = (0..3).filter(|&k| ts[k].has_ptr()).count();
             if ptrs > 1 {
                 return (plain_dynamic, true);
             }
-            return (combine_add(combine_add(ta, tb), tc), true);
+            // The root can be any of the three operands: combine it with the
+            // others directly, so a partial sum never has to name the whole
+            // instruction's value (a root descriptor has no numeric form).
+            if let Some(k) = (0..3).find(|&k| ts[k].has_ptr()) {
+                let p = ts[k];
+                let others = (0..3).filter(|&j| j != k).map(|j| ts[j]);
+                let (mut offset, mut dynamic, mut many) = (p.sum.offset, p.sum.dynamic, false);
+                for o in others {
+                    offset = offset.wrapping_add(o.sum.offset);
+                    if dynamic.is_some() && o.sum.dynamic.is_some() {
+                        many = true;
+                    }
+                    dynamic = dynamic.or(o.sum.dynamic);
+                }
+                let multi = p.sum.multi || many;
+                return (
+                    Trace {
+                        sum: Sum {
+                            base: p.sum.base,
+                            offset,
+                            dynamic: if multi { Some(v) } else { dynamic },
+                            multi,
+                        },
+                        cycle: p.cycle,
+                    },
+                    true,
+                );
+            }
+            return (combine_add(combine_add(ts[0], ts[1]), ts[2]), true);
         }
 
         if let Some((minuend, subtrahend)) = self
@@ -1304,7 +1371,17 @@ impl<'a> Tracer<'a> {
                 _ => Carry::No,
             }
         }
-        fn rec(t: &Tracer<'_>, hi: Term, want: Term, seen: &mut Vec<Value>) -> Carry {
+        /// One step of the walk from `v`. Results are remembered only when
+        /// no phi is on the stack: those do not depend on `seen`, so a shared
+        /// definition (an add reading its predecessor twice) is walked once
+        /// rather than once per path to it.
+        fn memo(
+            t: &Tracer<'_>,
+            hi: Term,
+            want: Term,
+            seen: &mut Vec<Value>,
+            cache: &mut HashMap<Value, Carry>,
+        ) -> Carry {
             let hi = t.strip_va_mask(hi);
             if hi == want {
                 return Carry::Yes;
@@ -1315,6 +1392,23 @@ impl<'a> Tracer<'a> {
             if seen.contains(&v) {
                 return Carry::Cycle;
             }
+            let reuse = seen.is_empty();
+            if reuse && let Some(&c) = cache.get(&v) {
+                return c;
+            }
+            let r = rec(t, v, want, seen, cache);
+            if reuse {
+                cache.insert(v, r);
+            }
+            r
+        }
+        fn rec(
+            t: &Tracer<'_>,
+            v: Value,
+            want: Term,
+            seen: &mut Vec<Value>,
+            cache: &mut HashMap<Value, Carry>,
+        ) -> Carry {
             if let Some((phi_b, phi_i)) = t.phis[v.0 as usize] {
                 if t.p.blocks[phi_b].phis[phi_i].args.is_empty() {
                     return Carry::No;
@@ -1322,7 +1416,7 @@ impl<'a> Tracer<'a> {
                 seen.push(v);
                 let mut any_yes = false;
                 for &arg in &t.p.blocks[phi_b].phis[phi_i].args {
-                    match rec(t, t.vorigin(arg), want, seen) {
+                    match memo(t, t.vorigin(arg), want, seen, cache) {
                         Carry::No => {
                             seen.pop();
                             return Carry::No;
@@ -1349,7 +1443,12 @@ impl<'a> Tracer<'a> {
                     )
                 })
             {
-                return best(rec(t, a, want, seen), rec(t, b, want, seen));
+                // `Yes` from either side settles it; do not walk the other.
+                let ra = memo(t, a, want, seen, cache);
+                if ra == Carry::Yes {
+                    return Carry::Yes;
+                }
+                return best(ra, memo(t, b, want, seen, cache));
             }
             if let Some(minuend) = t
                 .sop2(v, &["s_subb_u32", "s_sub_u32", "s_sub_i32"])
@@ -1366,11 +1465,11 @@ impl<'a> Tracer<'a> {
                     .map(|[_, b]| b)
                 })
             {
-                return rec(t, minuend, want, seen);
+                return memo(t, minuend, want, seen, cache);
             }
             Carry::No
         }
-        rec(self, hi, want, seen) == Carry::Yes
+        memo(self, hi, want, seen, &mut HashMap::new()) == Carry::Yes
     }
 
     fn why_no_base(&self, dynamic: Option<Value>) -> &'static str {
@@ -1890,7 +1989,9 @@ impl<'a> Tracer<'a> {
             self.runs(site, known)?;
             let a = address(site)?;
             let want = a0.offset.wrapping_add(4 * (first + k) as u32);
-            if (a.param, a.dynamic) != (a0.param, a0.dynamic)
+            // A different relative term is a different descriptor range: the
+            // byte positions lining up says nothing about the table slot.
+            if (a.param, a.dynamic, a.rel) != (a0.param, a0.dynamic, a0.rel)
                 || a.offset.wrapping_add(4 * dword as u32) != want
             {
                 return Err("a descriptor read from the first lane of loads that do not line up");
