@@ -544,7 +544,7 @@ impl HostHeap {
                 self.cpu(index),
             )
         };
-        self.keep(index, Some(buffer.clone()));
+        self.keep(index, Some(buffer.clone()), None);
     }
 
     /// Makes slot `index` a raw buffer view that reads zeros.
@@ -567,7 +567,7 @@ impl HostHeap {
                 self.cpu(index),
             )
         };
-        self.keep(index, None);
+        self.keep(index, None, None);
     }
 
     /// Whether this is a sampler heap.
