@@ -12,8 +12,8 @@
 //! bake) are there at once as before; past the budget a draw or dispatch
 //! whose pipeline is not ready is dropped, as an untranslated one is.
 //!
-//! shortcut: the budget (half a second of waiting per title frame) is a
-//! guess; a pass the title runs only once and whose pipeline takes longer
+//! shortcut: the budget (half a second of waiting per title frame,
+//! `VICTORY_PIPELINE_WAIT_MS`) is a guess; a pass the title runs only once and whose pipeline takes longer
 //! is lost.
 
 use std::collections::VecDeque;
@@ -134,8 +134,16 @@ static WORK: (Mutex<WorkQueue>, Condvar) = (
 /// Signalled whenever a worker has made a pipeline.
 static DONE: (Mutex<()>, Condvar) = (Mutex::new(()), Condvar::new());
 
-/// Waiting allowed per title frame, over all threads.
-const BUDGET: Duration = Duration::from_millis(500);
+/// Waiting allowed per title frame, over all threads: 500 ms unless
+/// `VICTORY_PIPELINE_WAIT_MS` says otherwise (0: never wait, a draw whose
+/// pipeline is not made yet is dropped until it is; one-off passes such as
+/// a colour-grading bake may then be lost).
+fn budget() -> Duration {
+    static MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    Duration::from_millis(*MS.get_or_init(|| {
+        std::env::var("VICTORY_PIPELINE_WAIT_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(500)
+    }))
+}
 
 /// Pipelines queued and not made yet.
 static WAITING: AtomicU64 = AtomicU64::new(0);
@@ -201,7 +209,7 @@ fn wait(p: &Pending, frame: u64) {
     if FRAME.swap(frame, Ordering::Relaxed) != frame {
         WAITED_US.store(0, Ordering::Relaxed);
     }
-    let left = BUDGET.saturating_sub(Duration::from_micros(WAITED_US.load(Ordering::Relaxed)));
+    let left = budget().saturating_sub(Duration::from_micros(WAITED_US.load(Ordering::Relaxed)));
     if left.is_zero() {
         return;
     }
