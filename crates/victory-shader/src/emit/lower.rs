@@ -408,6 +408,27 @@ fn reads_mask_as_data(st: &Structured, i: &Inst) -> bool {
     })
 }
 
+/// Whether `inst` writes memory (a store, an atomic, an LDS write).
+fn writes_memory(inst: &Inst) -> bool {
+    let name = inst.name();
+    match &inst.fields {
+        Fields::Ds { .. } => {
+            !(name.starts_with("ds_read")
+                || name.starts_with("ds_load")
+                || name.starts_with("ds_swizzle")
+                || name.contains("permute")
+                || name == "ds_nop")
+        }
+        _ => {
+            name.contains("store")
+                || name.contains("atomic")
+                || name.starts_with("flat_")
+                    && !name.starts_with("flat_load")
+                    && !name.starts_with("flat_scratch_load")
+        }
+    }
+}
+
 /// Whether `inst` gives each lane what it would under any EXEC: scalar
 /// code and loads that do not touch EXEC, and vector code that reads no
 /// other lane (no DPP, permutes or lane reads and writes).
@@ -652,8 +673,19 @@ impl<'a> Lower<'a> {
                     // needs fixed lane numbering — but only where the select's
                     // result is read: a select whose value never lands must
                     // not force the console flow (and its one-wave limit).
-                    let live: Vec<Value> =
+                    let mut live: HashSet<Value> =
                         insts().flat_map(|i| i.reads.iter().map(|r| r.1)).collect();
+                    // A phi that is read reads its operands.
+                    let mut grew = true;
+                    while std::mem::take(&mut grew) {
+                        for phi in p.blocks.iter().flat_map(|b| &b.phis) {
+                            if live.contains(&phi.value) {
+                                for &a in &phi.args {
+                                    grew |= live.insert(a);
+                                }
+                            }
+                        }
+                    }
                     insts().any(|i| {
                         matches!(
                             i.name(),
@@ -1099,6 +1131,7 @@ impl<'a> Lower<'a> {
     /// their own EXEC, and only they run on the host.
     fn section(&mut self, b: usize, start: usize, end: usize) -> Result<(), Stop> {
         const UNKNOWN: Why = "a whole-wave section step the simulation does not follow";
+        const EFFECT: Why = "a whole-wave section that writes memory";
         let insts = &self.x.p.blocks[b].insts;
         let inside: HashSet<Value> = insts[start + 1..end]
             .iter()
@@ -1109,10 +1142,31 @@ impl<'a> Lower<'a> {
             .copied()
             .filter(|w| self.section_out.contains(w))
             .collect();
+        // The section is replayed for the values it leaves only: a write to
+        // memory in it would be dropped, so what it leaves is not preserved.
+        if !need.is_empty() && insts[start + 1..end].iter().any(writes_memory) {
+            for inst in &insts[start + 1..end] {
+                for &(_, w) in &inst.writes {
+                    self.vals.insert(w, Val::Missing(EFFECT));
+                }
+            }
+            return Ok(());
+        }
         let mut plain = vec![false; end - start];
         for j in (start + 1..end).rev() {
             let inst = &insts[j];
             let shapes = &self.sections[&b][&start].shapes;
+            // A needed value with a shape is made of the shape's operands:
+            // the ones the section writes have to be there too.
+            let operands: Vec<Value> = inst
+                .writes
+                .iter()
+                .filter(|(_, w)| need.contains(w))
+                .filter_map(|(_, w)| shapes.get(w))
+                .flat_map(|sh| sh.operands())
+                .filter(|v| inside.contains(v))
+                .collect();
+            need.extend(operands);
             let wanted = inst
                 .writes
                 .iter()
@@ -10042,6 +10096,27 @@ mod tests {
     }
 
     #[test]
+    fn a_whole_wave_section_that_writes_memory_is_not_replayed_for_a_scalar() {
+        // An LDS write and a scalar add inside a section, the sum branched on
+        // after the restore: the replay would lower the sum and drop the
+        // write, so it is refused, as the unreplayed sum was.
+        let words = [
+            0xBE84_0385, // s_mov_b32 s4, 5
+            0xBE80_3DC1, // s_or_saveexec_b32 s0, -1
+            0x8005_8104, // s_add_u32 s5, s4, 1
+            0x7E00_0280, // v_mov_b32_e32 v0, 0
+            0xD834_0000,
+            0x0000_0000, // ds_write_b32 v0, v0
+            0xBEFE_0300, // s_mov_b32 exec_lo, s0
+            0xBF06_8605, // s_cmp_eq_u32 s5, 6
+            0xBF85_0001, // s_cbranch_scc1 -> s_endpgm
+            0xBE86_0380, // s_mov_b32 s6, 0
+            S_ENDPGM,
+        ];
+        assert!(lowers(&words, 0).is_err());
+    }
+
+    #[test]
     fn scalar_code_inside_a_whole_wave_section_is_lowered() {
         // Assembled with llvm-mc (gfx1030, wave32): scalar code the
         // compiler scheduled into a whole-wave section, branched on after.
@@ -10092,21 +10167,31 @@ mod tests {
     #[test]
     fn the_console_flow_branches_on_the_scc_a_whole_wave_section_leaves() {
         // A lane read outside the section (which only the console flow can
-        // run), the section's scalar compare of a constant, then the branch
-        // on the SCC it left.
+        // run), the section's scalar add and compare of a constant (the
+        // compare is inside, before the EXEC restore), then the branch on
+        // the SCC it left.
         let words = [
             0xBE84_0385, // s_mov_b32 s4, 5
             0xD761_0002, // v_readlane_b32 s2, v0, 40
             0x0001_5100,
             0xBE80_3DC1, // s_or_saveexec_b32 s0, -1
             0x8005_8104, // s_add_u32 s5, s4, 1
+            0xBF06_8605, // s_cmp_eq_u32 s5, 6
             0x7E02_0280, // v_mov_b32_e32 v1, 0
             0xBEFE_0300, // s_mov_b32 exec_lo, s0
-            0xBF06_8605, // s_cmp_eq_u32 s5, 6
             0xBF85_0001, // s_cbranch_scc1 -> s_endpgm
             0xBE86_0380, // s_mov_b32 s6, 0
             S_ENDPGM,
         ];
+        // The compare (instruction 4) is inside the section the recognizer
+        // finds, so the SCC is one the section's simulation leaves.
+        let code: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let p = ir::build(&code, true, 8).unwrap();
+        let found = super::super::wave::sections(&p, 0);
+        assert!(
+            found.iter().any(|(&start, sec)| start < 4 && 4 < sec.end),
+            "the compare is outside every section"
+        );
         console_flow_lowers(&words, 64).unwrap();
     }
 
@@ -10267,6 +10352,63 @@ mod tests {
     }
 
     #[test]
+    fn a_carry_in_whose_result_reaches_a_store_through_a_phi_needs_console_lanes() {
+        // A carry-in from a number (an SGPR no mask tracking follows) in one
+        // arm of an if on a root constant, its result joined by a phi and
+        // then written: the phi's operands are reads of the result.
+        let words = [
+            0x7E00_0280, // v_mov_b32_e32 v0, 0
+            0x7E04_0280, // v_mov_b32_e32 v2, 0
+            0xBE82_0381, // s_mov_b32 s2, 1
+            0xBF06_8000, // s_cmp_eq_u32 s0, 0
+            0xBF85_0002, // s_cbranch_scc1 -> the write
+            0xD528_0602,
+            0x000A_0100, // v_add_co_ci_u32_e64 v2, s6, v0, v0, s2
+            0xD834_0000,
+            0x0000_0200, // ds_write_b32 v0, v2
+            S_ENDPGM,
+        ];
+        let layout = vec![root(RootType::Constants, 0, 0)];
+        lower_with(&words, layout, vec![]).unwrap();
+    }
+
+    #[test]
+    fn a_whole_wave_sections_copy_of_a_loaded_scalar_schedules_the_load() {
+        // A scalar load and a copy of it inside a section, then a compare
+        // of the copy after the restore: the copy is the load's value, so
+        // the load has to run as well.
+        let words = [
+            0xBE88_0300, // s_mov_b32 s8, s0
+            0xBE89_0301, // s_mov_b32 s9, s1
+            0xBE8A_0380, // s_mov_b32 s10, 0
+            0xBE8B_0380, // s_mov_b32 s11, 0
+            0xBE8C_3DC1, // s_or_saveexec_b32 s12, -1
+            0xF420_0104,
+            0xFA00_0000, // s_buffer_load_dword s4, s[8:11], 0x0
+            0xBF8C_007F, // s_waitcnt lgkmcnt(0)
+            0xBE85_0304, // s_mov_b32 s5, s4
+            0x7E02_0280, // v_mov_b32_e32 v1, 0
+            0xBEFE_030C, // s_mov_b32 exec_lo, s12
+            0xBF06_8605, // s_cmp_eq_u32 s5, 6
+            0xBF85_0001, // s_cbranch_scc1 -> s_endpgm
+            0xBE86_0380, // s_mov_b32 s6, 0
+            S_ENDPGM,
+        ];
+        let layout = vec![root(RootType::Descriptor, 0, 0)];
+        let used = vec![UsedResource {
+            kind: ResourceType::Srv,
+            root: RootType::Descriptor,
+            table_offset_dwords: 0,
+            lower_bound: 0,
+            stride: 0,
+            dwords: 4,
+            user_data: 0,
+            slot: 0,
+        }];
+        lower_with(&words, layout, used).unwrap();
+    }
+
+    #[test]
     fn a_descriptor_joined_by_control_flow_from_two_root_parameters_is_read_through() {
         // Two root raw buffers (root parameters 0 and 1, in s[0:1] and
         // s[2:3]) copied into one pair of SGPRs by an if/else on a root
@@ -10326,8 +10468,15 @@ mod tests {
             0xFA00_0020, // s_load_dwordx8 s[8:15], s[4:5], 0x20
             0x7E00_0280, // v_mov_b32_e32 v0, 0
             0x7E02_0280, // v_mov_b32_e32 v1, 0
+            0xBE90_0380, // s_mov_b32 s16, 0
+            0xBE91_0380, // s_mov_b32 s17, 0
+            0xBE92_0380, // s_mov_b32 s18, 0
+            0xBE93_0380, // s_mov_b32 s19, 0
         ];
-        words.extend(mimg_2d(0x00, 0xF, 2, 0, 8)); // image_sample v[2:5], v[0:1], s[8:15]
+        // image_sample_lz v[2:5], v[0:1], s[8:15], s[16:19]
+        let mut sample = mimg_2d(0x27, 0xF, 2, 0, 8);
+        sample[1] |= (16 >> 2) << 21;
+        words.extend(sample);
         words.extend([
             0xD834_0000,
             0x0000_0200, // ds_write_b32 v0, v2
@@ -10344,7 +10493,13 @@ mod tests {
             user_data: 0,
             slot: 0,
         };
-        lower_with(&words, layout, vec![used(0), used(8)]).unwrap();
+        let lowered = lower_with(&words, layout, vec![used(0), used(8)]).unwrap();
+        // A sample looks its sampler up (a handle of kind 14).
+        assert!(
+            lowered.annotations.iter().any(|a| a.0 == 14),
+            "no sampler handle: {:?}",
+            lowered.annotations
+        );
     }
 
     #[test]

@@ -1868,6 +1868,8 @@ fn signed_scalar_add_sub_scc_matches_rdna2() {
 fn v_cndmask_on_an_untracked_mask_tests_this_lanes_bit() {
     // v_cndmask_b32_e64 v0, v1, v2, <mask> (VOP3 0x101); s3 holds the mask.
     let from_sgpr = build_valu_cs(&vop3(0x101, 0, vgpr(1), vgpr(2), sgpr(3)));
+    // This lane's bit is taken from the lane index, a wave size the
+    // hardware adapter has and WARP's smaller waves may not: hardware only.
     let hw = &[("hardware", false)];
     run_cases_on(
         &from_sgpr,
@@ -1880,7 +1882,8 @@ fn v_cndmask_on_an_untracked_mask_tests_this_lanes_bit() {
     );
     for (mask, pick) in [(128u16, 0usize), (193, 1)] {
         let k = build_valu_cs(&vop3(0x101, 0, vgpr(1), vgpr(2), mask));
-        run_cases_on(&k, &[[10, 20, 0, 0]], hw, |label, _, inp, got| {
+        // An inline mask names no lane: both backends.
+        run_cases(&k, &[[10, 20, 0, 0]], |label, _, inp, got| {
             assert_eq!(got, inp[pick], "{label} inline {mask}");
         });
     }

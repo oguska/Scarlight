@@ -118,6 +118,19 @@ pub(crate) enum Shape {
     Prefix(Op, Value, Value, u32, bool),
 }
 
+impl Shape {
+    /// The values the shape is made of.
+    pub(crate) fn operands(self) -> Vec<Value> {
+        match self {
+            Shape::K(_) => vec![],
+            Shape::Value(v) => vec![v],
+            Shape::Masked(a, m, _) | Shape::Active(_, a, m, _) | Shape::Prefix(_, a, m, _, _) => {
+                vec![a, m]
+            }
+        }
+    }
+}
+
 /// The section starting at instruction `start` of a block: its restore
 /// index and the shapes of the values it writes.
 pub(crate) struct Section {
@@ -384,7 +397,9 @@ fn simulate(insts: &[Inst], wave: u32, saved: Value) -> HashMap<Value, Shape> {
                 lane_sel(1)
             } else {
                 // The first lane EXEC holds.
-                (exec != 0).then(|| exec.trailing_zeros())
+                // (only the wave's lanes: a wave32 EXEC written as 64 bits
+                // may hold ones above lane 31).
+                (exec & all != 0).then(|| (exec & all).trailing_zeros())
             };
             let x = lanes(src, &vec, &uni);
             if let Some(w) = inst.write(Reg::S(code)) {
@@ -894,5 +909,28 @@ mod tests {
         let shapes = &found[&0].shapes;
         assert_eq!(shapes.get(&insts[1].write(Reg::V(1)).unwrap()), None);
         assert_eq!(shapes.get(&insts[2].write(Reg::S(1)).unwrap()), None);
+    }
+
+    #[test]
+    fn the_first_lane_is_searched_in_the_wave_only() {
+        // A wave32 EXEC written as 64 bits and emptied in its low half has
+        // no lane set: `v_readfirstlane_b32` reads none (it used to take
+        // lane 32 of a 32-lane vector).
+        let p = build(
+            &[
+                0xBE80_3DC1, // s_or_saveexec_b32 s0, -1
+                0xBEFE_04C1, // s_mov_b64 exec, -1
+                0xBEFE_0380, // s_mov_b32 exec_lo, 0
+                0x7E02_0500, // v_readfirstlane_b32 s1, v0
+                0xBEFE_0300, // s_mov_b32 exec_lo, s0
+                0xBF81_0000, // s_endpgm
+            ],
+            false,
+        );
+        let insts = &p.blocks[0].insts;
+        let found = sections(&p, 0);
+        for sec in found.values() {
+            assert_eq!(sec.shapes.get(&insts[3].write(Reg::S(1)).unwrap()), None);
+        }
     }
 }

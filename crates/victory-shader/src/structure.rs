@@ -684,7 +684,19 @@ impl<'a> Lanes<'a> {
             exits,
             guards,
             execs: execs.to_vec(),
-            others: self.other.iter().map(|(&(lo, _), &m)| (lo, m)).collect(),
+            others: {
+                // A low dword read with two different high dwords is two
+                // masks: neither is told by the low one.
+                let mut lows: HashMap<Value, Vec<Bool>> = HashMap::new();
+                for (&(lo, _), &m) in &self.other {
+                    lows.entry(lo).or_default().push(m);
+                }
+                self.other
+                    .iter()
+                    .filter(|((lo, _), _)| lows[lo].len() == 1)
+                    .map(|(&(lo, _), &m)| (lo, m))
+                    .collect()
+            },
             pairs: self
                 .masks
                 .keys()
@@ -1301,5 +1313,39 @@ mod tests {
         assert_eq!(p.blocks[0].exit.successors(), [2, 4]);
         assert_eq!(p.blocks[1].preds, [2]);
         assert!(structure(&p).is_ok());
+    }
+
+    #[test]
+    fn a_wave64_number_mask_is_not_told_by_its_low_half_alone() {
+        // s[2:3] all ones read by a select, then only s3 cleared and the
+        // pair read again: one low dword, two masks, so the low dword names
+        // neither (a single pair is still named by it).
+        let p = build(
+            &[
+                0xBE82_03C1, // s_mov_b32 s2, -1
+                0xBE83_03C1, // s_mov_b32 s3, -1
+                0xD501_0001,
+                0x000A_0080, // v_cndmask_b32_e64 v1, 0, v0, s[2:3]
+                0xBE83_0380, // s_mov_b32 s3, 0
+                0xD501_0002,
+                0x000A_0080, // v_cndmask_b32_e64 v2, 0, v0, s[2:3]
+                S_ENDPGM,
+            ],
+            true,
+        );
+        let lo = p.blocks[0].insts[0].write(Reg::S(2)).unwrap();
+        assert!(!structure(&p).unwrap().others.contains_key(&lo));
+        let one = build(
+            &[
+                0xBE82_03C1, // s_mov_b32 s2, -1
+                0xBE83_03C1, // s_mov_b32 s3, -1
+                0xD501_0001,
+                0x000A_0080, // v_cndmask_b32_e64 v1, 0, v0, s[2:3]
+                S_ENDPGM,
+            ],
+            true,
+        );
+        let lo = one.blocks[0].insts[0].write(Reg::S(2)).unwrap();
+        assert!(structure(&one).unwrap().others.contains_key(&lo));
     }
 }
