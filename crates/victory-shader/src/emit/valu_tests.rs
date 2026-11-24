@@ -215,6 +215,7 @@ fn build_cs(body: &[u32], lds_blocks: u32) -> HostShader {
         root_cbvs: lowered.root_cbvs,
         root_srvs: lowered.root_srvs,
         stride_table: lowered.stride_table,
+        root_uavs: lowered.root_uavs,
     };
 
     if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
@@ -1103,6 +1104,7 @@ fn run_wave_cs(wave64: bool, body: &[u32], mut check: impl FnMut(&str, &[u32])) 
         root_cbvs: lowered.root_cbvs,
         stride_table: lowered.stride_table,
         root_srvs: lowered.root_srvs,
+        root_uavs: lowered.root_uavs,
     };
 
     if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
@@ -1523,6 +1525,7 @@ fn build_root_srv_cs(body: &[u32]) -> HostShader {
         static_samplers: Vec::new(),
         root_cbvs: lowered.root_cbvs,
         root_srvs: lowered.root_srvs,
+        root_uavs: lowered.root_uavs,
         stride_table: lowered.stride_table,
     };
 
@@ -1693,5 +1696,24 @@ fn root_srv_loop_carried_pointer_induction_phi() {
             got, want,
             "{backend}: loop phi sum starting at {start} = {got}, want {want}",
         );
+    });
+}
+
+#[test]
+fn scalar_buffer_loads_read_a_uav_through_its_table() {
+    // The UAV is the one `build_valu_cs` stores to: write root constant 0
+    // to its dword 0, read it back with a scalar buffer load, and store
+    // that.
+    let body = [
+        0xE070_0000,
+        0x8002_0100, // buffer_store_dword v1, off, s[8:11], 0
+        0xF420_0304,
+        0xFA00_0000, // s_buffer_load_dword s12, s[8:11], null
+        0x7E00_020C, // v_mov_b32 v0, s12
+    ];
+    let shader = build_valu_cs(&body);
+    let cases = [[0x1234_5678, 0, 0, 0], [0xDEAD_BEEF, 0, 0, 0]];
+    run_cases(&shader, &cases, |backend, _, inp, got| {
+        assert_eq!(got, inp[0], "{backend}: read back {got:#010x}");
     });
 }

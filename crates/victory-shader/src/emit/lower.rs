@@ -50,6 +50,7 @@ pub(crate) struct Lowered {
     pub root_cbvs: Vec<u8>,
     pub root_srvs: Vec<u8>,
     pub stride_table: bool,
+    pub root_uavs: Vec<u8>,
     pub user_data: Vec<UserData>,
     pub samplers: Vec<[u32; 4]>,
     /// Heap handles made with a non-uniform index.
@@ -1341,6 +1342,7 @@ impl<'a> Lower<'a> {
         let root_cbvs = self.s.root_cbvs.iter().map(|r| r.0).collect();
         let root_srvs = self.s.root_srvs.iter().map(|r| r.0).collect();
         let stride_table = self.s.stride_table.is_some();
+        let root_uavs = self.s.root_uavs.iter().map(|r| r.0).collect();
         let cmp_samplers = self.s.cmp_samplers;
         Ok(Lowered {
             #[cfg(test)]
@@ -1349,6 +1351,7 @@ impl<'a> Lower<'a> {
             root_cbvs,
             root_srvs,
             stride_table,
+            root_uavs,
             #[cfg(test)]
             nonuniform_handles: self.s.nonuniform_handles,
             #[cfg(test)]
@@ -1373,7 +1376,7 @@ impl<'a> Lower<'a> {
         let io_inputs: HashMap<Value, Input> = self.x.io.inputs.iter().copied().collect();
         for &(reg, v) in &self.x.p.inputs {
             let val = match reg {
-                Reg::S(_) if self.params.contains_key(&v) => continue, // loaded on first use
+                Reg::S(_) | Reg::Spill(_) if self.params.contains_key(&v) => continue, // loaded on first use
                 // Most programs only interpolate with them: loaded on first
                 // use as a value (`get`).
                 Reg::V(_) if matches!(io_inputs.get(&v), Some(Input::Barycentric { .. })) => {
@@ -1392,6 +1395,7 @@ impl<'a> Lower<'a> {
                     None => Val::Missing("a hardware SGPR input"),
                 },
                 Reg::Scc => Val::Missing("SCC on entry"),
+                Reg::Spill(_) => Val::Missing("a spill argument without a root parameter"),
                 Reg::V(_) => match io_inputs.get(&v) {
                     Some(&input) => self.input(input),
                     // Registers no one set read as zero (the validator
@@ -1791,6 +1795,10 @@ impl<'a> Lower<'a> {
             }
             Operand::Vector { reg, .. } => {
                 let v = inst.read(Reg::V(reg)).ok_or("an unread operand")?;
+                self.i32_of(v)
+            }
+            Operand::Spill(reg) => {
+                let v = inst.read(Reg::Spill(reg)).ok_or("an unread operand")?;
                 self.i32_of(v)
             }
             Operand::Const(c) => crate::resource::inline(c)
@@ -3768,8 +3776,15 @@ impl<'a> Lower<'a> {
             }
             return Ok(());
         }
-        if matches!(kind, Some(u) if u.kind == ResourceType::Srv) {
-            let h = self.handle(site, src, false, (11, 0))?;
+        // A raw view, read only or not; a constant buffer otherwise. (A
+        // UAV read through a constant buffer handle removes the device.)
+        let raw = match kind.map(|u| u.kind) {
+            Some(ResourceType::Srv) => Some(11),
+            Some(ResourceType::Uav) => Some(11 | 0x1000),
+            _ => None,
+        };
+        if let Some(props) = raw {
+            let h = self.handle(site, src, false, (props, 0))?;
             for k in 0..count {
                 let off = self.s.m.i32(4 * k);
                 let a = self.s.m.bin(c, Bin::Add, addr, off);
@@ -4241,6 +4256,9 @@ impl<'a> Lower<'a> {
         match *op {
             Operand::Scalar { code, .. } if code != NULL => inst.read(Reg::S(code)),
             Operand::Vector { reg, .. } => inst.read(Reg::V(reg)),
+            // A logical spill argument reachable as an address base (the
+            // tracer tags it), so the replay can follow its `s_mov_b32`.
+            Operand::Spill(reg) => inst.read(Reg::Spill(reg)),
             _ => None,
         }
     }
@@ -4765,6 +4783,64 @@ impl<'a> Lower<'a> {
         Ok(x)
     }
 
+    /// Whether `src` is a descriptor built around a root SRV's or UAV's
+    /// address.
+    fn on_root_descriptor(&self, src: &Source) -> bool {
+        matches!(src, Source::Built { address, .. }
+            if self
+                .x
+                .native
+                .layout
+                .get(address.param)
+                .is_some_and(|rp| rp.root == RootType::Descriptor))
+    }
+
+    /// The handle and the two coordinates of a structured access to element
+    /// `index`, byte `off` of it: a structured buffer view, or, for a root
+    /// descriptor (a bare address on the host, with no stride of its own),
+    /// its raw view at byte `index * stride + off`.
+    fn structured(
+        &mut self,
+        site: Site,
+        src: &Source,
+        u: u32,
+        stride: u32,
+        (index, off): (V, V),
+    ) -> Result<(V, V, V), Why> {
+        if self.on_root_descriptor(src) && stride > 0 {
+            let c = self.cur;
+            let s = self.s.m.i32(stride);
+            let at = self.s.m.bin(c, Bin::Mul, index, s);
+            // An index whose byte position wraps would land back inside the
+            // view; send it past the view's end instead, where the hardware's
+            // check reads zero and drops the write, as the contract says.
+            let limit = self.s.m.i32(u32::MAX / stride);
+            let over = self.s.m.cmp(c, pred::IUGT, index, limit);
+            let far = self.s.m.i32(!15u32);
+            let base = self.s.m.select(c, over, far, at);
+            let sum = self.s.m.bin(c, Bin::Add, base, off);
+            // The member offset is a runtime value: it turns a position at the
+            // view's end into a wrapped one, and the sentinel itself into a
+            // low byte. A sum below its addend wrapped, so send that past the
+            // end too; a position that did not wrap stands as it is.
+            let wrap = self.s.m.cmp(c, pred::IULT, sum, base);
+            let at = self.s.m.select(c, wrap, far, sum);
+            let h = self.handle(site, src, false, (11 | u, 0))?;
+            return Ok((h, at, self.s.m.undef(self.s.t.i32)));
+        }
+        if stride == 0 {
+            // No stride in the used-resource entry: the host's runtime
+            // stride table names the raw view, the stride and the bias.
+            let (h, byte) = self.runtime_view(src, index, off, 11 | u)?;
+            return Ok((h, byte, self.s.m.undef(self.s.t.i32)));
+        }
+        if stride < 4 || !stride.is_multiple_of(4) {
+            return Err("a structured buffer of unknown stride");
+        }
+        let h = self.handle(site, src, false, (12 | u, stride))?;
+        Ok((h, index, off))
+    }
+
     /// The used-resource entry a descriptor loaded from a table falls in.
     fn used_kind(&self, src: &Source) -> Option<&'a UsedResource> {
         if let Source::Phi { args, .. } | Source::Select { args, .. } | Source::Lanes { args, .. } =
@@ -4878,7 +4954,11 @@ impl<'a> Lower<'a> {
                     (RootType::Descriptor, Some(ResourceType::Srv), 11) => {
                         Ok(self.s.root_srv_handle(rp.slot))
                     }
-                    _ => Err("a root UAV or typed root view"),
+                    // A raw buffer the program may write: a root UAV.
+                    (RootType::Descriptor, Some(ResourceType::Uav), 0x100b) => {
+                        Ok(self.s.root_uav_handle(rp.slot))
+                    }
+                    _ => Err("a typed root view"),
                 }
             }
             Source::Phi { block, args } => {
@@ -8522,18 +8602,8 @@ impl<'a> Lower<'a> {
             let (h, coords) = match index {
                 Some(index) => {
                     let stride = used.map_or(0, |u| u.stride);
-                    if stride != 0 && (stride < 4 || !stride.is_multiple_of(4)) {
-                        return Err("a structured buffer of unknown stride");
-                    }
-                    if stride >= 4 && stride.is_multiple_of(4) {
-                        (
-                            self.handle(site, src, false, (12 | u, stride))?,
-                            [index, off, iu],
-                        )
-                    } else {
-                        let (h, byte) = self.runtime_view(src, index, off, 11 | u)?;
-                        (h, [byte, iu, iu])
-                    }
+                    let (h, a, b) = self.structured(site, src, u, stride, (index, off))?;
+                    (h, [a, b, iu])
                 }
                 None => (self.handle(site, src, false, (11 | u, 0))?, [off, iu, iu]),
             };
@@ -8612,14 +8682,8 @@ impl<'a> Lower<'a> {
                 match index {
                     Some(index) => {
                         let stride = used.map_or(0, |u| u.stride);
-                        if stride >= 4 && stride.is_multiple_of(4) {
-                            args.push(self.handle(site, src, false, (12 | u, stride))?);
-                            args.extend([index, off]);
-                        } else {
-                            let (h, byte) = self.runtime_view(src, index, off, 11 | u)?;
-                            args.push(h);
-                            args.extend([byte, iu]);
-                        }
+                        let (h, a, b) = self.structured(site, src, u, stride, (index, off))?;
+                        args.extend([h, a, b]);
                     }
                     None => {
                         args.push(self.handle(site, src, false, (11 | u, 0))?);
@@ -8676,30 +8740,15 @@ impl<'a> Lower<'a> {
             match index {
                 Some(index) => {
                     let stride = used.map_or(0, |u| u.stride);
-                    if stride != 0 && (stride < 4 || !stride.is_multiple_of(4)) {
-                        return Err("a structured buffer of unknown stride");
-                    }
-                    if stride >= 4 && stride.is_multiple_of(4) {
-                        let h = self.handle(site, src, false, (12 | u, stride))?;
-                        self.s.op(
-                            c,
-                            "rawBufferLoad.f32",
-                            Attr::ReadOnly,
-                            self.s.t.res_ret,
-                            139,
-                            &[h, index, off, mask, align],
-                        )
-                    } else {
-                        let (h, byte) = self.runtime_view(src, index, off, 11 | u)?;
-                        self.s.op(
-                            c,
-                            "rawBufferLoad.f32",
-                            Attr::ReadOnly,
-                            self.s.t.res_ret,
-                            139,
-                            &[h, byte, iu, mask, align],
-                        )
-                    }
+                    let (h, a, b) = self.structured(site, src, u, stride, (index, off))?;
+                    self.s.op(
+                        c,
+                        "rawBufferLoad.f32",
+                        Attr::ReadOnly,
+                        self.s.t.res_ret,
+                        139,
+                        &[h, a, b, mask, align],
+                    )
                 }
                 None => {
                     let h = self.handle(site, src, false, (11 | u, 0))?;

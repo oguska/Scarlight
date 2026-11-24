@@ -170,6 +170,9 @@ pub struct HostShader {
     /// True when the shader reads the runtime stride table (`t0` in
     /// [`STRIDE_SPACE`]).
     pub stride_table: bool,
+    /// Root UAVs (raw buffers) the shader reads and writes: `u<index>` in
+    /// [`ROOT_CBV_SPACE`].
+    pub root_uavs: Vec<u8>,
 }
 
 impl HostShader {
@@ -269,7 +272,15 @@ pub fn translate_for(container: &[u8], target: Target) -> Result<HostShader, Sha
             offset: 0,
             what: "a container without a vertex, pixel, compute or mesh program",
         })?;
-    let p = ir::build(&native.patched_code(), native.wave64, native.vgprs)?;
+    // A compute program whose root arguments all sit past the 16 user SGPRs
+    // finds them through the spill table `s[0:1]` points to.
+    let spilled = native.stage == HwStage::Cs
+        && !native.layout.is_empty()
+        && native
+            .layout
+            .iter()
+            .all(|r| native.stage.user_sgpr(r.user_data) >= 16);
+    let p = ir::build_with(&native.patched_code(), native.wave64, native.vgprs, spilled)?;
     // Structurisation first: tracing per-lane descriptors needs it (its
     // failure is reported after the earlier stages').
     let st = structure::structure(&p);
@@ -411,6 +422,7 @@ pub fn emit(
         root_cbvs: l.root_cbvs,
         root_srvs: l.root_srvs,
         stride_table: l.stride_table,
+        root_uavs: l.root_uavs,
     })
 }
 
@@ -889,6 +901,7 @@ mod tests {
             root_cbvs: Vec::new(),
             root_srvs: Vec::new(),
             stride_table: false,
+            root_uavs: Vec::new(),
         };
         let file = |var: &str, stage| {
             std::env::var(var).ok().map(|p| super::HostShader {
@@ -900,6 +913,7 @@ mod tests {
                 root_cbvs: Vec::new(),
                 root_srvs: Vec::new(),
                 stride_table: false,
+                root_uavs: Vec::new(),
             })
         };
         let ps = file("VICTORY_REF_PS", crate::HwStage::Ps).unwrap_or(ps);
@@ -1617,6 +1631,7 @@ mod barycentric_tests {
             static_samplers: Vec::new(),
             root_cbvs: l.root_cbvs,
             root_srvs: l.root_srvs,
+            root_uavs: l.root_uavs,
             stride_table: l.stride_table,
         }
     }

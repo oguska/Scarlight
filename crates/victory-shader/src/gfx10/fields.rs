@@ -33,6 +33,8 @@ pub enum Operand {
         chan: u8,
         high: bool,
     },
+    /// Logical user SGPR in a spill-table copy synthesized by the IR.
+    Spill(u8),
 }
 
 /// Operand code of `null` (no register; reads as 0).
