@@ -788,12 +788,18 @@ impl Host {
         first_error
     }
 
-    /// A host render target view of `resource`, valid until it is recorded.
+    /// A host render target view of `resource`, valid until it is recorded,
+    /// or `None` if the host resource lacks `ALLOW_RENDER_TARGET`.
     pub(crate) fn rtv(
         &self,
         resource: &ID3D12Resource,
         desc: Option<&D3D12_RENDER_TARGET_VIEW_DESC>,
-    ) -> D3D12_CPU_DESCRIPTOR_HANDLE {
+    ) -> Option<D3D12_CPU_DESCRIPTOR_HANDLE> {
+        // SAFETY: a live resource.
+        let flags = unsafe { resource.GetDesc() }.Flags;
+        if flags.0 & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET.0 == 0 {
+            return None;
+        }
         let slot = self.next_rtv.fetch_add(1, Ordering::Relaxed) % RTV_RING;
         // SAFETY: a slot of our heap and a live resource.
         unsafe {
@@ -801,8 +807,53 @@ impl Host {
             handle.ptr += (slot * self.rtv_size) as usize;
             self.device
                 .CreateRenderTargetView(resource, desc.map(|d| d as *const _), handle);
+            Some(handle)
+        }
+    }
+
+    /// A render target view that discards what is written to it, in `desc`'s
+    /// format (R8G8B8A8_UNORM without one), valid until it is recorded. It
+    /// holds the place of a target the host cannot render to, so the targets
+    /// after it keep their slots.
+    pub(crate) fn null_rtv(
+        &self,
+        desc: Option<&D3D12_RENDER_TARGET_VIEW_DESC>,
+    ) -> D3D12_CPU_DESCRIPTOR_HANDLE {
+        // A null descriptor must be one a real resource could use: forwarding a
+        // format the adapter cannot render to breaks that contract, and some
+        // drivers reject a descriptor that does.
+        let desc = desc
+            .filter(|d| d.Format != DXGI_FORMAT_UNKNOWN && self.renders(d.Format))
+            .copied()
+            .unwrap_or(D3D12_RENDER_TARGET_VIEW_DESC {
+                Format: DXGI_FORMAT_R8G8B8A8_UNORM,
+                ViewDimension: D3D12_RTV_DIMENSION_TEXTURE2D,
+                ..Default::default()
+            });
+        let slot = self.next_rtv.fetch_add(1, Ordering::Relaxed) % RTV_RING;
+        // SAFETY: a slot of our heap; a null resource with a description.
+        unsafe {
+            let mut handle = self.rtvs.GetCPUDescriptorHandleForHeapStart();
+            handle.ptr += (slot * self.rtv_size) as usize;
+            self.device
+                .CreateRenderTargetView(None::<&ID3D12Resource>, Some(&desc), handle);
             handle
         }
+    }
+
+    /// Whether the adapter offers `format` as a render target, the use a null
+    /// render-target descriptor stands in for.
+    fn renders(&self, format: DXGI_FORMAT) -> bool {
+        let mut support = D3D12_FEATURE_DATA_FORMAT_SUPPORT { Format: format, ..Default::default() };
+        // SAFETY: plain feature query into our struct.
+        let queried = unsafe {
+            self.device.CheckFeatureSupport(
+                D3D12_FEATURE_FORMAT_SUPPORT,
+                (&raw mut support).cast(),
+                size_of::<D3D12_FEATURE_DATA_FORMAT_SUPPORT>() as u32,
+            )
+        };
+        queried.is_ok() && support.Support1.0 as u32 & D3D12_FORMAT_SUPPORT1_RENDER_TARGET.0 as u32 != 0
     }
 
     /// A host depth view of `resource`, valid until it is recorded.
