@@ -366,7 +366,13 @@ impl Shadow {
                 }
                 return copied;
             }
-            self.watched.store(NOT_WATCHED, Ordering::Relaxed);
+            // Only mark the shadow permanently unwatched if it has never been
+            // observed as watched. A sub-range that lands entirely in an
+            // unmapped hole inside an already-watched view pool must not
+            // disable write-watching for the rest of the pool.
+            let _ =
+                self.watched
+                    .compare_exchange(0, NOT_WATCHED, Ordering::Relaxed, Ordering::Relaxed);
         }
         self.copy(from, to);
         to - from
