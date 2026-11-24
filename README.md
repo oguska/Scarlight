@@ -1,4 +1,29 @@
-# Scarlight
+<div align="center">
+
+<img src="assets/banner.svg" alt="Scarlight: console titles on PC, AMD + Linux first" width="100%">
+
+<br>
+
+[![CI](https://img.shields.io/github/actions/workflow/status/pablogonz12/Scarlight/ci.yml?branch=main&style=for-the-badge&label=CI&labelColor=1a0838&color=ff2e93)](https://github.com/pablogonz12/Scarlight/actions/workflows/ci.yml)
+[![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-ff6a3d?style=for-the-badge&labelColor=1a0838)](LICENSE)
+![GPU: RDNA4 tested](https://img.shields.io/badge/GPU-RDNA4%20tested-00e5ff?style=for-the-badge&labelColor=1a0838)
+![Linux · Proton](https://img.shields.io/badge/Linux-Proton-ffb347?style=for-the-badge&labelColor=1a0838)
+[![PRs welcome](https://img.shields.io/badge/PRs-welcome-ff2e93?style=for-the-badge&labelColor=1a0838)](#-contributing)
+[![Stars](https://img.shields.io/github/stars/pablogonz12/Scarlight?style=for-the-badge&labelColor=1a0838&color=ffd24a)](https://github.com/pablogonz12/Scarlight/stargazers)
+
+### At a glance
+
+| 🎨 World shaders | 🗄️ Full archive | 🖼️ Best world fps | 🧭 Reached |
+|:---:|:---:|:---:|:---:|
+| **720 / 768** offline on RADV | **24,073 / 25,529** translated | **0.6** with the debug view | **minimap / HUD** |
+
+**Not playable yet.** Details below.
+
+</div>
+
+---
+
+## ✨ What it is
 
 Scarlight runs an Xbox Series X|S title's own x86-64 code on a PC, using the files you supply. It
 loads the title's executable, answers its console-only calls, and turns its GPU commands and
@@ -9,7 +34,7 @@ kept). It adds tested fixes from VIctory's open
 pull requests and forks, each merged with its author's credit ([INTEGRATION.md](INTEGRATION.md)),
 plus its own. No game files, dumps or screenshots are in this repository.
 
-## Status
+## 🚦 Status
 
 **Not playable yet.** In short:
 
@@ -80,14 +105,14 @@ Last updated: 24 Nov 2026, Scarlight `fe552e4`.
 
 <!-- state:end -->
 
-## What you need
+## 📋 What you need
 
 - **Your own copy of the title.** None is included, and none will be linked or shared.
 - A GPU with Direct3D 12 and shader model 6.6 (mesh shaders for the world), on Windows 10/11 x64
   or Linux with Wine/Proton.
 - Rust (the version is pinned in `rust-toolchain.toml`) if you build from source.
 
-## Quick start: Windows
+## 🪟 Quick start: Windows
 
 1. Install [Rust](https://rustup.rs) and the Visual Studio 2022 Build Tools with "Desktop
    development with C++".
@@ -113,7 +138,7 @@ The title needs several GiB of free Windows commit at startup (Task Manager → 
 Memory → Committed). If `crashes.log` reports Windows error 1455, close other apps or raise the
 paging file size.
 
-## Quick start: Linux (Wine / GE-Proton)
+## 🐧 Quick start: Linux (Wine / GE-Proton)
 
 1. Install Rust, then build a Windows binary from Linux:
    ```bash
@@ -140,7 +165,7 @@ paging file size.
 Free memory matters: anything that pins GPU memory (a local LLM server, say) pushes the world into
 swap. More platform notes: [AMD-LINUX.md](AMD-LINUX.md).
 
-## Controls
+## 🎮 Controls
 
 A gamepad works if one is connected. Otherwise the keyboard acts as a pad while the title's window
 has focus:
@@ -156,7 +181,8 @@ has focus:
 | Z / C | triggers |
 | F / H | stick clicks |
 
-## Troubleshooting
+<details>
+<summary><h2 style="display:inline">🛠️ Troubleshooting and logs</h2></summary>
 
 | Problem | Fix |
 |---|---|
@@ -170,7 +196,9 @@ Logs: `VICTORY_LOG=victory_loader=trace,info`. Crashes and host GPU failures are
 `crashes.log` in the data folder (default `%LOCALAPPDATA%\victory\data`). Diagnostics variables
 and commands: [AMD-LINUX.md](AMD-LINUX.md#diagnostics).
 
-## Contributing
+</details>
+
+## 🤝 Contributing
 
 Pull requests go to `main` only. CI runs clippy and the workspace tests on Windows, and CodeRabbit
 reviews each PR. If you are merging someone's upstream fix, keep their commits and their credit:
@@ -180,10 +208,10 @@ sent upstream. Code that also helps Windows or other GPUs should go to
 environment-variable names stay `victory*` so upstream fixes keep merging. Never commit game files;
 the asset-policy hook checks it (`docs/asset-policy.md`).
 
-## License and credits
+## 📜 License
 
-GPL-3.0-or-later; see [LICENSE](LICENSE). Scarlight is derived from
-[VIctory](https://github.com/Marvisak/VIctory) by Marvis and its contributors, and keeps their
-commit history. Thanks to the authors listed in [INTEGRATION.md](INTEGRATION.md),
-[JMAN730/victory](https://github.com/JMAN730/victory), and everyone whose fixes made the world
-load. Architecture overview: [docs/architecture.md](docs/architecture.md).
+GPL-3.0-or-later; see [LICENSE](LICENSE). Architecture overview: [docs/architecture.md](docs/architecture.md).
+
+## 💖 Thanks
+
+Scarlight is derived from [VIctory](https://github.com/Marvisak/VIctory) by Marvis and its contributors, and keeps their commit history. Thanks to the authors listed in [INTEGRATION.md](INTEGRATION.md), [JMAN730/victory](https://github.com/JMAN730/victory), and everyone whose fixes made the world load.
