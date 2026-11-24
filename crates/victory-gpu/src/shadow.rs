@@ -444,10 +444,19 @@ impl Shadow {
             }
             // A question that failed does not make the whole copy unwatched:
             // it may have crossed a region boundary or met an unmapped page.
-            // Only a copy wholly inside one committed private region is.
+            // Only a copy wholly inside one committed private region is, and
+            // only when it was never seen watched: a sub-range that lands in
+            // an unmapped hole inside an already-watched view pool must not
+            // disable write-watching for the rest of the pool (JMAN #13,
+            // fever308).
             let (start, end) = (self.start as usize, (self.start + self.len) as usize);
             if watched == WATCH_UNKNOWN && crate::watch::private_region_covers(start, end, region) {
-                self.watched.store(NOT_WATCHED, Ordering::Relaxed);
+                let _ = self.watched.compare_exchange(
+                    WATCH_UNKNOWN,
+                    NOT_WATCHED,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                );
             } else {
                 return self.copy(from, to);
             }

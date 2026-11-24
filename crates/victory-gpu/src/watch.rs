@@ -397,7 +397,7 @@ fn ask_span(
     let (count, guarded) = match ask(WRITE_WATCH_FLAG_RESET) {
         Some(count) => (count, Vec::new()),
         None if guarded => {
-            if !view_memory(first, first_region) {
+            if !view_memory(first, last, first_region) {
                 return None;
             }
             (0, guard_blocks(first * PAGE, last * PAGE))
@@ -478,17 +478,19 @@ fn guards() -> std::sync::MutexGuard<'static, Guards> {
 
 /// For view memory: the pages of `[start, end)`'s blocks written since
 /// they were last guarded (all of a block's pages), guarding them again
-/// before the caller copies them. `None` if the memory is not a view.
+/// before the caller copies them. `None` if the range contains no mapped view.
 #[cfg(test)]
 fn guard(start: usize, end: usize) -> Option<Vec<usize>> {
     let first = start / BLOCK;
-    view_memory(first, None).then(|| guard_blocks(start, end))
+    view_memory(first, end.div_ceil(BLOCK), None).then(|| guard_blocks(start, end))
 }
 
-/// Whether the block `first` starts section view memory, asking the system
-/// only the first time per block (#490: `VirtualQuery` per asking cost
-/// 100-230 ms per world frame). `out` receives the region when it is asked.
-fn view_memory(first: usize, out: Option<&mut Option<MemoryRegion>>) -> bool {
+/// Whether the blocks `[first, last)` contain section view memory, asking
+/// the system only the first time per block (#490: `VirtualQuery` per asking
+/// cost 100-230 ms per world frame). `out` receives the region when it is
+/// asked. A range that begins on an unmapped hole is still view memory when a
+/// mapped view lies further in (JMAN #13, fever308).
+fn view_memory(first: usize, last: usize, out: Option<&mut Option<MemoryRegion>>) -> bool {
     if guards().views.contains(&first) {
         return true;
     }
@@ -508,8 +510,12 @@ fn view_memory(first: usize, out: Option<&mut Option<MemoryRegion>>) -> bool {
         *out = Some(region);
     }
     if !region.mapped || region.reserved {
-        guards().plain.insert(first, region);
-        return false;
+        // `view_region` answers for `first` alone: the rest of the range may
+        // still reach a mapped view, and then it is guarded block by block.
+        if !has_mapped(first * BLOCK, last * BLOCK) {
+            guards().plain.insert(first, region);
+            return false;
+        }
     }
     guards().views.insert(first);
     true
@@ -554,6 +560,36 @@ fn guard_blocks(start: usize, end: usize) -> Vec<usize> {
         }
     }
     written
+}
+
+/// Whether `[start, end)` contains any mapped view region, for callers that
+/// have already found `start` is not one: walks `VirtualQuery` across
+/// `[start, end)` so a range spanning unmapped blocks before a mapped view is
+/// still guarded. The walk alone answers for `start` too, so it asks no extra
+/// time about the block the caller already queried.
+fn has_mapped(start: usize, end: usize) -> bool {
+    use windows_sys::Win32::System::Memory::{MEM_MAPPED, MEMORY_BASIC_INFORMATION, VirtualQuery};
+    let mut at = start;
+    while at < end {
+        let mut info = MEMORY_BASIC_INFORMATION::default();
+        // SAFETY: queries virtual memory metadata without dereferencing `at`.
+        if unsafe { VirtualQuery(at as *const _, &mut info, size_of_val(&info)) } == 0
+            || info.RegionSize == 0
+        {
+            break;
+        }
+        if info.Type == MEM_MAPPED {
+            return true;
+        }
+        let Some(next) = (info.BaseAddress as usize).checked_add(info.RegionSize) else {
+            break;
+        };
+        if next <= at {
+            break;
+        }
+        at = next;
+    }
+    false
 }
 
 /// Makes blocks `[from, to)` read-only and notes them guarded and clean;
@@ -1434,6 +1470,52 @@ pub(crate) mod tests {
             windows_sys::Win32::Foundation::CloseHandle(section);
         }
         title_memory_remapped(p, 3 * BLOCK);
+    }
+
+    /// A range that begins on an unmapped region before a mapped view is still
+    /// recognized as containing a mapped view and guarded instead of returning
+    /// `None` (JMAN #13, fever308).
+    #[test]
+    fn guard_handles_range_starting_before_mapped_view() {
+        use windows_sys::Win32::System::Memory::{
+            CreateFileMappingW, FILE_MAP_WRITE, MapViewOfFile, MEMORY_MAPPED_VIEW_ADDRESS,
+            UnmapViewOfFile,
+        };
+        // SAFETY: a pagefile section of one block, mapped read-write.
+        let view = unsafe {
+            let section = CreateFileMappingW(
+                -1isize as _,
+                std::ptr::null(),
+                PAGE_READWRITE,
+                0,
+                BLOCK as u32,
+                std::ptr::null(),
+            );
+            assert!(!section.is_null());
+            MapViewOfFile(section, FILE_MAP_WRITE, 0, 0, BLOCK).Value as usize
+        };
+        assert_ne!(view, 0);
+        // Start one block earlier (only when that preceding block is not
+        // itself a mapped view) and span into the mapped view.
+        let start = view - BLOCK;
+        if !memory_region(start).is_some_and(|r| r.mapped) {
+            assert!(
+                guard(start, view + BLOCK).is_some(),
+                "range spanning an unmapped prefix into a mapped view must stay guarded"
+            );
+            // A subsequent write inside the mapped view must be observed.
+            // SAFETY: inside our mapped read-write view.
+            unsafe { (view as *mut u8).write(42) };
+            let written = guard(start, view + BLOCK).expect("still guarded");
+            assert!(written.contains(&(view / PAGE)));
+        }
+        // SAFETY: our view.
+        unsafe {
+            UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS {
+                Value: view as *mut _,
+            })
+        };
+        title_memory_remapped(view, BLOCK);
     }
 
     /// A write or mapping that runs past the end of the address space (a
