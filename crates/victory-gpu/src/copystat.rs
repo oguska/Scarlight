@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
 /// Counters since the last line.
-pub(crate) enum C {
+pub enum C {
     Submissions,
     Copies,
     CopyBytes,
@@ -63,8 +63,14 @@ pub(crate) enum C {
     /// Staging buffers made, and their bytes.
     TexStaged,
     TexStagedBytes,
+    /// `XMemMapPhysicalPagesScatter` calls, the pages they name, and the
+    /// `XMemMapPhysicalPages` calls they made of them (fewer than the pages
+    /// when consecutive addresses ride one call).
+    Scatter,
+    ScatterPages,
+    ScatterMaps,
 }
-const COUNTERS: usize = 37;
+const COUNTERS: usize = 40;
 
 /// What a copy is for.
 #[derive(Clone, Copy)]
@@ -94,7 +100,7 @@ pub(crate) fn kind(kind: Kind, bytes: usize, us: u64) {
 }
 static COUNT: [AtomicU64; COUNTERS] = [const { AtomicU64::new(0) }; COUNTERS];
 
-pub(crate) fn add(c: C, n: u64) {
+pub fn add(c: C, n: u64) {
     COUNT[c as usize].fetch_add(n, Relaxed);
 }
 
@@ -156,7 +162,7 @@ pub(crate) fn log(frames: f64) {
          {:.2} MB unmapped; {:.0} page faults; {:.0} watches {:.2} ms, {:.1} MB checked, {:.1} MB \
          unchanged; {:.1} fallbacks; {:.0} guard faults; textures {:.1} MB watched and \
          changed, {:.1} MB hashed, {:.1} MB of them changed; {:.0} shared spans for \
-         {:.0} ranges",
+         {:.0} ranges; {:.1} page scatters {:.0} pages in {:.1} map calls",
         c[C::Submissions as usize],
         c[C::Copies as usize],
         mb(c[C::CopyBytes as usize]),
@@ -182,6 +188,9 @@ pub(crate) fn log(frames: f64) {
         mb(c[C::TexChanged as usize]),
         c[C::SharedSpans as usize],
         c[C::SharedRanges as usize],
+        c[C::Scatter as usize],
+        c[C::ScatterPages as usize],
+        c[C::ScatterMaps as usize],
     );
     let k: Vec<f64> = (0..3)
         .flat_map(|row| {

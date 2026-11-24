@@ -38,7 +38,7 @@ Last updated: 24 Nov 2026, Scarlight `fe552e4`.
 | ✅ | Boots | Boots into the title's own menus |
 | ✅ | Menus | 30 fps, drawn and interactive |
 | ✅ | Loads world | World streams in and the title's audio plays |
-| 🟡 | World picture | Mostly black: 59 of 751 world programs still skip their draws |
+| 🟡 | World picture | Mostly black: 76 of 768 world programs still skip their draws |
 | ❌ | Playable | 0.45–0.46 fps and a black picture: no real gameplay |
 
 ### Shader translation
@@ -49,9 +49,9 @@ Last updated: 24 Nov 2026, Scarlight `fe552e4`.
 | Compute | 2,404 | 2,582 | `█████████░ 93%` |
 | Mesh | 8,396 | 8,713 | `██████████ 96%` |
 | **All programs** | **23,946** | **26,084** | `█████████░ 92%` |
-| World set, translate → SPIR-V → RADV pipeline | 692 | 751 | `█████████░ 92%` |
+| World set, translate → SPIR-V → RADV pipeline | 692 | 768 | `█████████░ 90%` |
 
-*Full archive: 26,084 programs, `translate-main.txt`, 4e7e6a3 (PR #704), 24 Nov 2026. World set: the 751 programs the world actually uses, each run through translation, SPIR-V validation and a real RADV pipeline (`report-20261124-165507.tsv`, 24 Nov 2026) — every program that translates also validates and builds a pipeline, so the whole gap is translation. The 555 programs that are neither vertex/pixel, compute nor mesh are not emitted yet and count as untranslated.*
+*Full archive: 26,084 programs, `translate-main.txt`, 4e7e6a3 (PR #704), 24 Nov 2026. World set: the 751 programs the world actually uses plus the 52-program BVH capture (768 once duplicate containers are skipped), each run through translation, SPIR-V validation and a real RADV pipeline (hub/main `c888a93`, 24 Nov 2026; also the report file `report-20261124-165507.tsv`) — every program that translates also validates and builds a pipeline, so the whole gap is translation. The 555 programs that are neither vertex/pixel, compute nor mesh are not emitted yet and count as untranslated.*
 
 ### Top remaining shader failures
 
@@ -79,7 +79,7 @@ Last updated: 24 Nov 2026, Scarlight `fe552e4`.
 
 | GPU | OS / driver | Furthest stage |
 |---|---|---|
-| RX 9070 XT (RDNA4) | CachyOS, Mesa 26.3.1 RADV; GE-Proton11-14 with vkd3d-proton master | World loads and plays audio, picture mostly black; 692 of 751 world programs build a RADV pipeline |
+| RX 9070 XT (RDNA4) | CachyOS, Mesa 26.3.1 RADV; GE-Proton11-14 with vkd3d-proton master | World loads and plays audio, picture mostly black; 692 of 768 world programs build a RADV pipeline |
 
 <!-- state:end -->
 

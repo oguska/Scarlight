@@ -699,21 +699,70 @@ pub extern "system" fn XMemMapPhysicalPagesScatter(
     if addresses.is_null() {
         return 0;
     }
-    for i in 0..n {
-        // SAFETY: the title passes `n` addresses and, unless null, `n` pages.
-        let (address, page) = unsafe {
-            (
-                *addresses.add(i),
-                if pages.is_null() || *pages.add(i) == 0 {
-                    std::ptr::null()
-                } else {
-                    pages.add(i)
-                },
-            )
-        };
-        if XMemMapPhysicalPages(address, 1, page).is_null() {
-            return 0;
+    // SAFETY: the title passes `n` addresses and, unless null, `n` pages.
+    let entry = |i: usize| unsafe {
+        (
+            *addresses.add(i) as usize,
+            (!pages.is_null()).then(|| *pages.add(i)),
+        )
+    };
+    // Addresses given in runs of consecutive pages map in one call, so a run
+    // pays one unmap, one view and one commit (per section run) instead of
+    // three system calls per page (idea from ivall/xcl#254). Pages that are
+    // not consecutive slices of one section still map one by one inside the
+    // call, and a run that spans two placeholders falls back to the per-page
+    // calls below.
+    let mut i = 0;
+    while i < n {
+        let (address, page) = entry(i);
+        // A zero page unmaps its address; a run of them unmaps in one call.
+        let zero = page == Some(0);
+        let mut run = 1;
+        while i + run < n {
+            let (next, next_page) = entry(i + run);
+            if next != address + run * PAGE || (next_page == Some(0)) != zero {
+                break;
+            }
+            run += 1;
         }
+        let mapped = if zero || pages.is_null() {
+            XMemMapPhysicalPages(address as *mut c_void, run, std::ptr::null())
+        } else {
+            // SAFETY: `i < n`, and the title passes `n` pages when `pages`
+            // is not null; the run starts at `i` and stays inside them.
+            XMemMapPhysicalPages(address as *mut c_void, run, unsafe { pages.add(i) })
+        };
+        #[cfg(feature = "diagnostics")]
+        {
+            use victory_gpu::stats::{C, add};
+            add(C::Scatter, 1);
+            add(C::ScatterPages, run as u64);
+            add(C::ScatterMaps, 1);
+        }
+        if mapped.is_null() {
+            if run == 1 {
+                return 0;
+            }
+            // One range crossing two placeholders cannot be one view: map the
+            // run a page at a time, as before.
+            for k in i..i + run {
+                let (address, _) = entry(k);
+                let page = match (zero, pages.is_null()) {
+                    (true, _) | (_, true) => std::ptr::null(),
+                    // SAFETY: `k < i + run <= n` page numbers were passed.
+                    _ => unsafe { pages.add(k) },
+                };
+                if XMemMapPhysicalPages(address as *mut c_void, 1, page).is_null() {
+                    return 0;
+                }
+                #[cfg(feature = "diagnostics")]
+                {
+                    use victory_gpu::stats::{C, add};
+                    add(C::ScatterMaps, 1);
+                }
+            }
+        }
+        i += run;
     }
     1
 }
@@ -1176,6 +1225,84 @@ mod tests {
         assert!(!map_alias(b as u64, at(a, 1) as u64, PAGE as u64));
         assert_eq!(XMemFreePhysicalPages(3, pages.as_ptr()), 1);
         assert_eq!(XMemIsToolsMemAvailable(), 0);
+    }
+
+    /// A scatter of pages at consecutive addresses maps them in one call:
+    /// each address shows its own page, pages asked for in a different order
+    /// still land where they are asked for, a zero page in the middle unmaps
+    /// only its own address, and an unmap run goes in one call
+    /// (idea from ivall/xcl#254).
+    #[test]
+    fn scatter_maps_runs_of_consecutive_addresses() {
+        let pages = allocate(3);
+        let a = XMemVirtualAlloc(
+            std::ptr::null_mut(),
+            3 * PAGE,
+            MEM_RESERVE | PAGES_64K,
+            0,
+            PAGE_READWRITE,
+        );
+        assert!(!a.is_null());
+        let at = |k: usize| a.wrapping_byte_add(k * PAGE);
+        for k in 0..3 {
+            assert!(write_physical(&pages[k..], 0, &[b'0' + k as u8]));
+        }
+
+        // Three pages, three consecutive addresses: one call.
+        let addresses = [at(0), at(1), at(2)];
+        assert_eq!(
+            XMemMapPhysicalPagesScatter(addresses.as_ptr(), 3, pages.as_ptr()),
+            1
+        );
+        for k in 0..3 {
+            assert_eq!(
+                // SAFETY: mapped read-write.
+                unsafe { at(k).cast::<u8>().read() },
+                b'0' + k as u8,
+                "page {k} at its address"
+            );
+        }
+
+        // Ask for them out of order: each still lands where it is named.
+        let addresses = [at(2), at(0)];
+        let swapped = [pages[0], pages[2]];
+        assert_eq!(
+            XMemMapPhysicalPagesScatter(addresses.as_ptr(), 2, swapped.as_ptr()),
+            1
+        );
+        assert_eq!(
+            // SAFETY: mapped read-write.
+            unsafe { at(2).cast::<u8>().read() },
+            b'0'
+        );
+        assert_eq!(
+            // SAFETY: mapped read-write.
+            unsafe { at(0).cast::<u8>().read() },
+            b'2'
+        );
+
+        // A zero page ends the run it is in: its address is unmapped, the
+        // page after it still maps.
+        let addresses = [at(1), at(2)];
+        let mixed = [0usize, pages[1]];
+        assert_eq!(
+            XMemMapPhysicalPagesScatter(addresses.as_ptr(), 2, mixed.as_ptr()),
+            1
+        );
+        assert_eq!(query(at(1)).host.State, MEM_RESERVE);
+        // SAFETY: mapped read-write.
+        assert_eq!(unsafe { at(2).cast::<u8>().read() }, b'1');
+
+        // Three consecutive addresses without pages unmap as one run.
+        assert_eq!(
+            XMemMapPhysicalPagesScatter(addresses.as_ptr(), 2, std::ptr::null()),
+            1
+        );
+        assert_eq!(query(at(1)).host.State, MEM_RESERVE);
+        assert_eq!(query(at(2)).host.State, MEM_RESERVE);
+        assert_eq!(XMemMapPhysicalPagesScatter([at(0)].as_ptr(), 1, std::ptr::null()), 1);
+        assert_eq!(query(at(0)).host.State, MEM_RESERVE);
+        assert_eq!(XMemFreePhysicalPages(3, pages.as_ptr()), 1);
     }
 
     #[test]
