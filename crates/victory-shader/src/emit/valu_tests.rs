@@ -1388,12 +1388,14 @@ fn lds_byte_and_half_writes_keep_the_rest_of_the_dword() {
     );
 }
 
+/// (opcode, offset, the read's result from s0 in the low dword)
+type HalfRead = (u8, u16, fn(u32) -> u32);
+
 #[test]
 #[allow(clippy::type_complexity)]
 fn lds_byte_and_half_reads_extend_as_the_console() {
     // [0] = s0, then each read of it.
-    type LdsRead = (u8, u16, fn(u32) -> u32);
-    let reads: [LdsRead; 6] = [
+    let reads: [HalfRead; 6] = [
         (DS_READ_U8, 1, |w| w >> 8 & 0xFF),
         (DS_READ_I8, 1, |w| (w >> 8) as u8 as i8 as i32 as u32),
         (DS_READ_U16, 2, |w| w >> 16),

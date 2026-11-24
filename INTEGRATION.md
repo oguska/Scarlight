@@ -24,6 +24,9 @@ Maintained by @pablogonz12. Tested on Linux (RX 9070 XT, RADV, GE-Proton / vkd3d
 | [#393](https://github.com/Marvisak/VIctory/pull/393) | @kxiserino | GPU: page-granular refresh ranges, journal fast path | with #124, 2 world runs each on RX 9070 XT / Wine: copies 2431-2571 -> 1732-2036 ms/frame, write-watch checks 1338-1351 -> 829-942 ms/frame, no device removed |
 | [#124](https://github.com/Marvisak/VIctory/pull/124) | @TG0000 | GPU: remember compared unchanged pages | see #393 |
 | [#383](https://github.com/Marvisak/VIctory/pull/383) | @xmvo | Shader: LDS bytes and halves, constant sample offsets, descriptor-data | buffer descriptors read by `s_buffer_load` and as data: +231 of 1,692 #798 programs, +4 world shaders (677 to 681 of 751). Conflicts resolved: main's LDS byte/half code kept, the PR's tests updated to current signatures |
+| [#592](https://github.com/Marvisak/VIctory/pull/592) | @SAitken91 | Shaders: second rows of packed 16-bit pixel inputs | full-archive run: vertex+pixel 13,144 -> 13,271 (+127), "a packed input half no element holds" 166 -> 0; world set unchanged |
+| [#683](https://github.com/Marvisak/VIctory/pull/683) | @Halfect | Shaders: zero unavailable mixed-precision FMA halves | full-archive run: vertex+pixel 13,144 -> 13,152 (+8), "the first half of an interpolation" 28 -> 20; world set unchanged |
+| fork commit [61474f6](https://github.com/MartinIndra02/victory/commit/61474f6) | @Noname0202, on @MartinIndra02's branch (issue [#783](https://github.com/Marvisak/VIctory/issues/783), @rocobalt1) | GPU: `VirtualQuery` region fallback and partial-copy progress in `copy_mapped`/`write_mapped` | the copy fallback skips contiguous unmapped regions instead of failing page by page; not measured on its own |
 
 ## Our own fixes
 
