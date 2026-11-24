@@ -61,6 +61,12 @@ pub(crate) struct Lowered {
     /// Test builds: the property words of each handle annotation, in order.
     #[cfg(test)]
     pub annotations: Vec<(u32, u32)>,
+    /// The names of the emitted functions (which dx.ops ran); tests only.
+    #[cfg(test)]
+    pub op_names: Vec<String>,
+    /// The emitted instructions, one line each; tests only.
+    #[cfg(test)]
+    pub insts: Vec<String>,
 }
 
 pub(crate) struct Parts<'a> {
@@ -1251,6 +1257,10 @@ impl<'a> Lower<'a> {
         let root_srvs = self.s.root_srvs.iter().map(|r| r.0).collect();
         let stride_table = self.s.stride_table.is_some();
         let cmp_samplers = self.s.cmp_samplers;
+        #[cfg(test)]
+        let op_names = self.s.m.func_names().map(str::to_owned).collect();
+        #[cfg(test)]
+        let insts = self.s.m.inst_lines();
         Ok(Lowered {
             #[cfg(test)]
             annotations: std::mem::take(&mut self.s.annotations),
@@ -1265,6 +1275,10 @@ impl<'a> Lower<'a> {
             dxil: self.s.finish(),
             user_data,
             samplers: self.samplers,
+            #[cfg(test)]
+            op_names,
+            #[cfg(test)]
+            insts,
         })
     }
 
@@ -1686,7 +1700,21 @@ impl<'a> Lower<'a> {
                 xy
             }
         };
-        Ok(if high { y } else { x })
+        Ok(if high {
+            y
+        } else if self.mask_data == MaskData::Host && !self.x.native.wave64 {
+            // A wave32 program's host wave may still have 64 lanes, whose
+            // upper half is a second console wave: its bits are the ballot's
+            // second dword.
+            let lane = self.lane_index();
+            let c = self.cur;
+            let k32 = self.s.m.i32(32);
+            let upper = self.s.m.cmp(c, pred::IUGE, lane, k32);
+            self.s.flags |= flags::WAVE_OPS;
+            self.s.m.select(c, upper, y, x)
+        } else {
+            x
+        })
     }
 
     // ---- operands ----
@@ -2379,6 +2407,28 @@ impl<'a> Lower<'a> {
                 phi
             })
             .collect()
+    }
+
+    /// The lane's own console wave's 32-lane base on a 64-lane host wave
+    /// (0 or 32): the renumbering a console lane number takes to stay a
+    /// host lane.
+    fn lane_base(&mut self) -> V {
+        let lane = self.lane_index();
+        let k32 = self.s.m.i32(32);
+        self.s.m.bin(self.cur, Bin::And, lane, k32)
+    }
+
+    /// A lane operand as a host lane: a constant one is the console's, so
+    /// on a host wave wider than the program's each half is a console wave
+    /// and console lane `k` of the lane's own wave is `k | (lane & 32)`.
+    /// On a wave64 program lanes already match one to one.
+    fn console_lane_operand(&mut self, lane: V) -> V {
+        if matches!(lane, V::Const(_)) && !self.x.native.wave64 {
+            let base = self.lane_base();
+            self.s.m.bin(self.cur, Bin::Or, lane, base)
+        } else {
+            lane
+        }
     }
 
     /// Code that depends on the lane layout: wave operations, and in compute
@@ -5159,11 +5209,15 @@ impl<'a> Lower<'a> {
                 let (a, lane) = (s(self, 0)?, s(self, 1)?);
                 // A computed lane in a pixel or vertex program is a host lane
                 // (from a mask or `v_mbcnt`); a constant one is the console's.
-                if self.mask_data == MaskData::Host && !matches!(lane, V::Const(_)) {
+                let lane = if self.mask_data == MaskData::Host {
                     self.s.flags |= flags::WAVE_OPS;
+                    self.console_lane_operand(lane)
                 } else {
                     self.cross_lane(false)?;
-                }
+                    // A constant lane is the console's own, and the console's
+                    // lane layout is the host's outside compute: no refusal.
+                    lane
+                };
                 let r = if self.console_cf {
                     self.console_read_lane(a, lane)
                 } else {
@@ -5181,7 +5235,15 @@ impl<'a> Lower<'a> {
                     Some(o) => self.i32_of(o)?,
                     None => self.s.m.i32(0),
                 };
-                self.cross_lane(false)?;
+                // The lane space is `v_readlane`'s: a host lane, or a
+                // console's constant lane of the lane's own wave.
+                let lane = if self.mask_data == MaskData::Host {
+                    self.s.flags |= flags::WAVE_OPS;
+                    self.console_lane_operand(lane)
+                } else {
+                    lane
+                };
+                self.s.flags |= flags::WAVE_OPS;
                 let me = if self.console_cf {
                     self.console_lane().0
                 } else {
@@ -5235,14 +5297,28 @@ impl<'a> Lower<'a> {
             "v_readfirstlane_b32" => {
                 let a = s(self, 0)?;
                 self.s.flags |= flags::WAVE_OPS;
-                let r = self.s.op(
-                    c,
-                    "waveReadLaneFirst.i32",
-                    Attr::NoUnwind,
-                    self.s.t.i32,
-                    118,
-                    &[a],
-                );
+                let r = if self.mask_data == MaskData::Host && !self.x.native.wave64 {
+                    // The first lane of the lane's own console wave: the low
+                    // set bit of its half of the exec ballot, renumbered to
+                    // a host lane.
+                    let exec = inst.read(Reg::S(EXEC)).ok_or(LANE_MASK)?;
+                    let d = self.mask_dword(exec)?;
+                    let f = self
+                        .s
+                        .op(c, "unaryBits.i32", Attr::ReadNone, self.s.t.i32, 32, &[d]);
+                    let base = self.lane_base();
+                    let first = self.s.m.bin(c, Bin::Or, f, base);
+                    self.read_lane(a, first)
+                } else {
+                    self.s.op(
+                        c,
+                        "waveReadLaneFirst.i32",
+                        Attr::NoUnwind,
+                        self.s.t.i32,
+                        118,
+                        &[a],
+                    )
+                };
                 int(self, r)
             }
             _ => {
@@ -6223,13 +6299,25 @@ impl<'a> Lower<'a> {
                 } else if self.s.mesh.is_none() {
                     self.cross_lane(false)?;
                 }
+                // On a host wave wider than the console's the upper half is a
+                // second console wave: `lo` counts bits of the lane's own
+                // half's mask below its lane in it, and a wave32 mask's high
+                // half is empty. The count is a lane number, and lane numbers
+                // stay host lanes: a second wave's rank takes its 32-lane
+                // base, so `v_mbcnt_lo(-1)` is still the lane index.
+                let host_halves = self.mask_data == MaskData::Host && !self.x.native.wave64;
                 let lane = if self.console_cf {
                     self.console_lane().0
                 } else {
                     self.lane_index()
                 };
                 let below = if name == "v_mbcnt_lo_u32_b32" {
-                    lane
+                    if host_halves {
+                        let k31 = k(self, 31);
+                        self.s.m.bin(c, Bin::And, lane, k31)
+                    } else {
+                        lane
+                    }
                 } else {
                     let (k32, z) = (k(self, 32), k(self, 0));
                     let t = self.s.m.bin(c, Bin::Sub, lane, k32);
@@ -6243,10 +6331,20 @@ impl<'a> Lower<'a> {
                 let m = self.s.m.bin(c, Bin::Sub, m, one);
                 let full = self.s.m.cmp(c, pred::IUGE, below, k32);
                 let m = self.s.m.select(c, full, ones, m);
-                let x = self.s.m.bin(c, Bin::And, a, m);
+                let x = if host_halves && name == "v_mbcnt_hi_u32_b32" {
+                    k(self, 0)
+                } else {
+                    self.s.m.bin(c, Bin::And, a, m)
+                };
                 let n = self
                     .s
                     .op(c, "unaryBits.i32", Attr::ReadNone, self.s.t.i32, 31, &[x]);
+                let n = if host_halves && name == "v_mbcnt_lo_u32_b32" {
+                    let base = self.s.m.bin(c, Bin::And, lane, k32);
+                    self.s.m.bin(c, Bin::Add, n, base)
+                } else {
+                    n
+                };
                 self.s.m.bin(c, Bin::Add, n, b)
             }
             _ => return Err(name),
