@@ -594,11 +594,10 @@ mod tests {
         }
         let per = t.elapsed().as_secs_f64() / f64::from(n);
         println!(
-            "hash: {} MB in {:.2} ms = {:.2} GB/s ({}{last})",
+            "hash: {} MB in {:.2} ms = {:.2} GB/s ({last})",
             size >> 20,
             per * 1e3,
-            size as f64 / 1e9 / per,
-            ""
+            size as f64 / 1e9 / per
         );
     }
 }
