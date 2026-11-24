@@ -3686,27 +3686,49 @@ impl<'a> Lower<'a> {
             }
             return Ok(());
         }
-        // A raw view, read only or not; a constant buffer otherwise. (A
-        // UAV read through a constant buffer handle removes the device.)
+        // A structured SRV from a table reads as records: its stride gives
+        // the record index and the byte offset inside it (a raw read of one
+        // came back zero). Other SRVs and UAVs read raw (a UAV read through
+        // a constant buffer handle removes the device); a constant buffer
+        // reads as one, below.
+        let structured = kind.filter(|u| {
+            u.kind == ResourceType::Srv
+                && u.root == RootType::Table
+                && u.stride > 4
+                && u.stride.is_multiple_of(4)
+        });
         let raw = match kind.map(|u| u.kind) {
             Some(ResourceType::Srv) => Some(11),
             Some(ResourceType::Uav) => Some(11 | 0x1000),
             _ => None,
         };
         if let Some(props) = raw {
-            let h = self.handle(site, src, false, (props, 0))?;
+            let (h, stride_v) = match structured {
+                Some(u) => (
+                    self.handle(site, src, false, (12, u.stride))?,
+                    Some(self.s.m.i32(u.stride)),
+                ),
+                None => (self.handle(site, src, false, (props, 0))?, None),
+            };
             for k in 0..count {
                 let off = self.s.m.i32(4 * k);
                 let a = self.s.m.bin(c, Bin::Add, addr, off);
                 let mask = self.s.m.i8(1);
-                let (u, al) = (self.s.m.undef(self.s.t.i32), self.s.m.i32(4));
+                let al = self.s.m.i32(4);
+                let (index, elem_off) = match stride_v {
+                    Some(s) => (
+                        self.s.m.bin(c, Bin::UDiv, a, s),
+                        self.s.m.bin(c, Bin::URem, a, s),
+                    ),
+                    None => (a, self.s.m.undef(self.s.t.i32)),
+                };
                 let r = self.s.op(
                     c,
                     "rawBufferLoad.f32",
                     Attr::ReadOnly,
                     self.s.t.res_ret,
                     139,
-                    &[h, a, u, mask, al],
+                    &[h, index, elem_off, mask, al],
                 );
                 let x = self.s.m.extract(c, r, 0);
                 let x = self.as_int(x);
@@ -10340,6 +10362,7 @@ mod tests {
 #[cfg(test)]
 mod select_tests {
     use super::super::emit;
+    use super::super::Target;
     use crate::native::{ComputeIo, RootParam};
     use crate::{Container, FourCC, HwStage, NativeProgram, ResourceType, RootType, UsedResource};
 
@@ -10428,6 +10451,80 @@ mod select_tests {
                 let wave_ops = u64::from_le_bytes(features.data.try_into().unwrap()) & 0x4000 != 0;
                 assert_eq!(wave_ops, uses_select);
             }
+        }
+    }
+
+    #[test]
+    fn scalar_buffer_load_from_structured_srv_uses_structured_resource() {
+        // Load a structured SRV descriptor (stride 24) from table s0 into s[4:7],
+        // read two dwords at byte offset 8 with s_buffer_load_dwordx2, and store
+        // the second dword to a raw UAV at table offset 4 dwords.
+        let words = [
+            0xbe81_0380u32, // s1 = 0 (table address high)
+            0xf408_0100,
+            0xfa00_0000, // s_load_dwordx4 s[4:7], s[0:1], 0x0 (structured SRV)
+            0xf408_0200,
+            0xfa00_0010, // s_load_dwordx4 s[8:11], s[0:1], 0x10 (raw UAV)
+            0xf424_0302,
+            0xfa00_0008, // s_buffer_load_dwordx2 s[12:13], s[4:7], 0x8
+            0x7e02_020d, // v1 = s13
+            0x3404_0082, // v2 = 4 * v0
+            0xe070_1000,
+            0x8002_0102, // buffer_store_dword v1, v2, s[8:11], 0 offen
+            0xbf81_0000, // s_endpgm
+        ];
+        let native = NativeProgram {
+            stage: HwStage::Cs,
+            wave64: false,
+            vgprs: 4,
+            layout: vec![RootParam {
+                root: RootType::Table,
+                table_offset_dwords: 0,
+                sgprs: 1,
+                base_register: 0,
+                user_data: 0,
+                slot: 0,
+            }],
+            used: vec![
+                UsedResource {
+                    kind: ResourceType::Srv,
+                    root: RootType::Table,
+                    table_offset_dwords: 0,
+                    lower_bound: 0,
+                    stride: 24,
+                    dwords: 4,
+                    user_data: 0,
+                    slot: 0,
+                },
+                UsedResource {
+                    kind: ResourceType::Uav,
+                    root: RootType::Table,
+                    table_offset_dwords: 4,
+                    lower_bound: 0,
+                    stride: 0,
+                    dwords: 4,
+                    user_data: 0,
+                    slot: 0,
+                },
+            ],
+            io: crate::native::StageIo::Cs(ComputeIo {
+                rsrc2: 2,
+                threads: [32, 1, 1],
+            }),
+            code: words.iter().flat_map(|w| w.to_le_bytes()).collect(),
+        };
+        let container = crate::dxbc::build(&[]);
+        let c = Container::parse(&container).unwrap();
+        let p = crate::ir::build(&native.code, false, native.vgprs).unwrap();
+        let st = crate::structure::structure(&p).unwrap();
+        let io = crate::io::raise(&p, &native).unwrap();
+        let res = crate::resource::track(&p, &native.layout, native.stage, Some(&st)).unwrap();
+        let mut shader = emit(&c, &native, &p, &st, &io, &res, Target::ANY).unwrap();
+        assert!(!shader.dxil.is_empty());
+        #[cfg(windows)]
+        if let Ok(mut v) = crate::emit::validator::Validator::load(None) {
+            v.validate(&mut shader.dxil)
+                .expect("structured scalar SRV load DXIL must validate");
         }
     }
 }
