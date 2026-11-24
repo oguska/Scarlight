@@ -792,8 +792,8 @@ pub(crate) mod tests {
         );
         writing(view + 100, 13);
         assert!(read(&mut file));
-        // SAFETY: the bytes just read.
         assert_eq!(
+            // SAFETY: the bytes just read.
             unsafe { std::slice::from_raw_parts((view + 100) as *const u8, 13) },
             b"from the disk"
         );
