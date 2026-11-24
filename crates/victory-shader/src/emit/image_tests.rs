@@ -222,12 +222,18 @@ fn translate(inst: Mimg, literals: &[(u8, u32)]) -> Result<HostShader, ShaderErr
     {
         match v.validate(&mut s.dxil.clone()) {
             Err(e) if inst.implicit => {
-                // Only the one diagnostic is let through: a report with any
-                // other error left over still fails.
+                // Only the one diagnostic is let through, with the preamble
+                // that points at it and the summary: a report with any other
+                // error left over still fails.
                 let other = e
                     .lines()
                     .map(str::trim)
-                    .filter(|l| !l.is_empty() && !l.ends_with(CS_DERIVATIVES))
+                    .filter(|l| {
+                        !l.is_empty()
+                            && !l.ends_with(CS_DERIVATIVES)
+                            && !l.ends_with("See other errors for details.")
+                            && *l != "Validation failed."
+                    })
                     .collect::<Vec<_>>();
                 assert!(other.is_empty(), "validation: {e}");
             }
