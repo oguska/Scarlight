@@ -16,7 +16,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       # The version and components pinned in rust-toolchain.toml, as in ci.yml.
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
@@ -46,7 +46,7 @@ jobs:
               --target "$env:GITHUB_SHA" `
               --notes "Windows x64 build from $tag. Reads files you supply; no game files are included or needed to build."
           }
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: Scarlight-windows-x64
           path: dist/Scarlight-windows-x64.zip
