@@ -92,13 +92,17 @@ pub(crate) struct Allocation {
     pub(crate) start: usize,
     pub(crate) end: usize,
     private: bool,
-    empty: bool,
+    committed: usize,
     revision: u64,
 }
 
 impl Allocation {
     pub(crate) fn is_live(self) -> bool {
         self.revision == MAPPING_REVISION.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn fully_committed(self) -> bool {
+        self.committed == self.end - self.start
     }
 
     fn contains(self, first: usize, end: usize) -> bool {
@@ -110,7 +114,7 @@ impl Allocation {
     }
 
     pub(crate) fn is_empty_private(self, first: usize, end: usize) -> bool {
-        self.private && self.empty && self.contains(first, end)
+        self.private && self.committed == 0 && self.contains(first, end)
     }
 }
 
@@ -173,7 +177,7 @@ pub(crate) fn allocation(address: usize) -> Option<Allocation> {
             start,
             end,
             private,
-            empty: info.CommitSize == 0,
+            committed: info.CommitSize,
             revision,
         })
     }
