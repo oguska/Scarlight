@@ -2453,11 +2453,23 @@ impl<'a> Lower<'a> {
         self.s.m.bin(self.cur, Bin::And, lane, k32)
     }
 
-    /// A lane operand as a host lane: a constant one is the console's, so
-    /// on a host wave wider than the program's each half is a console wave
-    /// and console lane `k` of the lane's own wave is `k | (lane & 32)`.
-    /// On a wave64 program lanes already match one to one.
-    fn console_lane_operand(&mut self, lane: V) -> V {
+    /// A lane operand of a graphics program: a constant one is the console's,
+    /// so on a host wave wider than the program's each half is a console wave
+    /// and console lane `k` of the lane's own wave is `k | (lane & 32)`. A
+    /// computed one is refused: nothing marks whether it is a host lane
+    /// (`v_mbcnt`'s rank is) or an index within a 32-lane dword (a bit scan
+    /// of a mask read as data is), and lowering the wrong one reads another
+    /// lane. Compute keeps its own rule (console lanes relabel the wave).
+    fn console_lane_operand(&mut self, lane: V) -> Result<V, Why> {
+        if self.s.threads.is_none() && !matches!(lane, V::Const(_)) {
+            return Err("a computed lane in a pixel or vertex program");
+        }
+        Ok(self.console_lane_operand_const(lane))
+    }
+
+    /// [`console_lane_operand`](Self::console_lane_operand)'s mapping, for a
+    /// lane already known to be the console's.
+    fn console_lane_operand_const(&mut self, lane: V) -> V {
         if matches!(lane, V::Const(_)) && !self.x.native.wave64 {
             let base = self.lane_base();
             self.s.m.bin(self.cur, Bin::Or, lane, base)
@@ -4638,11 +4650,17 @@ impl<'a> Lower<'a> {
                             self.rel_offset(sv, base, local)?
                         } else if !self.split && self.runs_in_every_lane(v) {
                             // The definition ran in every lane, so the lane it
-                            // read was lane 0: the load's EXEC (possibly
-                            // narrower, and not the definition's) does not
-                            // change which lane that was.
+                            // read was the wave's first: lane 0, or on a host
+                            // wave wider than a graphics program's the base of
+                            // the lane's own console wave. The load's EXEC
+                            // (possibly narrower, and not the definition's)
+                            // does not change which lane that was.
                             let a = self.rel_offset_op(inst, op0, base, local)?;
-                            let z = self.s.m.i32(0);
+                            let z = if self.s.threads.is_none() && !self.x.native.wave64 {
+                                self.lane_base()
+                            } else {
+                                self.s.m.i32(0)
+                            };
                             self.read_lane(a, z)
                         } else if self.console_cf {
                             // The console wave's first lane, as `valu_op`
@@ -4682,7 +4700,7 @@ impl<'a> Lower<'a> {
                             // of the lane's own wave.
                             let lane = if self.mask_data == MaskData::Host {
                                 self.s.flags |= flags::WAVE_OPS;
-                                self.console_lane_operand(lane)
+                                self.console_lane_operand(lane)?
                             } else {
                                 self.cross_lane(false)?;
                                 lane
@@ -5954,7 +5972,7 @@ impl<'a> Lower<'a> {
                 self.lane_operand_checked(lane)?;
                 let lane = if self.mask_data == MaskData::Host {
                     self.s.flags |= flags::WAVE_OPS;
-                    self.console_lane_operand(lane)
+                    self.console_lane_operand(lane)?
                 } else {
                     self.cross_lane(false)?;
                     // A constant lane is the console's own, and the console's
@@ -5983,7 +6001,7 @@ impl<'a> Lower<'a> {
                 self.lane_operand_checked(lane)?;
                 let lane = if self.mask_data == MaskData::Host {
                     self.s.flags |= flags::WAVE_OPS;
-                    self.console_lane_operand(lane)
+                    self.console_lane_operand(lane)?
                 } else {
                     lane
                 };
