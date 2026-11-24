@@ -647,6 +647,8 @@ pub extern "system" fn XMemMapPhysicalPagesScatter(
             (!pages.is_null()).then(|| *pages.add(i)),
         )
     };
+    #[cfg(feature = "diagnostics")]
+    victory_gpu::stats::add(victory_gpu::stats::C::Scatter, 1);
     // Addresses given in runs of consecutive pages map in one call, so a run
     // pays one unmap, one view and one commit (per section run) instead of
     // three system calls per page (idea from ivall/xcl#254). Pages that are
@@ -676,7 +678,6 @@ pub extern "system" fn XMemMapPhysicalPagesScatter(
         #[cfg(feature = "diagnostics")]
         {
             use victory_gpu::stats::{C, add};
-            add(C::Scatter, 1);
             add(C::ScatterPages, run as u64);
             add(C::ScatterMaps, 1);
         }
@@ -693,13 +694,11 @@ pub extern "system" fn XMemMapPhysicalPagesScatter(
                     // SAFETY: `k < i + run <= n` page numbers were passed.
                     _ => unsafe { pages.add(k) },
                 };
+                // Counted before the check: a failed attempt is a call too.
+                #[cfg(feature = "diagnostics")]
+                victory_gpu::stats::add(victory_gpu::stats::C::ScatterMaps, 1);
                 if XMemMapPhysicalPages(address as *mut c_void, 1, page).is_null() {
                     return 0;
-                }
-                #[cfg(feature = "diagnostics")]
-                {
-                    use victory_gpu::stats::{C, add};
-                    add(C::ScatterMaps, 1);
                 }
             }
         }
