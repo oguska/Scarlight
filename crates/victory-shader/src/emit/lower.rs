@@ -10023,10 +10023,8 @@ mod tests {
             S_ENDPGM,
         ];
         let lowered = lowers_cs(&words, false, 1, 0).unwrap();
-        assert!(
-            !lowered.dxil.is_empty(),
-            "expected DXIL with WaveSize(32) and WAVE_OPS"
-        );
+        assert!(!lowered.dxil.is_empty(), "expected DXIL");
+        assert!(lowered.wave_ops, "a partial constant mask needs WAVE_OPS");
     }
 
     /// Lowers a compute program with the root parameters `layout` (in user

@@ -454,7 +454,8 @@ struct Lanes<'a> {
     /// [`Atom::Phi`] joins created in the current pass, resolved in
     /// `check_joins` and exported in `finish`.
     phi_joins: Vec<PhiJoin>,
-    phi_join_ids: HashSet<Value>,
+    /// Per join id, the (low, high) arguments its edges were taken from.
+    phi_join_ids: HashMap<Value, Vec<Key>>,
     /// Per block: what a lane knows on entry, over forward edges only.
     first: Vec<Bool>,
     /// Per block ending in a branch: when a lane takes it.
@@ -535,7 +536,7 @@ impl<'a> Lanes<'a> {
             scc_lane: Map::default(),
             joins: Vec::new(),
             phi_joins: Vec::new(),
-            phi_join_ids: HashSet::new(),
+            phi_join_ids: HashMap::new(),
             first: vec![Bool::FALSE; blocks.len()],
             when: vec![None; blocks.len()],
             active: HashSet::new(),
@@ -896,13 +897,22 @@ impl<'a> Lanes<'a> {
                 }
             }
         }
-        if self.phi_join_ids.insert(id) {
-            self.phi_joins.push(PhiJoin {
-                block,
-                id,
-                derived,
-                args: args.clone(),
-            });
+        // A phi's edges are recorded once, by its low dword. Another pair
+        // sharing that low dword with other high dwords (the lanes 32-63 of
+        // a wave64 mask) would share its [`Atom::Phi`] and so its edges: it
+        // is refused, left untracked, rather than read with the wrong ones.
+        match self.phi_join_ids.get(&id) {
+            Some(seen) if *seen != args => return None,
+            Some(_) => {}
+            None => {
+                self.phi_join_ids.insert(id, args.clone());
+                self.phi_joins.push(PhiJoin {
+                    block,
+                    id,
+                    derived,
+                    args: args.clone(),
+                });
+            }
         }
         if self.console {
             self.console_pending.extend(args);
@@ -1483,5 +1493,39 @@ mod tests {
                 .any(|&e| matches!(s.bools.support(e)[..], [Atom::Lane(_)])),
             "{edges:?}"
         );
+    }
+
+    #[test]
+    fn wave64_pairs_sharing_a_phi_low_dword_keep_one_set_of_edges() {
+        let cnd = 258 | (259 << 9) | (2 << 18);
+        let p = build(
+            &[
+                0xBF06_8000, // 0: s_cmp_eq_u32 s0, 0
+                0xBF85_0002, // 4: s_cbranch_scc1 -> 16
+                0xBE82_0381, // 8: s_mov_b32 s2, 1
+                0xBF82_0001, // 12: s_branch -> 20
+                0xBE82_0382, // 16: s_mov_b32 s2, 2
+                0xBE83_0380, // 20: s_mov_b32 s3, 0
+                0xD501_0001,
+                cnd,         // 24: v_cndmask_b32 v1, v2, v3, s[2:3]
+                0xBE83_03C1, // 32: s_mov_b32 s3, -1
+                0xD501_0004,
+                cnd, // 36: v_cndmask_b32 v4, v2, v3, s[2:3]
+                S_ENDPGM,
+            ],
+            true,
+        );
+        let s = structure(&p).unwrap();
+        let phi = p
+            .blocks
+            .iter()
+            .flat_map(|b| &b.phis)
+            .find(|phi| phi.reg == Reg::S(2))
+            .expect("mask phi for s2");
+        // Both uses read s2's phi with a different s3: one set of edges, the
+        // first pair's, and no second `Atom::Phi` for the other pair.
+        let edges = &s.phi_masks[&phi.value];
+        assert_eq!(edges.len(), 2);
+        assert_eq!(s.phi_masks.len(), 1);
     }
 }
