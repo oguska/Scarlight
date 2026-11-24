@@ -127,8 +127,7 @@ pub struct Resources {
     /// every global memory access (`global_*`, the dynamic term per lane).
     pub scalar: Vec<(Site, Address)>,
     pub descriptors: Vec<Descriptor>,
-    /// User SGPRs holding root parameters: value on entry, layout index,
-    /// dword within the parameter.
+    /// Root arguments: value on entry, layout index, dword within the parameter.
     pub params: Vec<(Value, usize, u32)>,
     pub waterfall: Waterfall,
 }
@@ -477,7 +476,11 @@ impl<'a> Tracer<'a> {
 
     /// Layout index and dword of the root parameter `reg` holds on entry.
     fn param_of(&self, reg: Reg) -> Option<(usize, u32)> {
-        let Reg::S(code) = reg else { return None };
+        let code = match reg {
+            Reg::S(code) if !self.p.spilled => code,
+            Reg::Spill(code) => code,
+            _ => return None,
+        };
         self.layout.iter().enumerate().find_map(|(i, p)| {
             let first = self.stage.user_sgpr(p.user_data);
             let dword = u32::from(code).checked_sub(first.into())?;
@@ -1231,7 +1234,11 @@ impl<'a> Tracer<'a> {
         let high = match self.layout[param].root {
             RootType::Table | RootType::ResourceHeap | RootType::SamplerHeap => None,
             RootType::Descriptor => {
-                let high = Reg::S(self.stage.user_sgpr(self.layout[param].user_data) + 1);
+                let code = self.stage.user_sgpr(self.layout[param].user_data) + 1;
+                let high = match reg {
+                    Reg::Spill(_) => Reg::Spill(code),
+                    _ => Reg::S(code),
+                };
                 let input = self.p.inputs.iter().find(|i| i.0 == high);
                 Some(input.ok_or("a root descriptor without its high half")?.1)
             }
@@ -2355,6 +2362,7 @@ fn copy_source(inst: &Inst, k: usize) -> Option<Moved> {
     }
     let src = src.first()?;
     match (inst.name(), *src) {
+        ("s_mov_b32", Operand::Spill(code)) => inst.read(Reg::Spill(code)).map(Moved::Value),
         ("s_mov_b32" | "s_mov_b64", Operand::Scalar { code, .. }) if code != NULL => {
             inst.read(Reg::S(code + k as u8)).map(Moved::Value)
         }
@@ -2575,6 +2583,43 @@ pub(crate) mod tests {
         assert_eq!(
             r.params.iter().map(|p| (p.1, p.2)).collect::<Vec<_>>(),
             [(0, 0), (0, 1)]
+        );
+    }
+
+    #[test]
+    fn spilled_root_descriptor_uses_its_logical_high_half() {
+        let code: Vec<u8> = [
+            0xF404_0280u32, // s_load_dwordx2 s[10:11], s[0:1], 0
+            0xFA00_0000,
+            0xBE85_0311, // s_mov_b32 s5, physical s17
+            0x8801_FF0B,
+            0x0010_0000, // s_or_b32 s1, s11, 0x100000
+            0xBE80_030A, // s_mov_b32 s0, s10
+            0xBE82_03C1, // s_mov_b32 s2, -1
+            0xBE83_03FF,
+            0x1101_4FAC, // s_mov_b32 s3, 0x11014fac
+            0xF430_0000,
+            0xFA00_0000, // s_buffer_load_dwordx16 s[0:15], s[0:3], null
+            S_ENDPGM,
+        ]
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .collect();
+        let p = crate::ir::build_with(&code, false, 256, true).unwrap();
+        assert!(p.inputs.iter().any(|&(reg, _)| reg == Reg::S(17)));
+        let r = track(&p, &[param(Descriptor, 16, 2)], HwStage::Cs, lanes(&p).as_ref()).unwrap();
+        assert_eq!(
+            r.descriptors[0].source,
+            Source::Built {
+                address: at(0, 0),
+                bits: 0x10_0000,
+                words: [u32::MAX, 0x1101_4FAC]
+            }
+        );
+        let input = |reg| p.inputs.iter().find(|&&(r, _)| r == reg).unwrap().1;
+        assert_eq!(
+            r.params,
+            [(input(Reg::Spill(16)), 0, 0), (input(Reg::Spill(17)), 0, 1)]
         );
     }
 
