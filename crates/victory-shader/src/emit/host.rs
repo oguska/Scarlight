@@ -140,7 +140,21 @@ impl Host {
             } else if let Some(adapter) = &adapter {
                 D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_12_0, &mut device).map_err(err)?;
             } else {
-                D3D12CreateDevice(None, D3D_FEATURE_LEVEL_12_0, &mut device).map_err(err)?;
+                // The default adapter of a machine without a GPU is the
+                // Basic Render Driver, which is WARP: ask for hardware
+                // explicitly so the hardware backends skip, as WARP does.
+                let factory: IDXGIFactory1 = CreateDXGIFactory1().map_err(err)?;
+                let mut i = 0;
+                let first = loop {
+                    let a = factory
+                        .EnumAdapters1(i)
+                        .map_err(|_| "no hardware adapter")?;
+                    if hardware(&a.GetDesc1().map_err(err)?) {
+                        break a;
+                    }
+                    i += 1;
+                };
+                D3D12CreateDevice(&first, D3D_FEATURE_LEVEL_12_0, &mut device).map_err(err)?;
             }
             let device = device.ok_or("no device")?;
             let mut sm = D3D12_FEATURE_DATA_SHADER_MODEL {

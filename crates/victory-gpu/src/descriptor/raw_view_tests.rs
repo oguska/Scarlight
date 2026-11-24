@@ -132,7 +132,8 @@ fn program() -> HostShader {
         &io,
         &res,
         victory_shader::emit::Target::ANY,
-    ).unwrap();
+    )
+    .unwrap();
     assert!(cs.stride_table);
     cs
 }
