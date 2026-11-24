@@ -1,0 +1,116 @@
+name: Bug report
+description: Something crashes, hangs, renders wrong or reports a log error.
+title: "bug: "
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing. Read [CONTRIBUTING.md](https://github.com/pablogonz12/Scarlight/blob/main/CONTRIBUTING.md)
+        first, and never attach game files: no assets, executables, shader dumps, game-content
+        screenshots or hashes of game data. See [docs/asset-policy.md](https://github.com/pablogonz12/Scarlight/blob/main/docs/asset-policy.md).
+  - type: dropdown
+    id: gpu
+    attributes:
+      label: GPU
+      options:
+        - AMD RDNA4 (RX 9000 series)
+        - AMD RDNA3 / RDNA2 / RDNA1 / older
+        - NVIDIA (Ada / Blackwell)
+        - NVIDIA (Turing / Ampere)
+        - Intel Arc
+        - Other (say which below)
+    validations:
+      required: true
+  - type: input
+    id: driver
+    attributes:
+      label: Driver and version
+      description: e.g. Mesa RADV 25.x, Adrenalin 25.x, NVIDIA 580.xx.
+      placeholder: Mesa RADV 25.1.0
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS
+      placeholder: CachyOS (kernel 6.16) / Windows 11 24H2
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: How it runs
+      options:
+        - Windows, native
+        - Linux, Wine/Proton
+    validations:
+      required: true
+  - type: input
+    id: wine
+    attributes:
+      label: Wine/Proton version (Linux only)
+      description: Leave empty on Windows.
+      placeholder: GE-Proton11-14, run directly through wine
+  - type: input
+    id: vkd3d
+    attributes:
+      label: vkd3d-proton version
+      description: Stock release, GE-Proton's DLLs or master, and how it is selected.
+      placeholder: vkd3d-proton master (d3d12.dll next to victory.exe)
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Scarlight commit
+      description: Output of `git rev-parse --short HEAD` (or the build you downloaded).
+      placeholder: fcb278b
+    validations:
+      required: true
+  - type: dropdown
+    id: progress
+    attributes:
+      label: How far did it get
+      options:
+        - No boot (nothing on screen)
+        - Menus
+        - Loading
+        - World
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Command line, environment variables (VKD3D_CONFIG, WINEDLLOVERRIDES, VICTORY_*), config changes, what you clicked.
+      placeholder: |
+        1. Build with cargo xwin build --release -p victory
+        2. Run with WINEDLLOVERRIDES="d3d12,d3d12core,dxgi=n,b" VICTORY_NO_WATCHDOG=1
+        3. Enter the world
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and actual result
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log excerpt
+      description: |
+        The last ~50 lines around the failure, from the console or `crashes.log`. Trim anything
+        that is game content. **Do not paste game files, game-content screenshots, or hashes of
+        game data** (executable or asset BLAKE3 included, when in doubt leave it out).
+      render: shell
+    validations:
+      required: true
+  - type: checkboxes
+    id: policy
+    attributes:
+      label: Asset policy
+      options:
+        - label: This report contains no game files, no screenshots of game content and no hashes of game data.
+          required: true
