@@ -260,6 +260,14 @@ static JOURNAL: Mutex<Journal> = Mutex::new(Journal {
     found: Vec::new(),
 });
 
+/// A submission begins. The per-allocation cache ([`allocation`]) and the
+/// journal's page generations need no reset; ranges a submission already
+/// brought up to date are not queued again by `Batch::fresh`, so #994's
+/// per-submission range memo would be a third answer to the same question
+/// and is not kept.
+pub(crate) fn new_submission() {}
+
+
 /// The pages of `[start, end)` (whole pages) as last written, for pages
 /// written since tracking began: `(page number, asking)` in page order, and
 /// this asking's number, which is higher than any in the list but those the
@@ -1117,6 +1125,8 @@ pub(crate) mod tests {
         assert!(before.iter().all(|&(_, at)| at < initial));
         // SAFETY: committed pages of ours.
         unsafe { ((p + PAGE + 8) as *mut u8).write(1) };
+        // Under Wine a range is asked of the kernel once per submission.
+        new_submission();
         let (now, after) = writes(start, end, false).expect("watched");
         let new_writes: Vec<_> = after.into_iter().filter(|&(_, at)| at > initial).collect();
         assert_eq!(new_writes, [(p / PAGE + 1, now)]);
@@ -1135,6 +1145,38 @@ pub(crate) mod tests {
         );
         // SAFETY: our allocation.
         unsafe { VirtualFree(p as *mut _, 0, MEM_RELEASE) };
+    }
+
+    /// A write shows at the next asking, in or after the submission it came
+    /// in: the kernel is asked again. #994's per-submission range memo is not
+    /// kept (`Batch::fresh` and the journal skip the repeats one layer up,
+    /// and a memo would hide a write for the rest of the submission).
+    #[test]
+    fn a_write_shows_at_the_next_asking() {
+        // SAFETY: a fresh write-watched allocation, freed at the end.
+        let p = unsafe {
+            VirtualAlloc(
+                std::ptr::null(),
+                2 * PAGE,
+                MEM_RESERVE | MEM_COMMIT | MEM_WRITE_WATCH,
+                PAGE_READWRITE,
+            )
+        } as usize;
+        assert_ne!(p, 0);
+        // Kept, not freed: another test given this address would see the
+        // journal's entries for it, so only the page's presence is asserted.
+        new_submission();
+        let (_, before) = writes(p, p + 2 * PAGE, false).expect("watched");
+        // SAFETY: committed pages of ours.
+        unsafe { ((p + 8) as *mut u8).write(1) };
+        let (now, same) = writes(p, p + 2 * PAGE, false).expect("watched");
+        assert!(
+            same.iter().any(|&(page, _)| page == p / PAGE),
+            "the write shows at the next asking in the same submission: {before:?} -> {same:?} (now {now})"
+        );
+        new_submission();
+        let (_, next) = writes(p, p + 2 * PAGE, false).expect("watched");
+        assert!(next.iter().any(|&(page, _)| page == p / PAGE), "and in the next");
     }
 
     /// A kernel read into a guarded view block fails; opened first, it

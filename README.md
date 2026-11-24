@@ -19,6 +19,9 @@ plus its own. No game files, dumps or screenshots are in this repository.
 | Menus at 30 fps | World frame rate: about 0.5 fps |
 | Loads the world, with audio | Any real gameplay |
 
+Running on Linux under Proton (or system Wine), with the switches for the world's faults, is
+described in [docs/linux-proton.md](docs/linux-proton.md).
+
 The black picture comes from shaders that Scarlight cannot translate yet, so their draws are
 skipped. The frame rate is limited by copying the title's memory. Both are being worked on
 upstream. Tested setup and measurements: [AMD-LINUX.md](AMD-LINUX.md).
@@ -182,7 +185,6 @@ the asset-policy hook checks it (`docs/asset-policy.md`).
 
 ## License and credits
 
-<<<<<<< HEAD
 | Variable | Effect |
 |----------|--------|
 | `VICTORY_LOG=<target>=debug,...` | debug and trace output |
@@ -210,10 +212,3 @@ title's data folder.
 ## License
 
 GPL-3.0-or-later. See [LICENSE](LICENSE).
-=======
-GPL-3.0-or-later; see [LICENSE](LICENSE). Scarlight is derived from
-[VIctory](https://github.com/Marvisak/VIctory) by Marvis and its contributors, and keeps their
-commit history. Thanks to the authors listed in [INTEGRATION.md](INTEGRATION.md),
-[JMAN730/victory](https://github.com/JMAN730/victory), and everyone whose fixes made the world
-load. Architecture overview: [docs/architecture.md](docs/architecture.md).
->>>>>>> r1122
