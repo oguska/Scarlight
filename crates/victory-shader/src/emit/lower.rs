@@ -8397,17 +8397,32 @@ impl<'a> Lower<'a> {
             // there need conditions the validator does not grant these
             // programs, so the gradients are read from the quad and the
             // sample takes them explicitly.
+            // The quad is the console lane's: `quad_gradients` finds the
+            // neighbours by host lane, which is the guest thread only under
+            // console lanes (`thread_id` relabels them so). Without them the
+            // guest quads have no lane relation to assume, so an implicit
+            // sample there stops instead.
             let quad_grads = matches!(op, 60 | 61)
                 && self.s.threads.is_some()
                 && self.s.mesh.is_none()
+                && self.console_lanes
                 && kind != 5;
+            if matches!(op, 60 | 61)
+                && self.s.threads.is_some()
+                && self.s.mesh.is_none()
+                && !self.console_lanes
+                && kind != 5
+            {
+                return Err(
+                    "an implicit-derivative sample in a compute group whose lanes are not the console's",
+                );
+            }
             match op {
                 60 | 61 if quad_grads => {
                     let mut g = self.quad_gradients(&cs[..spatial]);
                     if op == 61 {
                         // A bias scales the footprint by 2^bias.
-                        let bias = addr_val(self, 0)?;
-                        let bias = self.as_float(bias);
+                        let bias = float(self, bias_at)?;
                         let scale = self.unary(21, bias);
                         for x in g.iter_mut().filter(|x| **x != fu) {
                             *x = self.s.m.bin(c, Bin::Mul, *x, scale);
@@ -8418,7 +8433,7 @@ impl<'a> Lower<'a> {
                     // holds immediates here, as sampleGrad takes them.
                     args.extend(&os);
                     args.extend(g);
-                    args.push(fu);
+                    args.push(clamp);
                     self.s.op(
                         c,
                         "sampleGrad.f32",
