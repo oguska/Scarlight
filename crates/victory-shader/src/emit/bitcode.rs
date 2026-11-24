@@ -214,6 +214,7 @@ impl Module {
     /// The instructions in the module so far: what a test checks the shape of
     /// an emitted program by.
     #[cfg(test)]
+    #[allow(dead_code)] // the base's tests do not use it (hub's did)
     pub(crate) fn instructions(&self) -> usize {
         self.insts.len()
     }

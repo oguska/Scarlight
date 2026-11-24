@@ -4885,6 +4885,7 @@ impl HostList {
     /// Copies `len` bytes of title memory at `src` into `dst` (mapped inside
     /// `upload`) when the list is submitted, keeping `upload` alive until the
     /// list is reset.
+    #[allow(dead_code)] // no call site on this base yet
     pub(crate) fn defer_fill_upload(
         &self,
         upload: ID3D12Resource,
