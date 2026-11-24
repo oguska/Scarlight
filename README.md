@@ -1,4 +1,23 @@
-# Scarlight
+<div align="center">
+
+<img src="docs/brand/banner.svg" alt="Scarlight: console titles on PC, AMD + Linux first" width="100%">
+
+<br>
+
+[![CI](https://img.shields.io/github/actions/workflow/status/pablogonz12/Scarlight/ci.yml?branch=main&style=for-the-badge&label=CI&labelColor=1a0838&color=ff2e93)](https://github.com/pablogonz12/Scarlight/actions/workflows/ci.yml)
+[![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-ff6a3d?style=for-the-badge&labelColor=1a0838)](LICENSE)
+![GPU: RDNA4 tested](https://img.shields.io/badge/GPU-RDNA4%20tested-00e5ff?style=for-the-badge&labelColor=1a0838)
+![Linux · Proton](https://img.shields.io/badge/Linux-Proton-ffb347?style=for-the-badge&labelColor=1a0838)
+[![PRs welcome](https://img.shields.io/badge/PRs-welcome-ff2e93?style=for-the-badge&labelColor=1a0838)](#-contributing)
+[![Stars](https://img.shields.io/github/stars/pablogonz12/Scarlight?style=for-the-badge&labelColor=1a0838&color=ffd24a)](https://github.com/pablogonz12/Scarlight/stargazers)
+
+**Not playable yet.** Details below.
+
+</div>
+
+---
+
+## ✨ What it is
 
 Scarlight runs an Xbox Series X|S title's own x86-64 code on a PC, using the files you supply. It
 loads the title's executable, answers its console-only calls, and turns its GPU commands and
@@ -9,7 +28,7 @@ kept). It adds tested fixes from VIctory's open
 pull requests and forks, each merged with its author's credit ([INTEGRATION.md](INTEGRATION.md)),
 plus its own. No game files, dumps or screenshots are in this repository.
 
-## Status
+## 🚦 Status
 
 **Not playable yet.** In short:
 
@@ -19,17 +38,29 @@ plus its own. No game files, dumps or screenshots are in this repository.
 | Menus at 30 fps | World frame rate: about 0.5 fps |
 | Loads the world, with audio | Any real gameplay |
 
-Running on Linux under Proton (or system Wine), with the switches for the world's faults, is
-described in [docs/linux-proton.md](docs/linux-proton.md).
-
 The black picture comes from shaders that Scarlight cannot translate yet, so their draws are
 skipped. The frame rate is limited by copying the title's memory. Both are being worked on
 upstream. Tested setup and measurements: [AMD-LINUX.md](AMD-LINUX.md).
 
+Running on Linux under Proton (or system Wine), with the switches for the world's faults, is
+described in [docs/linux-proton.md](docs/linux-proton.md).
+
 <!-- state:begin -->
 ## Project state
 
-Last updated: 24 Nov 2026, Scarlight `fe552e4`.
+<div align="center">
+
+### At a glance
+
+| World shaders | Full archive | Best world fps | Furthest |
+|:---:|:---:|:---:|:---:|
+| **720 / 768** offline on RADV | **24,073 / 25,529** translated | **0.45** on Scarlight builds | World loads and plays audio; picture mostly black |
+
+*0.6 fps with HUD and minimap reached is VIctory #994 as-is with its debug pixel shader, not a Scarlight build.*
+
+</div>
+
+Last updated: 24 Nov 2026, Scarlight `main after #11`.
 
 ### Milestones
 
@@ -38,10 +69,20 @@ Last updated: 24 Nov 2026, Scarlight `fe552e4`.
 | ✅ | Boots | Boots into the title's own menus |
 | ✅ | Menus | 30 fps, drawn and interactive |
 | ✅ | Loads world | World streams in and the title's audio plays |
-| 🟡 | World picture | Mostly black: 76 of 768 world programs still skip their draws |
-| ❌ | Playable | 0.45–0.46 fps and a black picture: no real gameplay |
+| 🟡 | World picture | Mostly black: 48 of 768 world programs still skip their draws |
+| ❌ | Playable | 0.45 fps and a black picture: no real gameplay |
 
 ### Shader translation
+
+| Programs | Translated | Total | Progress |
+|---|---|---|---|
+| **All programs** | **24,073** | **25,529** | `█████████░ 94%` |
+| World set, translate → SPIR-V → RADV pipeline | 720 | 768 | `█████████░ 94%` |
+
+*Full archive: 25,529 programs, measured at main after #11. World set: 768 programs, each through translation, SPIR-V validation and a real RADV pipeline.*
+
+<details>
+<summary>Breakdown at 4e7e6a3 (before #11): per stage and top failure reasons</summary>
 
 | Programs | Translated | Total | Progress |
 |---|---|---|---|
@@ -49,11 +90,10 @@ Last updated: 24 Nov 2026, Scarlight `fe552e4`.
 | Compute | 2,404 | 2,582 | `█████████░ 93%` |
 | Mesh | 8,396 | 8,713 | `██████████ 96%` |
 | **All programs** | **23,946** | **26,084** | `█████████░ 92%` |
-| World set, translate → SPIR-V → RADV pipeline | 692 | 768 | `█████████░ 90%` |
 
-*Full archive: 26,084 programs, `translate-main.txt`, 4e7e6a3 (PR #704), 24 Nov 2026. World set: the 751 programs the world actually uses plus the 52-program BVH capture (768 once duplicate containers are skipped), each run through translation, SPIR-V validation and a real RADV pipeline (hub/main `c888a93`, 24 Nov 2026; also the report file `report-20261124-165507.tsv`) — every program that translates also validates and builds a pipeline, so the whole gap is translation. The 555 programs that are neither vertex/pixel, compute nor mesh are not emitted yet and count as untranslated.*
+Measured on `translate-main.txt` at 4e7e6a3 (PR #704), 24 Nov 2026; the totals above are newer and are not the sum of these rows. The 555 programs that are neither vertex/pixel, compute nor mesh were not emitted then and counted as untranslated.
 
-### Top remaining shader failures
+**Top remaining shader failures (same measurement)**
 
 | Failures | Reason |
 |---|---|
@@ -66,12 +106,14 @@ Last updated: 24 Nov 2026, Scarlight `fe552e4`.
 | 61 | an opaque lane mask |
 | 48 | a cross-lane operation outside compute |
 
+</details>
+
 ### Performance
 
 | Measurement | RX 9070 XT, Linux / Wine (24 Nov 2026) |
 |---|---|
 | Menus | 30 fps |
-| World | 0.45–0.46 fps |
+| World | 0.45 fps |
 | Title-memory copies | 628–864 ms/frame |
 | Write-watch checks | 459–573 ms/frame |
 
@@ -79,18 +121,18 @@ Last updated: 24 Nov 2026, Scarlight `fe552e4`.
 
 | GPU | OS / driver | Furthest stage |
 |---|---|---|
-| RX 9070 XT (RDNA4) | CachyOS, Mesa 26.3.1 RADV; GE-Proton11-14 with vkd3d-proton master | World loads and plays audio, picture mostly black; 692 of 768 world programs build a RADV pipeline |
+| RX 9070 XT (RDNA4) | CachyOS, Mesa 26.3.1 RADV; GE-Proton11-14 with vkd3d-proton master | World loads and plays audio, picture mostly black; 720 of 768 world programs build a RADV pipeline |
 
 <!-- state:end -->
 
-## What you need
+## 📋 What you need
 
 - **Your own copy of the title.** None is included, and none will be linked or shared.
 - A GPU with Direct3D 12 and shader model 6.6 (mesh shaders for the world), on Windows 10/11 x64
   or Linux with Wine/Proton.
 - Rust (the version is pinned in `rust-toolchain.toml`) if you build from source.
 
-## Quick start: Windows
+## 🪟 Quick start: Windows
 
 1. Install [Rust](https://rustup.rs) and the Visual Studio 2022 Build Tools with "Desktop
    development with C++".
@@ -116,7 +158,7 @@ The title needs several GiB of free Windows commit at startup (Task Manager → 
 Memory → Committed). If `crashes.log` reports Windows error 1455, close other apps or raise the
 paging file size.
 
-## Quick start: Linux (Wine / GE-Proton)
+## 🐧 Quick start: Linux (Wine / GE-Proton)
 
 1. Install Rust, then build a Windows binary from Linux:
    ```bash
@@ -143,7 +185,7 @@ paging file size.
 Free memory matters: anything that pins GPU memory (a local LLM server, say) pushes the world into
 swap. More platform notes: [AMD-LINUX.md](AMD-LINUX.md).
 
-## Controls
+## 🎮 Controls
 
 A gamepad works if one is connected. Otherwise the keyboard acts as a pad while the title's window
 has focus:
@@ -159,7 +201,8 @@ has focus:
 | Z / C | triggers |
 | F / H | stick clicks |
 
-## Troubleshooting
+<details>
+<summary><h2 style="display:inline">🛠️ Troubleshooting and logs</h2></summary>
 
 | Problem | Fix |
 |---|---|
@@ -173,7 +216,9 @@ Logs: `VICTORY_LOG=victory_loader=trace,info`. Crashes and host GPU failures are
 `crashes.log` in the data folder (default `%LOCALAPPDATA%\victory\data`). Diagnostics variables
 and commands: [AMD-LINUX.md](AMD-LINUX.md#diagnostics).
 
-## Contributing
+</details>
+
+## 🤝 Contributing
 
 Pull requests go to `main` only. CI runs clippy and the workspace tests on Windows, and CodeRabbit
 reviews each PR. If you are merging someone's upstream fix, keep their commits and their credit:
@@ -183,32 +228,10 @@ sent upstream. Code that also helps Windows or other GPUs should go to
 environment-variable names stay `victory*` so upstream fixes keep merging. Never commit game files;
 the asset-policy hook checks it (`docs/asset-policy.md`).
 
-## License and credits
+## 📜 License
 
-| Variable | Effect |
-|----------|--------|
-| `VICTORY_LOG=<target>=debug,...` | debug and trace output |
-| `VICTORY_STACKS=20,60` | every thread's stack at those seconds |
-| `VICTORY_WATCH=<rva>,...` | logs a title u32 when it changes |
-| `VICTORY_KEYS=30:Enter,35:X` | presses keys at those seconds, focus or not |
-| `VICTORY_CRASH_SAVE=<rva>:<len>,...` | saves title memory to the cache folder on a crash |
-| `VICTORY_CAPTURE=<dir>` | saves presented frames (powers of two, or `VICTORY_CAPTURE_FRAMES=<list>`) |
-| `VICTORY_DUMP_TARGETS=1` | with the two above, saves every render target of those frames |
-| `VICTORY_D3D12_DEBUG=1` | host debug layer |
-| `VICTORY_D3D12_GBV=1` | with the above, GPU-based validation (bad descriptor use reported, not faulted; slow) |
-| `VICTORY_D3D12_DRED=1` | on a GPU failure, the allocation hit and the commands in flight |
-| `VICTORY_SKIP_PIPELINES=<hash>,...` | omit draws and dispatches, including indirect ones, whose pipeline contains a listed 16-digit shader hash |
-| `VICTORY_SKIP_WAVE64=mesh,compute` | omit draws and dispatches whose pipeline has a program of a listed stage written for 64-lane waves (on hosts with 32-lane waves, such as NVIDIA's, these can hang the GPU) |
-| `VICTORY_PIPELINE_WAIT_MS=<n>` | milliseconds each title frame may spend waiting for pipelines being made before a draw or dispatch whose pipeline is not ready is dropped (default 500; 0 never waits, so first uses are dropped until their pipeline is made) — any build, not just this one |
-| `VICTORY_GPU_TIMING=1` | with the above, each list of a submission run and timed on its own; slow lists logged with their slowest commands |
-| `VICTORY_D3D12_WARP=1` | host device on the software adapter (slow; cannot reset the driver) |
-| `VICTORY_SHADER_LOOP_LIMIT=<n>` | translated shader loops stop after `n` iterations per lane instead of 2^20 (own shader cache entries); if a lower `n` makes world frames much faster, loops hitting the limit are what makes them slow |
-| `VICTORY_AUDIO_CAPTURE=<file.wav>` | records what the title plays (our process only) |
-| `VICTORY_XMA_DUMP=<dir>` | saves the first 32 XMA voices' context and input |
+GPL-3.0-or-later; see [LICENSE](LICENSE). Architecture overview: [docs/architecture.md](docs/architecture.md).
 
-Every build appends crashes and host GPU failures to `crashes.log` in the
-title's data folder.
+## 💖 Thanks
 
-## License
-
-GPL-3.0-or-later. See [LICENSE](LICENSE).
+Scarlight is derived from [VIctory](https://github.com/Marvisak/VIctory) by Marvis and its contributors, and keeps their commit history. Thanks to the authors listed in [INTEGRATION.md](INTEGRATION.md), [JMAN730/victory](https://github.com/JMAN730/victory), and everyone whose fixes made the world load.

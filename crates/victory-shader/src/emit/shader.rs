@@ -126,6 +126,9 @@ pub(crate) struct Shader {
     /// Test builds: the property words of each handle annotation, in order.
     #[cfg(test)]
     pub annotations: Vec<(u32, u32)>,
+    /// Test builds: typed loads assembled from a dword-aligned pair.
+    #[cfg(test)]
+    pub unaligned_typed_loads: u32,
     pub t: Types,
     pub pixel: bool,
     pub inputs: Vec<SigElement>,
@@ -200,6 +203,8 @@ impl Shader {
             m,
             #[cfg(test)]
             annotations: Vec::new(),
+            #[cfg(test)]
+            unaligned_typed_loads: 0,
             t: Types {
                 void,
                 i1,
@@ -472,6 +477,9 @@ impl Shader {
         let wave = self.wave_size.map_or("any".to_owned(), |n| n.to_string());
         let ops: Vec<&str> = self.ops.iter().map(String::as_str).collect();
         let summary = format!("{threads}wave size {wave}; ops: {}", ops.join(", "));
+        // Tests of the emitted shape read the instruction count off the end.
+        #[cfg(test)]
+        let summary = format!("{summary}; {} instructions", self.m.instructions());
         LAST.with(|l| *l.borrow_mut() = summary);
         let ud_size = (self.user_data * 4).next_multiple_of(16);
         self.fix_user_data_size(ud_size);
