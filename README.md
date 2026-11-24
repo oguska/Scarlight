@@ -5,7 +5,8 @@ loads the title's executable, answers its console-only calls, and turns its GPU 
 shaders into Direct3D 12 for your graphics card. The focus is **AMD RDNA4 on Linux under
 Wine/Proton**; Windows works too. Scarlight is based on
 [VIctory](https://github.com/Marvisak/VIctory) by Marvis and its contributors (GPL-3.0, history
-kept). It adds tested fixes from VIctory's open
+kept) and on [@fxceless](https://github.com/fxceless)'s fork (commits `578d459`, `7b0f736d`), which is
+the base of the current tree. It adds tested fixes from VIctory's open
 pull requests and forks, each merged with its author's credit ([INTEGRATION.md](INTEGRATION.md)),
 plus its own. No game files, dumps or screenshots are in this repository.
 
@@ -15,18 +16,20 @@ plus its own. No game files, dumps or screenshots are in this repository.
 
 | Works | Does not |
 |---|---|
-| Boots to the menus | The world picture: mostly black |
-| Menus at 30 fps | World frame rate: about 0.5 fps |
-| Loads the world, with audio | Any real gameplay |
+| Boots to the menus | World frame rate: about 1–4 fps |
+| Menus at 30 fps | Shadowed areas: no ray-traced light yet, they stay black |
+| The world renders lit and textured | Any real gameplay |
 
-The black picture comes from shaders that Scarlight cannot translate yet, so their draws are
-skipped. The frame rate is limited by copying the title's memory. Both are being worked on
-upstream. Tested setup and measurements: [AMD-LINUX.md](AMD-LINUX.md).
+On Linux under Wine the picture needs a **native `d3dcompiler_47`** (winetricks
+`d3dcompiler_47`) until our own shader-based fallback lands: Wine's built-in one refuses the
+helper shaders with `E5005` and every indirect draw and dispatch is dropped, which leaves the
+world black. On Windows the built-in compiler works. The frame rate is limited by copying the
+title's memory. Tested setup and measurements: [AMD-LINUX.md](AMD-LINUX.md).
 
 <!-- state:begin -->
 ## Project state
 
-Last updated: 24 Nov 2026, Scarlight `fe552e4`.
+Last updated: 24 Nov 2026, Scarlight `scarlight-next` (fxceless base `7b0f736d`).
 
 ### Milestones
 
@@ -35,48 +38,47 @@ Last updated: 24 Nov 2026, Scarlight `fe552e4`.
 | ✅ | Boots | Boots into the title's own menus |
 | ✅ | Menus | 30 fps, drawn and interactive |
 | ✅ | Loads world | World streams in and the title's audio plays |
-| 🟡 | World picture | Mostly black: 76 of 768 world programs still skip their draws |
-| ❌ | Playable | 0.45–0.46 fps and a black picture: no real gameplay |
+| 🟡 | World picture | Lit and textured on RX 9070 XT / Linux with a native `d3dcompiler_47`, about 1–4 fps; shadowed areas stay black (no ray-traced light); 2 of 768 world programs still skip their draws |
+| ❌ | Playable | 1–4 fps: no real gameplay yet |
 
 ### Shader translation
 
 | Programs | Translated | Total | Progress |
 |---|---|---|---|
-| Vertex + pixel | 13,146 | 14,234 | `█████████░ 92%` |
-| Compute | 2,404 | 2,582 | `█████████░ 93%` |
-| Mesh | 8,396 | 8,713 | `██████████ 96%` |
-| **All programs** | **23,946** | **26,084** | `█████████░ 92%` |
-| World set, translate → SPIR-V → RADV pipeline | 692 | 768 | `█████████░ 90%` |
+| Vertex + pixel | 14,140 | 14,247 | `██████████ 99%` |
+| Compute | 2,624 | 2,682 | `██████████ 98%` |
+| Mesh | 8,762 | 8,765 | `██████████ 100%` |
+| **All programs** | **25,526** | **25,694** | `██████████ 99%` |
+| World set, translate → SPIR-V → RADV pipeline | 766 | 768 | `██████████ 100%` |
 
-*Full archive: 26,084 programs, `translate-main.txt`, 4e7e6a3 (PR #704), 24 Nov 2026. World set: the 751 programs the world actually uses plus the 52-program BVH capture (768 once duplicate containers are skipped), each run through translation, SPIR-V validation and a real RADV pipeline (hub/main `c888a93`, 24 Nov 2026; also the report file `report-20261124-165507.tsv`) — every program that translates also validates and builds a pipeline, so the whole gap is translation. The 555 programs that are neither vertex/pixel, compute nor mesh are not emitted yet and count as untranslated.*
+*Full archive: `victory translate` under Wine on `Build\shaders.rpf` (log `translate-fx.txt`), the fork's own default host wave widths, so not byte-identical to the earlier VIctory `main` table (24,114 of 25,562). World set: the 751 programs the world uses plus the 52-program BVH capture (768 once duplicate containers are skipped), each through translation, SPIR-V validation and a real RADV pipeline. The two that still fail: a wave sum of 16-bit floats, and one program whose DXIL times out into a core dump.*
 
 ### Top remaining shader failures
 
-| Failures | Reason |
+| Refusals | Reason |
 |---|---|
-| 716 | a descriptor's address or format read as data |
-| 298 | a lane mask read as data |
 | 195 | an address in an SGPR that is no root parameter |
-| 166 | a packed input half no element holds |
-| 88 | an SCC the emitter did not compute |
-| 73 | an address not from a root parameter |
-| 61 | an opaque lane mask |
-| 48 | a cross-lane operation outside compute |
+| 40 | a descriptor chosen by control flow |
+| 40 | a descriptor read only as data |
+| 33 | a lane mask holding lanes elsewhere, read as data |
+| 13 | an opaque lane mask |
+| 11 | a lane mask read as data |
+| 10 | a hardware SGPR input |
+| 8 | the first half of an interpolation |
 
 ### Performance
 
 | Measurement | RX 9070 XT, Linux / Wine (24 Nov 2026) |
 |---|---|
 | Menus | 30 fps |
-| World | 0.45–0.46 fps |
-| Title-memory copies | 628–864 ms/frame |
-| Write-watch checks | 459–573 ms/frame |
+| World | 1–4 fps (2.02 over 20 minutes with the native compiler, 4.72 in the longest run) |
+| Title-memory copies | 114–158 ms/frame |
 
 ### Tested hardware
 
 | GPU | OS / driver | Furthest stage |
 |---|---|---|
-| RX 9070 XT (RDNA4) | CachyOS, Mesa 26.3.1 RADV; GE-Proton11-14 with vkd3d-proton master | World loads and plays audio, picture mostly black; 692 of 768 world programs build a RADV pipeline |
+| RX 9070 XT (RDNA4) | CachyOS, Mesa 26.3.1 RADV; GE-Proton11-14 with vkd3d-proton master, native `d3dcompiler_47` | World renders lit and textured at 1–4 fps (shadowed areas black); 766 of 768 world programs build a RADV pipeline |
 
 <!-- state:end -->
 
@@ -183,7 +185,10 @@ the asset-policy hook checks it (`docs/asset-policy.md`).
 ## License and credits
 
 GPL-3.0-or-later; see [LICENSE](LICENSE). Scarlight is derived from
-[VIctory](https://github.com/Marvisak/VIctory) by Marvis and its contributors, and keeps their
-commit history. Thanks to the authors listed in [INTEGRATION.md](INTEGRATION.md),
-[JMAN730/victory](https://github.com/JMAN730/victory), and everyone whose fixes made the world
+[VIctory](https://github.com/Marvisak/VIctory) by Marvis and its contributors, and from
+[@fxceless](https://github.com/fxceless)'s fork, whose commits (`578d459`, `7b0f736d`) are the base of
+this tree; all keep their commit history. Thanks to @fxceless and @ZazaJr24 for the
+base, to @deadkid14 and @ItsYusei99 for finding and fixing what Wine's `d3dcompiler_47` refuses,
+to the authors listed in [INTEGRATION.md](INTEGRATION.md),
+[JMAN730/victory](https://github.com/JMAN730/victory), and to everyone whose fixes made the world
 load. Architecture overview: [docs/architecture.md](docs/architecture.md).
