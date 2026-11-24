@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/banner.svg" alt="Scarlight: console titles on PC, AMD + Linux first" width="100%">
+<img src="docs/brand/banner.svg" alt="Scarlight: console titles on PC, AMD + Linux first" width="100%">
 
 <br>
 
@@ -77,6 +77,33 @@ Last updated: 24 Nov 2026, Scarlight `main after #11`.
 | World set, translate → SPIR-V → RADV pipeline | 720 | 768 | `█████████░ 94%` |
 
 *Full archive: 25,529 programs, measured at main after #11. World set: 768 programs, each through translation, SPIR-V validation and a real RADV pipeline.*
+
+<details>
+<summary>Breakdown at 4e7e6a3 (before #11): per stage and top failure reasons</summary>
+
+| Programs | Translated | Total | Progress |
+|---|---|---|---|
+| Vertex + pixel | 13,146 | 14,234 | `█████████░ 92%` |
+| Compute | 2,404 | 2,582 | `█████████░ 93%` |
+| Mesh | 8,396 | 8,713 | `██████████ 96%` |
+| **All programs** | **23,946** | **26,084** | `█████████░ 92%` |
+
+Measured on `translate-main.txt` at 4e7e6a3 (PR #704), 24 Nov 2026; the totals above are newer and are not the sum of these rows. The 555 programs that are neither vertex/pixel, compute nor mesh were not emitted then and counted as untranslated.
+
+**Top remaining shader failures (same measurement)**
+
+| Failures | Reason |
+|---|---|
+| 716 | a descriptor's address or format read as data |
+| 298 | a lane mask read as data |
+| 195 | an address in an SGPR that is no root parameter |
+| 166 | a packed input half no element holds |
+| 88 | an SCC the emitter did not compute |
+| 73 | an address not from a root parameter |
+| 61 | an opaque lane mask |
+| 48 | a cross-lane operation outside compute |
+
+</details>
 
 ### Performance
 
