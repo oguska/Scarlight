@@ -13,8 +13,8 @@
 //! whose pipeline is not ready is dropped, as an untranslated one is.
 //!
 //! shortcut: the budget (half a second of waiting per title frame,
-//! `VICTORY_PIPELINE_WAIT_MS`) is a guess; a pass the title runs only once and whose pipeline takes longer
-//! is lost.
+//! `VICTORY_PIPELINE_WAIT_MS`) is a guess; a pass the title runs only once
+//! and whose pipeline takes longer is lost.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -141,7 +141,10 @@ static DONE: (Mutex<()>, Condvar) = (Mutex::new(()), Condvar::new());
 fn budget() -> Duration {
     static MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     Duration::from_millis(*MS.get_or_init(|| {
-        std::env::var("VICTORY_PIPELINE_WAIT_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(500)
+        std::env::var("VICTORY_PIPELINE_WAIT_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(500)
     }))
 }
 
