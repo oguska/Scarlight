@@ -4948,45 +4948,11 @@ impl<'a> Lower<'a> {
                     _ => Err("a root UAV or typed root view"),
                 }
             }
-            Source::Phi { block, args } => {
-                // Each predecessor computes its heap index at its end; the
-                // join picks one with a phi.
+            // Table loads chosen by control flow, however deeply joined: one
+            // heap index, picked at each join (and per `s_cselect` outcome).
+            Source::Phi { .. } | Source::Select { .. } => {
                 let _ = site;
-                let mut incoming = Vec::new();
-                for (&q, arg) in self.x.p.blocks[*block].preds.iter().zip(args) {
-                    if self.block[q].is_none() {
-                        continue;
-                    }
-                    let (Some(tail), Source::Loaded { load, first }) = (self.tail[q], arg) else {
-                        return Err("a descriptor chosen by control flow");
-                    };
-                    let at = self.edges.get(&(q, *block)).copied().unwrap_or(tail);
-                    let here = std::mem::replace(&mut self.cur, at);
-                    let index = self.heap_index(*load, *first, sampler);
-                    self.cur = here;
-                    incoming.push((index?, at));
-                }
-                let join = self.block[*block].ok_or("a descriptor chosen by control flow")?;
-                let phi = self.s.m.phi(join, self.s.t.i32);
-                self.s.m.set_phi(phi, incoming);
-                Ok(self.s.heap_handle(self.cur, phi, sampler, false, props))
-            }
-            Source::Select { scc, args } => {
-                // The heap index of each choice, picked by SCC (uniform).
-                let [
-                    Source::Loaded { load: a, first: fa },
-                    Source::Loaded { load: b, first: fb },
-                ] = args[..]
-                else {
-                    return Err("a descriptor chosen by a condition");
-                };
-                let cond = match self.get(*scc)? {
-                    Val::Bit(x) => x,
-                    _ => return Err("SCC without a value"),
-                };
-                let set = self.heap_index(a, fa, sampler)?;
-                let clear = self.heap_index(b, fb, sampler)?;
-                let index = self.s.m.select(self.cur, cond, set, clear);
+                let index = self.chosen_index(src, sampler)?;
                 Ok(self.s.heap_handle(self.cur, index, sampler, false, props))
             }
             Source::Fetched { .. } | Source::Lanes { .. } | Source::LanePhi { .. } => {
@@ -5176,26 +5142,7 @@ impl<'a> Lower<'a> {
     fn heap_slot(&mut self, src: &Source, sampler: bool) -> Result<V, Why> {
         match src {
             Source::Loaded { load, first } => self.heap_index(*load, *first, sampler),
-            Source::Phi { block, args } => {
-                let mut incoming = Vec::new();
-                for (&q, arg) in self.x.p.blocks[*block].preds.iter().zip(args) {
-                    if self.block[q].is_none() {
-                        continue;
-                    }
-                    let (Some(tail), Source::Loaded { load, first }) = (self.tail[q], arg) else {
-                        return Err("a descriptor chosen by control flow");
-                    };
-                    let at = self.edges.get(&(q, *block)).copied().unwrap_or(tail);
-                    let here = std::mem::replace(&mut self.cur, at);
-                    let index = self.heap_index(*load, *first, sampler);
-                    self.cur = here;
-                    incoming.push((index?, at));
-                }
-                let join = self.block[*block].ok_or("a descriptor chosen by control flow")?;
-                let phi = self.s.m.phi(join, self.s.t.i32);
-                self.s.m.set_phi(phi, incoming);
-                Ok(phi)
-            }
+            Source::Phi { .. } | Source::Select { .. } => self.chosen_index(src, sampler),
             _ => Err("a descriptor outside the heaps"),
         }
     }
@@ -5430,6 +5377,48 @@ impl<'a> Lower<'a> {
         }
         let shift = self.s.m.i32(if sampler { 4 } else { 5 });
         Ok(self.s.m.bin(c, Bin::LShr, addr, shift))
+    }
+
+    /// The heap index of a descriptor chosen by control flow among table
+    /// loads: each predecessor computes its own at its end and the join picks
+    /// one with a phi, however deeply the choice is joined; an `s_cselect`
+    /// (wave-uniform) picks per outcome. Each returns the index in its own
+    /// block, which dominates the edge it is an incoming value of.
+    fn chosen_index(&mut self, src: &Source, sampler: bool) -> Result<V, Why> {
+        match src {
+            Source::Loaded { load, first } => self.heap_index(*load, *first, sampler),
+            Source::Phi { block, args } => {
+                let mut incoming = Vec::new();
+                for (&q, arg) in self.x.p.blocks[*block].preds.iter().zip(args) {
+                    if self.block[q].is_none() {
+                        continue;
+                    }
+                    let tail = self.tail[q].ok_or("a descriptor chosen by control flow")?;
+                    let at = self.edges.get(&(q, *block)).copied().unwrap_or(tail);
+                    let here = std::mem::replace(&mut self.cur, at);
+                    let index = self.chosen_index(arg, sampler);
+                    self.cur = here;
+                    incoming.push((index?, at));
+                }
+                let join = self.block[*block].ok_or("a descriptor chosen by control flow")?;
+                let phi = self.s.m.phi(join, self.s.t.i32);
+                self.s.m.set_phi(phi, incoming);
+                Ok(phi)
+            }
+            Source::Select { scc, args } => {
+                let [set, clear] = &args[..] else {
+                    return Err("a descriptor chosen by a condition");
+                };
+                let cond = match self.get(*scc)? {
+                    Val::Bit(x) => x,
+                    _ => return Err("SCC without a value"),
+                };
+                let set = self.chosen_index(set, sampler)?;
+                let clear = self.chosen_index(clear, sampler)?;
+                Ok(self.s.m.select(self.cur, cond, set, clear))
+            }
+            _ => Err("a descriptor chosen by control flow"),
+        }
     }
 
     fn valu(&mut self, inst: &Inst, b: usize, i: usize) -> Result<(), Why> {
