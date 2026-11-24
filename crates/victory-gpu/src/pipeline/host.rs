@@ -530,7 +530,6 @@ impl HostPipeline {
                             NumDescriptorRanges: 1,
                             pDescriptorRanges: range,
                         },
-                        },
                     },
                     ShaderVisibility: visibility,
                 });

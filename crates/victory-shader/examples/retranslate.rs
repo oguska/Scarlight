@@ -45,7 +45,7 @@ fn main() {
     std::fs::write(std::path::Path::new(out).join("failures.tsv"), list).unwrap();
     println!("translated={ok} failed={failed}");
     let mut v: Vec<_> = reasons.into_iter().collect();
-    v.sort_by(|a, b| b.1.cmp(&a.1));
+    v.sort_by_key(|&(_, n)| std::cmp::Reverse(n));
     for (r, n) in v {
         println!("  {n:4} {r}");
     }

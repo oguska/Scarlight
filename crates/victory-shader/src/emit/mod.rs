@@ -1587,6 +1587,7 @@ mod barycentric_tests {
             static_samplers: Vec::new(),
             root_cbvs: l.root_cbvs,
             root_srvs: l.root_srvs,
+            root_uavs: l.root_uavs,
             stride_table: l.stride_table,
         }
     }
