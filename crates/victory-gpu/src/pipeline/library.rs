@@ -42,6 +42,9 @@ struct Library {
     _blob: Vec<u8>,
     /// Pipelines stored since the last save.
     added: u64,
+    /// Names already stored during this run (avoids duplicate `StorePipeline`
+    /// calls when two worker threads compile the same pipeline concurrently).
+    stored: HashSet<String>,
 }
 
 // SAFETY: D3D12 objects are free-threaded; every call is made under the
@@ -84,7 +87,12 @@ fn open(device: &ID3D12Device1, blob: Vec<u8>) -> Option<Library> {
         match make(&blob) {
             Ok(library) => {
                 tracing::info!(bytes = blob.len(), "host pipeline library loaded");
-                return Some(Library { library, _blob: blob, added: 0 });
+                return Some(Library {
+                    library,
+                    _blob: blob,
+                    added: 0,
+                    stored: HashSet::new(),
+                });
             }
             Err(e) => tracing::info!(error = %e, "host pipeline library rejected; starting an empty one"),
         }
@@ -92,7 +100,12 @@ fn open(device: &ID3D12Device1, blob: Vec<u8>) -> Option<Library> {
         tracing::info!("no host pipeline library yet; starting an empty one");
     }
     let library = make(&[]).ok()?;
-    Some(Library { library, _blob: Vec::new(), added: 0 })
+    Some(Library {
+        library,
+        _blob: Vec::new(),
+        added: 0,
+        stored: HashSet::new(),
+    })
 }
 
 /// A pipeline's name in the library: the hash of what its host
@@ -126,10 +139,12 @@ pub(crate) fn pipeline(
     let pso = create()?;
     MADE.fetch_add(1, Ordering::Relaxed);
     let mut l = library.lock().unwrap_or_else(|e| e.into_inner());
-    // SAFETY: a live pipeline; a name already stored (a description that
-    // differs) is refused, which leaves the library as it was.
-    if unsafe { l.library.StorePipeline(PCWSTR(wide.as_ptr()), &pso) }.is_ok() {
-        l.added += 1;
+    if l.stored.insert(name.to_owned()) {
+        // SAFETY: a live pipeline; a name already stored in an earlier run
+        // is refused, which leaves the library as it was.
+        if unsafe { l.library.StorePipeline(PCWSTR(wide.as_ptr()), &pso) }.is_ok() {
+            l.added += 1;
+        }
     }
     Ok(pso)
 }

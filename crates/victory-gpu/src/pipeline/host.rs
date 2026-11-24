@@ -159,16 +159,21 @@ impl GraphicsState {
         unsafe {
             let data = at.add(4);
             match kind {
-                8 => self.blend = data.cast::<D3D12_BLEND_DESC>().read_unaligned(),
+                8 => self.blend = clean_blend(data.cast::<D3D12_BLEND_DESC>().read_unaligned()),
                 9 => self.sample_mask = data.cast::<u32>().read_unaligned(),
-                10 => self.rasterizer = data.cast::<D3D12_RASTERIZER_DESC>().read_unaligned(),
-                11 => self.depth = data.cast::<D3D12_DEPTH_STENCIL_DESC>().read_unaligned(),
+                10 => {
+                    self.rasterizer =
+                        clean_rasterizer(data.cast::<D3D12_RASTERIZER_DESC>().read_unaligned())
+                }
+                11 => {
+                    self.depth = clean_depth(data.cast::<D3D12_DEPTH_STENCIL_DESC>().read_unaligned())
+                }
                 21 => {
                     // shortcut: the depth bounds test is dropped (the host
                     // pipeline uses the plain description); bring it back
                     // with a stream if a title enables it.
                     let d = data.cast::<D3D12_DEPTH_STENCIL_DESC1>().read_unaligned();
-                    self.depth = D3D12_DEPTH_STENCIL_DESC {
+                    self.depth = clean_depth(D3D12_DEPTH_STENCIL_DESC {
                         DepthEnable: d.DepthEnable,
                         DepthWriteMask: d.DepthWriteMask,
                         DepthFunc: d.DepthFunc,
@@ -177,7 +182,7 @@ impl GraphicsState {
                         StencilWriteMask: d.StencilWriteMask,
                         FrontFace: d.FrontFace,
                         BackFace: d.BackFace,
-                    };
+                    });
                 }
                 12 => {
                     let layout = at.add(8).cast::<D3D12_INPUT_LAYOUT_DESC>().read_unaligned();
@@ -195,12 +200,18 @@ impl GraphicsState {
                     self.inputs = elements
                         .iter()
                         .zip(&self.names)
-                        .map(|(e, name)| D3D12_INPUT_ELEMENT_DESC {
-                            SemanticName: PCSTR(name.as_ptr().cast()),
-                            Format: DXGI_FORMAT(
-                                crate::resource::pc_format(e.Format.0 as u32) as i32
-                            ),
-                            ..*e
+                        .map(|(e, name)| {
+                            // SAFETY: plain-old-data D3D12 struct; zeroed to clear padding.
+                            let mut out: D3D12_INPUT_ELEMENT_DESC = std::mem::zeroed();
+                            out.SemanticName = PCSTR(name.as_ptr().cast());
+                            out.SemanticIndex = e.SemanticIndex;
+                            out.Format =
+                                DXGI_FORMAT(crate::resource::pc_format(e.Format.0 as u32) as i32);
+                            out.InputSlot = e.InputSlot;
+                            out.AlignedByteOffset = e.AlignedByteOffset;
+                            out.InputSlotClass = e.InputSlotClass;
+                            out.InstanceDataStepRate = e.InstanceDataStepRate;
+                            out
                         })
                         .collect();
                 }
@@ -213,10 +224,14 @@ impl GraphicsState {
                         D3D12_PRIMITIVE_TOPOLOGY_TYPE(data.cast::<i32>().read_unaligned())
                 }
                 15 => {
-                    self.targets = data.cast::<D3D12_RT_FORMAT_ARRAY>().read_unaligned();
-                    for f in &mut self.targets.RTFormats {
-                        f.0 = crate::resource::pc_format(f.0 as u32) as i32;
+                    let raw = data.cast::<D3D12_RT_FORMAT_ARRAY>().read_unaligned();
+                    // SAFETY: plain-old-data D3D12 struct; zeroed to clear padding.
+                    let mut out: D3D12_RT_FORMAT_ARRAY = std::mem::zeroed();
+                    out.NumRenderTargets = raw.NumRenderTargets;
+                    for (dst, src) in out.RTFormats.iter_mut().zip(raw.RTFormats) {
+                        dst.0 = crate::resource::pc_format(src.0 as u32) as i32;
                     }
+                    self.targets = out;
                 }
                 16 => {
                     let f = data.cast::<u32>().read_unaligned();
@@ -708,27 +723,31 @@ fn mesh_pipeline(
         dsv: Sub<DXGI_FORMAT>,
         samples: Sub<DXGI_SAMPLE_DESC>,
     }
-    let mut stream = Stream {
-        root: Sub(
-            D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE,
-            root.as_raw(),
-        ),
-        ms: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS, ms),
-        ps: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS, ps),
-        blend: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND, host_blend(&g.blend, &g.targets)),
-        mask: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK, g.sample_mask),
-        raster: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER, g.rasterizer),
-        depth: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL, g.depth),
-        targets: Sub(
-            D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS,
-            g.targets,
-        ),
-        dsv: Sub(
-            D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL_FORMAT,
-            g.depth_format,
-        ),
-        samples: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_DESC, g.samples),
-    };
+    // SAFETY: `Stream` is plain-old-data; zeroing clears padding inside
+    // `Sub<T>` so D3D12's pipeline library desc comparison is deterministic.
+    let mut stream: Stream = unsafe { std::mem::zeroed() };
+    stream.root = Sub(
+        D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE,
+        root.as_raw(),
+    );
+    stream.ms = Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS, ms);
+    stream.ps = Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS, ps);
+    stream.blend = Sub(
+        D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND,
+        host_blend(&g.blend, &g.targets),
+    );
+    stream.mask = Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK, g.sample_mask);
+    stream.raster = Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER, g.rasterizer);
+    stream.depth = Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL, g.depth);
+    stream.targets = Sub(
+        D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS,
+        g.targets,
+    );
+    stream.dsv = Sub(
+        D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL_FORMAT,
+        g.depth_format,
+    );
+    stream.samples = Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_DESC, g.samples);
     let desc = D3D12_PIPELINE_STATE_STREAM_DESC {
         SizeInBytes: size_of::<Stream>(),
         pPipelineStateSubobjectStream: (&raw mut stream).cast(),
@@ -800,6 +819,65 @@ pub(crate) fn root_signature(
     }
 }
 
+/// Copies a blend description field-by-field into zeroed memory so
+/// uninitialized padding bytes from the title's stream cannot cause
+/// `ID3D12PipelineLibrary` description mismatches.
+fn clean_blend(b: D3D12_BLEND_DESC) -> D3D12_BLEND_DESC {
+    // SAFETY: plain-old-data D3D12 struct; zeroed to clear padding.
+    let mut out: D3D12_BLEND_DESC = unsafe { std::mem::zeroed() };
+    out.AlphaToCoverageEnable = b.AlphaToCoverageEnable;
+    out.IndependentBlendEnable = b.IndependentBlendEnable;
+    for (dst, src) in out.RenderTarget.iter_mut().zip(b.RenderTarget) {
+        // SAFETY: plain-old-data D3D12 struct; zeroed to clear padding.
+        let mut rt: D3D12_RENDER_TARGET_BLEND_DESC = unsafe { std::mem::zeroed() };
+        rt.BlendEnable = src.BlendEnable;
+        rt.LogicOpEnable = src.LogicOpEnable;
+        rt.SrcBlend = src.SrcBlend;
+        rt.DestBlend = src.DestBlend;
+        rt.BlendOp = src.BlendOp;
+        rt.SrcBlendAlpha = src.SrcBlendAlpha;
+        rt.DestBlendAlpha = src.DestBlendAlpha;
+        rt.BlendOpAlpha = src.BlendOpAlpha;
+        rt.LogicOp = src.LogicOp;
+        rt.RenderTargetWriteMask = src.RenderTargetWriteMask;
+        *dst = rt;
+    }
+    out
+}
+
+/// Copies a rasterizer description field-by-field into zeroed memory.
+fn clean_rasterizer(r: D3D12_RASTERIZER_DESC) -> D3D12_RASTERIZER_DESC {
+    // SAFETY: plain-old-data D3D12 struct; zeroed to clear padding.
+    let mut out: D3D12_RASTERIZER_DESC = unsafe { std::mem::zeroed() };
+    out.FillMode = r.FillMode;
+    out.CullMode = r.CullMode;
+    out.FrontCounterClockwise = r.FrontCounterClockwise;
+    out.DepthBias = r.DepthBias;
+    out.DepthBiasClamp = r.DepthBiasClamp;
+    out.SlopeScaledDepthBias = r.SlopeScaledDepthBias;
+    out.DepthClipEnable = r.DepthClipEnable;
+    out.MultisampleEnable = r.MultisampleEnable;
+    out.AntialiasedLineEnable = r.AntialiasedLineEnable;
+    out.ForcedSampleCount = r.ForcedSampleCount;
+    out.ConservativeRaster = r.ConservativeRaster;
+    out
+}
+
+/// Copies a depth-stencil description field-by-field into zeroed memory.
+fn clean_depth(d: D3D12_DEPTH_STENCIL_DESC) -> D3D12_DEPTH_STENCIL_DESC {
+    // SAFETY: plain-old-data D3D12 struct; zeroed to clear padding.
+    let mut out: D3D12_DEPTH_STENCIL_DESC = unsafe { std::mem::zeroed() };
+    out.DepthEnable = d.DepthEnable;
+    out.DepthWriteMask = d.DepthWriteMask;
+    out.DepthFunc = d.DepthFunc;
+    out.StencilEnable = d.StencilEnable;
+    out.StencilReadMask = d.StencilReadMask;
+    out.StencilWriteMask = d.StencilWriteMask;
+    out.FrontFace = d.FrontFace;
+    out.BackFace = d.BackFace;
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -858,5 +936,47 @@ mod tests {
         let mut t = targets(&[DXGI_FORMAT_R8G8B8A8_UNORM]);
         t.RTFormats[1] = DXGI_FORMAT_R8_UINT;
         assert_eq!(host_blend(&blending(false), &t), blending(false));
+    }
+
+    /// Padding bytes after `u8` fields in title PSO streams (such as
+    /// `RenderTargetWriteMask` or `StencilWriteMask`) must be zeroed so
+    /// identical logical states produce byte-identical D3D12 structs.
+    #[test]
+    fn cleaned_graphics_descs_zero_padding_bytes() {
+        let mut raw_depth = [0xAAu8; size_of::<D3D12_DEPTH_STENCIL_DESC>()];
+        let base = D3D12_DEPTH_STENCIL_DESC {
+            DepthEnable: true.into(),
+            DepthWriteMask: D3D12_DEPTH_WRITE_MASK_ALL,
+            DepthFunc: D3D12_COMPARISON_FUNC_LESS,
+            StencilEnable: false.into(),
+            StencilReadMask: 0xff,
+            StencilWriteMask: 0xff,
+            FrontFace: D3D12_DEPTH_STENCILOP_DESC::default(),
+            BackFace: D3D12_DEPTH_STENCILOP_DESC::default(),
+        };
+        // Write valid fields over 0xAA garbage so only padding stays 0xAA.
+        // SAFETY: `raw_depth` has the exact size of `D3D12_DEPTH_STENCIL_DESC`.
+        let dirty: D3D12_DEPTH_STENCIL_DESC = unsafe {
+            let p = raw_depth.as_mut_ptr().cast::<D3D12_DEPTH_STENCIL_DESC>();
+            std::ptr::addr_of_mut!((*p).DepthEnable).write_unaligned(base.DepthEnable);
+            std::ptr::addr_of_mut!((*p).DepthWriteMask).write_unaligned(base.DepthWriteMask);
+            std::ptr::addr_of_mut!((*p).DepthFunc).write_unaligned(base.DepthFunc);
+            std::ptr::addr_of_mut!((*p).StencilEnable).write_unaligned(base.StencilEnable);
+            std::ptr::addr_of_mut!((*p).StencilReadMask).write_unaligned(base.StencilReadMask);
+            std::ptr::addr_of_mut!((*p).StencilWriteMask).write_unaligned(base.StencilWriteMask);
+            std::ptr::addr_of_mut!((*p).FrontFace).write_unaligned(base.FrontFace);
+            std::ptr::addr_of_mut!((*p).BackFace).write_unaligned(base.BackFace);
+            p.read_unaligned()
+        };
+        let a = clean_depth(dirty);
+        let b = clean_depth(base);
+        // SAFETY: inspecting raw bytes of plain-old-data structs.
+        let (ba, bb) = unsafe {
+            (
+                std::slice::from_raw_parts((&raw const a).cast::<u8>(), size_of::<D3D12_DEPTH_STENCIL_DESC>()),
+                std::slice::from_raw_parts((&raw const b).cast::<u8>(), size_of::<D3D12_DEPTH_STENCIL_DESC>()),
+            )
+        };
+        assert_eq!(ba, bb);
     }
 }
