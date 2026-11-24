@@ -4,18 +4,20 @@
 
 <br>
 
-[![CI](https://img.shields.io/github/actions/workflow/status/pablogonz12/Scarlight/ci.yml?branch=main&style=for-the-badge&label=CI&labelColor=1a0838&color=ff2e93)](https://github.com/pablogonz12/Scarlight/actions/workflows/ci.yml)
-[![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-ff6a3d?style=for-the-badge&labelColor=1a0838)](LICENSE)
-![GPU: RDNA4 tested](https://img.shields.io/badge/GPU-RDNA4%20tested-00e5ff?style=for-the-badge&labelColor=1a0838)
-![Linux · Proton](https://img.shields.io/badge/Linux-Proton-ffb347?style=for-the-badge&labelColor=1a0838)
-[![PRs welcome](https://img.shields.io/badge/PRs-welcome-ff2e93?style=for-the-badge&labelColor=1a0838)](#-contributing)
-[![Stars](https://img.shields.io/github/stars/pablogonz12/Scarlight?style=for-the-badge&labelColor=1a0838&color=ffd24a)](https://github.com/pablogonz12/Scarlight/stargazers)
+[![CI](https://img.shields.io/github/actions/workflow/status/pablogonz12/Scarlight/ci.yml?branch=main&style=flat-square&labelColor=14072c&label=CI&color=ff2e63)](https://github.com/pablogonz12/Scarlight/actions/workflows/ci.yml)
+[![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-ff7a3d?style=flat-square&labelColor=14072c)](LICENSE)
+![GPU: RDNA4 tested](https://img.shields.io/badge/GPU-RDNA4%20tested-19d8ff?style=flat-square&labelColor=14072c)
+![Linux · Proton](https://img.shields.io/badge/Linux-Proton-ffb347?style=flat-square&labelColor=14072c)
+[![PRs welcome](https://img.shields.io/badge/PRs-welcome-ff2e63?style=flat-square&labelColor=14072c)](#-contributing)
+[![Stars](https://img.shields.io/github/stars/pablogonz12/Scarlight?style=flat-square&labelColor=14072c&color=ffb347)](https://github.com/pablogonz12/Scarlight/stargazers)
 
 **Not playable yet.** Details below.
 
+<sub>[What it is](#-what-it-is) · [How it fits](#-how-it-fits-together) · [Status](#-status) · [Quick start](#-quick-start) · [Windows](#-quick-start-windows) · [Linux](#-quick-start-linux-wine--ge-proton) · [Controls](#-controls) · [Contributing](#-contributing) · [Thanks](#-thanks)</sub>
+
 </div>
 
----
+<p align="center"><img src="docs/brand/divider.svg" width="720" alt=""></p>
 
 ## ✨ What it is
 
@@ -28,9 +30,36 @@ kept). It adds tested fixes from VIctory's open
 pull requests and forks, each merged with its author's credit ([INTEGRATION.md](INTEGRATION.md)),
 plus its own. No game files, dumps or screenshots are in this repository.
 
+## 🧭 How it fits together
+
+```mermaid
+flowchart LR
+    A["<b>Title's x86-64 code</b><br/>your own copy,<br/>outside the repo"] --> B["<b>Loader</b><br/>victory-loader<br/>map and bind imports"]
+    B --> C["<b>HLE</b><br/>victory-hle<br/>console APIs on the host"]
+    C -->|"D3D12.X calls"| D["<b>GPU translation</b><br/>victory-gpu<br/>commands and memory"]
+    D -->|"shaders, at pipeline creation"| E["<b>Shader recompiler</b><br/>victory-shader<br/>console GPU machine code to DXIL"]
+    D --> F["<b>Direct3D 12</b>"]
+    E --> F
+    F --> G["<b>vkd3d-proton</b><br/>Direct3D 12 on Vulkan<br/>(Linux, Wine/Proton)"]
+    classDef hot fill:#1a0838,stroke:#ff2e63,color:#ffd9e6,stroke-width:2px
+    classDef cool fill:#0a2a3a,stroke:#19d8ff,color:#dcfaff,stroke-width:2px
+    classDef warm fill:#2a1408,stroke:#ffb347,color:#ffe9c9,stroke-width:2px
+    class A,B,C hot
+    class D,E warm
+    class F,G cool
+```
+
+Shaders are translated when the title creates a pipeline, from the bytes it passes. On Windows the
+host's own Direct3D 12 driver takes the place of vkd3d-proton. Crates and import resolution:
+[docs/architecture.md](docs/architecture.md).
+
+<p align="center"><img src="docs/brand/divider.svg" width="720" alt=""></p>
+
 ## 🚦 Status
 
 **Not playable yet.** In short:
+
+<p align="center"><img src="docs/brand/status.svg" alt="Pipeline status on main: Boot, Menus and World loads are done; Lit picture is in progress (PR: Scarlight on the fxceless base); Playable is not yet reached." width="100%"></p>
 
 | Works | Does not |
 |---|---|
@@ -121,6 +150,22 @@ Measured on `translate-main.txt` at 4e7e6a3 (PR #704), 24 Nov 2026; the totals a
 | RX 9070 XT (RDNA4) | CachyOS, Mesa 26.3.1 RADV; GE-Proton11-14 with vkd3d-proton master | World loads and plays audio, picture mostly black; 720 of 768 world programs build a RADV pipeline |
 
 <!-- state:end -->
+
+<p align="center"><img src="docs/brand/divider.svg" width="720" alt=""></p>
+
+## ⚡ Quick start
+
+The short version; the platform sections below have the full steps (build, runtime, environment).
+
+```bash
+git clone https://github.com/pablogonz12/Scarlight && cd Scarlight
+cargo xtask install-hooks                # asset-policy check on every commit
+cp victory.example.toml victory.toml     # PowerShell: copy; then set your paths (outside the repo)
+cargo test --workspace                   # no game data needed
+cargo run -p victory -- config           # check the build and your paths
+```
+
+Then build and run: [Windows](#-quick-start-windows) or [Linux (Wine / GE-Proton)](#-quick-start-linux-wine--ge-proton).
 
 ## 📋 What you need
 
@@ -215,6 +260,8 @@ and commands: [AMD-LINUX.md](AMD-LINUX.md#diagnostics).
 
 </details>
 
+<p align="center"><img src="docs/brand/divider.svg" width="720" alt=""></p>
+
 ## 🤝 Contributing
 
 Pull requests go to `main` only. CI runs clippy and the workspace tests on Windows, and CodeRabbit
@@ -229,6 +276,12 @@ the asset-policy hook checks it (`docs/asset-policy.md`).
 
 GPL-3.0-or-later; see [LICENSE](LICENSE). Architecture overview: [docs/architecture.md](docs/architecture.md).
 
+<p align="center"><img src="docs/brand/divider.svg" width="720" alt=""></p>
+
 ## 💖 Thanks
 
 Scarlight is derived from [VIctory](https://github.com/Marvisak/VIctory) by Marvis and its contributors, and keeps their commit history. Thanks to the authors listed in [INTEGRATION.md](INTEGRATION.md), [JMAN730/victory](https://github.com/JMAN730/victory), and everyone whose fixes made the world load.
+
+<p align="center">
+<a href="https://github.com/pablogonz12/Scarlight/graphs/contributors"><img src="https://contrib.rocks/image?repo=pablogonz12/Scarlight" alt="Scarlight contributors"></a>
+</p>

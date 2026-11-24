@@ -1,14 +1,24 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
-<title>Scarlight</title><defs><linearGradient id="neon" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ff2e93"/><stop offset=".6" stop-color="#ff6a3d"/><stop offset="1" stop-color="#ffb347"/></linearGradient>
-<linearGradient id="sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#070b2a"/><stop offset=".55" stop-color="#2a0f55"/><stop offset="1" stop-color="#7a1c6e"/></linearGradient>
-<linearGradient id="sun" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffd24a"/><stop offset=".5" stop-color="#ff5e7a"/><stop offset="1" stop-color="#d4189a"/></linearGradient>
-<linearGradient id="sea" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3b1070"/><stop offset="1" stop-color="#0a0626"/></linearGradient>
-<filter id="glow" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="9" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
-<filter id="glow2" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="4" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter><mask id="m"><rect x="81" y="75" width="350" height="350" fill="#fff"/><rect x="84" y="258.5" width="344" height="5.1" fill="#000"></rect><rect x="84" y="287.4" width="344" height="8.8" fill="#000"></rect><rect x="84" y="316.3" width="344" height="12.6" fill="#000"></rect><rect x="84" y="345.2" width="344" height="16.3" fill="#000"></rect><rect x="84" y="374.1" width="344" height="20.1" fill="#000"></rect><rect x="84" y="403.0" width="344" height="23.8" fill="#000"></rect></mask>
-<clipPath id="r"><rect width="512" height="512" rx="96"/></clipPath></defs>
-<g clip-path="url(#r)"><rect width="512" height="512" fill="url(#sky)"/>
-<g fill="#fff" opacity=".8"><circle cx="70" cy="70" r="3"/><circle cx="440" cy="60" r="2.5"/><circle cx="380" cy="120" r="2"/><circle cx="110" cy="140" r="2"/></g>
-<circle cx="256" cy="250" r="170" fill="url(#sun)" mask="url(#m)"/>
-<rect y="400" width="512" height="112" fill="url(#sea)"/><rect y="398" width="512" height="4" fill="#00e5ff" opacity=".8"/>
-<g transform="translate(70 410)" stroke="#12062b" fill="none" stroke-linecap="round"><path d="M0 0 Q13.6 -85.0 -20.4 -170" stroke-width="10.2"/><g stroke-width="7.6"><path d="M-20.4 -170.0 q-51.0 -7.6 -93.5 20.8" /><path d="M-20.4 -170.0 q-35.7 -22.9 -65.5 3.0" /><path d="M-20.4 -170.0 q-10.2 -30.6 -18.7 -5.9" /><path d="M-20.4 -170.0 q17.8 -28.1 32.7 -3.0" /><path d="M-20.4 -170.0 q40.8 -15.3 74.8 11.9" /><path d="M-20.4 -170.0 q51.0 2.5 93.5 32.7" /></g></g><g transform="translate(448 410)" stroke="#12062b" fill="none" stroke-linecap="round"><path d="M0 0 Q-12.0 -75.0 18.0 -150" stroke-width="9.0"/><g stroke-width="6.8"><path d="M18.0 -150.0 q-45.0 -6.8 -82.5 18.4" /><path d="M18.0 -150.0 q-31.5 -20.2 -57.8 2.6" /><path d="M18.0 -150.0 q-9.0 -27.0 -16.5 -5.2" /><path d="M18.0 -150.0 q15.8 -24.8 28.9 -2.6" /><path d="M18.0 -150.0 q36.0 -13.5 66.0 10.5" /><path d="M18.0 -150.0 q45.0 2.2 82.5 28.9" /></g></g>
-<g fill="none" stroke-linecap="round" stroke-linejoin="round" ><path d="M352 150 C328 92 168 92 168 176 C168 252 352 246 352 330 C352 418 190 420 158 362" stroke="url(#neon)" stroke-width="46" filter="url(#glow)"/><path d="M352 150 C328 92 168 92 168 176 C168 252 352 246 352 330 C352 418 190 420 158 362" stroke="#00e5ff" stroke-width="10.1" opacity=".0"/><path d="M352 150 C328 92 168 92 168 176 C168 252 352 246 352 330 C352 418 190 420 158 362" stroke="#fff4e8" stroke-width="9.2" opacity=".85"/></g></g></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Scarlight logo">
+<title>Scarlight</title>
+<defs>
+<linearGradient id="g" gradientUnits="userSpaceOnUse" x1="170" y1="100" x2="350" y2="390"><stop offset="0" stop-color="#ff2e63"/><stop offset=".55" stop-color="#ff7a3d"/><stop offset="1" stop-color="#ffc247"/></linearGradient>
+<filter id="blur" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="14"/></filter>
+<linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#0b0522"/><stop offset=".6" stop-color="#1c0b42"/><stop offset="1" stop-color="#3a1260"/></linearGradient>
+<linearGradient id="sun" gradientUnits="userSpaceOnUse" x1="0" y1="140" x2="0" y2="428"><stop offset="0" stop-color="#ff8a3d" stop-opacity=".75"/><stop offset=".5" stop-color="#e8307a" stop-opacity=".62"/><stop offset="1" stop-color="#8a2a9e" stop-opacity=".5"/></linearGradient>
+<clipPath id="t"><rect width="512" height="512" rx="112"/></clipPath>
+<clipPath id="s"><circle cx="256" cy="316" r="176"/></clipPath>
+</defs>
+<g clip-path="url(#t)">
+<rect width="512" height="512" fill="url(#bg)"/>
+<g clip-path="url(#s)" fill="url(#sun)"><rect x="60" y="140" width="392" height="211"/><rect x="60" y="358" width="392" height="15"/><rect x="60" y="384" width="392" height="11"/><rect x="60" y="406" width="392" height="7"/></g>
+<rect y="428" width="512" height="84" fill="#0e0524"/>
+<g stroke="#00e5ff" stroke-width="2" opacity=".28"><path d="M256 428L-120 512"/><path d="M256 428L0 512"/><path d="M256 428L100 512"/><path d="M256 428L180 512"/><path d="M256 428L256 512"/><path d="M256 428L332 512"/><path d="M256 428L412 512"/><path d="M256 428L512 512"/><path d="M256 428L632 512"/></g>
+<rect y="426" width="512" height="4" fill="#00e5ff"/>
+</g>
+<g fill="none" stroke-linecap="round"><path d="M314.9 142A68 68 0 1 0 256 244A68 68 0 1 1 197.1 346" stroke="#0b0522" stroke-width="58" opacity=".4"/></g>
+<g fill="none" stroke-linecap="round" stroke-linejoin="round">
+<path d="M314.9 142A68 68 0 1 0 256 244A68 68 0 1 1 197.1 346" stroke="url(#g)" stroke-width="66" opacity=".32" filter="url(#blur)"/>
+<path d="M314.9 142A68 68 0 1 0 256 244A68 68 0 1 1 197.1 346" stroke="url(#g)" stroke-width="40"/>
+<path d="M314.9 142A68 68 0 1 0 256 244A68 68 0 1 1 197.1 346" stroke="#fff3e2" stroke-width="8.0" opacity=".92"/>
+</g>
+</svg>
