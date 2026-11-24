@@ -143,6 +143,9 @@ struct Guards {
     /// runtime remaps them. Asking the system each time (`VirtualQuery`)
     /// cost 100-230 ms per world frame, more than the rest of the guard.
     views: BTreeSet<usize>,
+    /// Blocks whose aliases (other views of the same pages) we made
+    /// read-only, so a write here opens them.
+    aliased: BTreeSet<usize>,
 }
 
 static GUARDS: Mutex<Guards> = Mutex::new(Guards {
@@ -150,10 +153,36 @@ static GUARDS: Mutex<Guards> = Mutex::new(Guards {
     clean: BTreeSet::new(),
     absent: BTreeSet::new(),
     views: BTreeSet::new(),
+    aliased: BTreeSet::new(),
 });
 
 fn guards() -> std::sync::MutexGuard<'static, Guards> {
     GUARDS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The runtime's answer to "which other addresses show the physical page
+/// mapped at this page address" (the same page in several views).
+static ALIAS_LOOKUP: std::sync::OnceLock<fn(usize, &mut Vec<usize>)> = std::sync::OnceLock::new();
+
+/// The runtime tells where else view memory's physical pages show: a write
+/// through any of those views is a write to all of them, so guarding a
+/// block guards its aliases too, and a write to one opens them all (else a
+/// copy of one view keeps what it first took while the title writes the
+/// page through another).
+pub fn set_alias_lookup(lookup: fn(usize, &mut Vec<usize>)) {
+    let _ = ALIAS_LOOKUP.set(lookup);
+}
+
+/// The blocks showing the same physical memory as `block` (not itself).
+fn aliases_of(block: usize, out: &mut Vec<usize>) {
+    out.clear();
+    if let Some(lookup) = ALIAS_LOOKUP.get() {
+        lookup(block * BLOCK, out);
+        for at in out.iter_mut() {
+            *at /= BLOCK;
+        }
+        out.retain(|&b| b != block);
+    }
 }
 
 /// For view memory: the pages of `[start, end)`'s blocks written since
@@ -214,13 +243,27 @@ fn protect(g: &mut Guards, from: usize, to: usize) {
     };
     if set(from, to) {
         note(g, from, to);
-        return;
+    } else {
+        for block in from..to {
+            if set(block, block + 1) {
+                note(g, block, block + 1);
+            } else if unmapped(block * BLOCK) {
+                g.absent.insert(block);
+            }
+        }
     }
+    // Their aliases read-only too, so a write through them faults; not
+    // clean, though: a copy of an alias has not taken them yet.
+    let mut others = Vec::new();
     for block in from..to {
-        if set(block, block + 1) {
-            note(g, block, block + 1);
-        } else if unmapped(block * BLOCK) {
-            g.absent.insert(block);
+        aliases_of(block, &mut others);
+        for &other in &others {
+            if !g.protected.contains(&other) && set(other, other + 1) {
+                g.protected.insert(other);
+            }
+            // Both ways: a write through either opens the other.
+            g.aliased.insert(block);
+            g.aliased.insert(other);
         }
     }
 }
@@ -256,12 +299,31 @@ fn open(g: &mut Guards, start: usize, end: usize) -> bool {
         .range(start / BLOCK..end.div_ceil(BLOCK))
         .copied()
         .collect();
-    for &block in &blocks {
-        g.protected.remove(&block);
+    let unguard = |g: &mut Guards, block: usize| {
         g.clean.remove(&block);
-        let mut old = 0;
-        // SAFETY: a block we made read-only.
-        unsafe { VirtualProtect((block * BLOCK) as *const _, BLOCK, PAGE_READWRITE, &mut old) };
+        if g.protected.remove(&block) {
+            let mut old = 0;
+            // SAFETY: a block we made read-only.
+            unsafe { VirtualProtect((block * BLOCK) as *const _, BLOCK, PAGE_READWRITE, &mut old) };
+        }
+    };
+    // A write here is a write to every view of the same pages. Only blocks
+    // with guarded aliases are looked up: a write range can be huge.
+    let aliased: Vec<usize> = g
+        .aliased
+        .range(start / BLOCK..end.div_ceil(BLOCK))
+        .copied()
+        .collect();
+    let mut others = Vec::new();
+    for block in aliased {
+        g.aliased.remove(&block);
+        aliases_of(block, &mut others);
+        for &other in &others {
+            unguard(g, other);
+        }
+    }
+    for &block in &blocks {
+        unguard(g, block);
     }
     !blocks.is_empty()
 }
@@ -293,6 +355,12 @@ pub fn title_memory_remapped(at: usize, len: usize) {
     for block in blocks {
         g.protected.remove(&block);
         g.clean.remove(&block);
+    }
+    let first = at / BLOCK;
+    let end = at.saturating_add(len).div_ceil(BLOCK);
+    let aliased: Vec<usize> = g.aliased.range(first..end).copied().collect();
+    for block in aliased {
+        g.aliased.remove(&block);
     }
 }
 
@@ -720,5 +788,66 @@ mod tests {
             windows_sys::Win32::Foundation::CloseHandle(section);
         }
         title_memory_remapped(p, 3 * BLOCK);
+    }
+
+    #[test]
+    fn a_write_through_an_alias_view_is_seen_by_a_guard_on_the_other() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use windows_sys::Win32::System::Memory::{
+            CreateFileMappingW, FILE_MAP_WRITE, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile,
+            UnmapViewOfFile,
+        };
+        static A: AtomicUsize = AtomicUsize::new(0);
+        static B: AtomicUsize = AtomicUsize::new(0);
+        fn lookup(at: usize, out: &mut Vec<usize>) {
+            let (a, b) = (A.load(Ordering::Relaxed), B.load(Ordering::Relaxed));
+            let page = at - at % BLOCK;
+            if page == a {
+                out.push(b);
+            } else if page == b {
+                out.push(a);
+            }
+        }
+        // SAFETY: one pagefile section of a block, mapped twice read-write.
+        let (a, b) = unsafe {
+            let section = CreateFileMappingW(
+                -1isize as _,
+                std::ptr::null(),
+                PAGE_READWRITE,
+                0,
+                BLOCK as u32,
+                std::ptr::null(),
+            );
+            assert!(!section.is_null());
+            (
+                MapViewOfFile(section, FILE_MAP_WRITE, 0, 0, BLOCK).Value as usize,
+                MapViewOfFile(section, FILE_MAP_WRITE, 0, 0, BLOCK).Value as usize,
+            )
+        };
+        assert!(a != 0 && b != 0 && a % BLOCK == 0 && b % BLOCK == 0);
+        A.store(a, Ordering::Relaxed);
+        B.store(b, Ordering::Relaxed);
+        set_alias_lookup(lookup);
+        // A copy of view `a` takes the block and guards it (and `b`).
+        assert_eq!(guard(a, a + BLOCK), Some(vec![a / PAGE]));
+        assert_eq!(guard(a, a + BLOCK), Some(vec![]), "clean");
+        // The title writes the page through `b`: `a` shows it written.
+        // SAFETY: our view; the guard's handler opens it.
+        unsafe { ((b + 8) as *mut u8).write_volatile(7) };
+        // SAFETY: the same byte through the other view.
+        assert_eq!(unsafe { ((a + 8) as *const u8).read_volatile() }, 7);
+        assert_eq!(guard(a, a + BLOCK), Some(vec![a / PAGE]), "written through the alias");
+        // And the other way round: a kernel write into `a` opens `b`.
+        assert_eq!(guard(b, b + BLOCK), Some(vec![b / PAGE]));
+        assert_eq!(guard(b, b + BLOCK), Some(vec![]));
+        writing(a + 16, 4);
+        assert_eq!(guard(b, b + BLOCK), Some(vec![b / PAGE]));
+        A.store(0, Ordering::Relaxed);
+        B.store(0, Ordering::Relaxed);
+        for v in [a, b] {
+            // SAFETY: our views.
+            unsafe { UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: v as *mut _ }) };
+            title_memory_remapped(v, BLOCK);
+        }
     }
 }
