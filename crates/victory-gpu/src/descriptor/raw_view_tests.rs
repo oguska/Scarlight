@@ -392,3 +392,14 @@ fn retiring_slot_is_unavailable_until_its_alias_is_cleared() {
     assert_eq!(heap.dynamic(1), Some(last), "cleared slot was not returned");
     eprintln!("Verified descriptor lease during and after alias cleanup");
 }
+
+/// The stride table reaches the guard slot: a lookup by an index a shader
+/// clamped there stays inside the table and reads an empty entry.
+#[test]
+fn the_stride_table_covers_the_guard_slot() {
+    let Some(heap) = HostHeap::new(false, 1) else {
+        eprintln!("Skipping stride table guard test: no host view heap");
+        return;
+    };
+    assert_eq!(heap.entry_words(heap.guard_slot()), [0, 0]);
+}

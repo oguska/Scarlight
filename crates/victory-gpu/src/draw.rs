@@ -739,10 +739,9 @@ impl State {
         let index = match self.root_uav_slots.get(&key) {
             Some(&index) => index,
             None => {
-                let Some(index) = host.dynamic(1) else {
+                let Some(index) = self.take_dynamic(host, key.0, 1) else {
                     return false;
                 };
-                self.dynamic.push((key.0, index, 1));
                 self.root_uav_slots.insert(key, index);
                 match &shadow {
                     Some((a, s)) => {

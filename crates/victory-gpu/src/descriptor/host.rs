@@ -238,10 +238,14 @@ impl HostHeap {
             u64::from(step),
             sampler,
         ));
+        // One entry per slot up to the guard slot, so a lookup by an index a
+        // shader clamped to the guard stays inside the table (a root SRV has
+        // no bounds check); the entries past the dynamic slots stay zero:
+        // stride 0, the slot's own view.
         let strides = if sampler {
             None
         } else {
-            StrideTable::new(&host.device, count + extra)
+            StrideTable::new(&host.device, count + extra + aliases + guard)
         };
         let h = HostHeap {
             heap,

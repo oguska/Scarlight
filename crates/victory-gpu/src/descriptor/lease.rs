@@ -15,7 +15,7 @@
 //! how much that frees.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Dynamic slots: the title heap they belong to (its address), the first
@@ -28,6 +28,9 @@ pub(crate) struct Lease {
     ranges: Mutex<Vec<Range>>,
     /// The slots were taken back after the list ran.
     lost: AtomicBool,
+    /// Submissions started and not finished. Changed only under the lock of
+    /// [`FINISHED`]; the lease is queued there, to be taken back, only at 0.
+    active: AtomicU32,
 }
 
 /// The leases of lists that ran, oldest first, and that still hold slots.
@@ -76,11 +79,21 @@ impl Lease {
             return false;
         }
         queue.retain(|l| !Arc::ptr_eq(l, self));
+        self.active.fetch_add(1, Ordering::Relaxed);
         true
     }
 
     /// After the list ran: its slots may be taken back if a heap runs short.
     pub(crate) fn finish(self: &Arc<Self>) {
+        let mut queue = finished_queue();
+        // Another submission of the list may still run: it keeps its slots.
+        let before = self
+            .active
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+            .unwrap_or(0);
+        if before > 1 {
+            return;
+        }
         if self.is_lost()
             || self
                 .ranges
@@ -90,7 +103,6 @@ impl Lease {
         {
             return;
         }
-        let mut queue = finished_queue();
         queue.retain(|l| !Arc::ptr_eq(l, self));
         queue.push_back(self.clone());
         // Lists that were reset hold nothing and only take room here.
@@ -195,5 +207,21 @@ mod tests {
         assert_eq!(given, [(heap, 50, 5)]);
         assert!(!reset.is_lost() && kept.is_lost());
         assert!(!reclaim(heap, |_| panic!("one entry was kept, once")));
+    }
+
+    /// Two submissions of one list that overlap: the first to finish does
+    /// not make it takeable while the second still runs.
+    #[test]
+    fn a_list_submitted_twice_is_kept_until_both_finish() {
+        let heap = 0x1000_0005;
+        let l = lease(heap, &[(7, 3)]);
+        assert!(l.start() && l.start());
+        l.finish();
+        assert!(!reclaim(heap, |_| panic!("one submission still runs")));
+        l.finish();
+        let mut given = Vec::new();
+        assert!(reclaim(heap, |r| given.push(r)));
+        assert_eq!(given, [(heap, 7, 3)]);
+        assert!(l.is_lost());
     }
 }
