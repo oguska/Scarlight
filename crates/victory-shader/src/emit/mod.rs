@@ -15,7 +15,12 @@
 //!   heap: the descriptor index times 32 for CBV/SRV/UAV tables, times 16
 //!   for sampler tables (the console's descriptor sizes; the code adds
 //!   offsets in those units). The heap bases of dynamic resources are 0
-//!   and not listed.
+//!   and not listed. An entry of root type `ResourceHeap` (`SamplerHeap`)
+//!   is a guard slot of the bound view (sampler) heap, past the title's
+//!   console dwords: every heap index the code computes at or above it
+//!   reads that slot instead (an index past a heap hangs some GPUs). The
+//!   host keeps a view heap's guard slot null and gives no table or title
+//!   descriptor a slot at or above it; any sampler slot will do.
 //! * **Descriptors** through SM 6.6 `ResourceDescriptorHeap[]` and
 //!   `SamplerDescriptorHeap[]`, at the index the console address gives, so
 //!   the host heaps keep the title's descriptor order. The root signature
@@ -193,7 +198,8 @@ pub struct UserData {
     pub index: u32,
     /// Root parameter index in the title's root signature.
     pub slot: u8,
-    /// `Constants` or `Table` (see the module notes for the value).
+    /// `Constants` or `Table`, or `ResourceHeap` / `SamplerHeap` for a
+    /// heap's guard slot (see the module notes for the value).
     pub root: RootType,
     /// Dword within the parameter.
     pub dword: u32,

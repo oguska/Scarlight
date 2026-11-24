@@ -774,7 +774,8 @@ impl Host {
             let views: ID3D12DescriptorHeap = dev
                 .CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC {
                     Type: D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
-                    NumDescriptors: d.textures.len().max(1) as u32,
+                    // A null guard slot after the textures (see [`guard`]).
+                    NumDescriptors: d.textures.len() as u32 + 1,
                     Flags: D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
                     ..Default::default()
                 })
@@ -854,6 +855,7 @@ impl Host {
                 keep.push(tex);
                 keep.push(upload);
             }
+            null_guard(dev, &views, d.textures.len());
             for (i, s) in d.samplers.iter().enumerate() {
                 let mut at = sampler_heap.GetCPUDescriptorHandleForHeapStart();
                 at.ptr += i * sampler_size;
@@ -1065,6 +1067,44 @@ pub enum Stride {
     Format(DXGI_FORMAT, u32),
 }
 
+/// The user-data value of a translated shader's heap guard entry (root
+/// type `ResourceHeap` or `SamplerHeap`, see the module notes) for
+/// [`Host::dispatch`] and [`Host::draw`] with `views` views (textures) and
+/// `samplers` samplers: the null view slot they keep after the views, the
+/// last sampler. `None` for other entries.
+#[cfg(test)]
+pub fn guard(root: crate::native::RootType, views: usize, samplers: usize) -> Option<u32> {
+    match root {
+        crate::native::RootType::ResourceHeap => Some(views as u32),
+        crate::native::RootType::SamplerHeap => Some(samplers.saturating_sub(1) as u32),
+        _ => None,
+    }
+}
+
+/// Makes slot `at` of view heap `heap` null, as the host makes its empty
+/// slots (a null 2D texture view).
+#[cfg(test)]
+fn null_guard(dev: &ID3D12Device, heap: &ID3D12DescriptorHeap, at: usize) {
+    let desc = D3D12_SHADER_RESOURCE_VIEW_DESC {
+        Format: DXGI_FORMAT_R8G8B8A8_UNORM,
+        ViewDimension: D3D12_SRV_DIMENSION_TEXTURE2D,
+        Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+        Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
+            Texture2D: D3D12_TEX2D_SRV {
+                MipLevels: 1,
+                ..Default::default()
+            },
+        },
+    };
+    // SAFETY: a slot inside a live heap.
+    unsafe {
+        let step = dev.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        let mut slot = heap.GetCPUDescriptorHandleForHeapStart();
+        slot.ptr += at * step as usize;
+        dev.CreateShaderResourceView(None, Some(&desc), slot);
+    }
+}
+
 /// Bindings for [`Host::dispatch`]: root arguments, the view heap in order,
 /// the sampler heap, and the group counts.
 #[cfg(test)]
@@ -1197,7 +1237,9 @@ impl Host {
                 b.Unmap(0, None);
                 Ok(b)
             };
-            let views = heap(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, d.views.len())?;
+            // A null guard slot after the views (see [`guard`]).
+            let views = heap(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, d.views.len() + 1)?;
+            null_guard(dev, &views, d.views.len());
             let samplers = heap(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, d.samplers.len())?;
             let view_size = dev
                 .GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)

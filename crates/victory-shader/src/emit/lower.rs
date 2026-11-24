@@ -302,6 +302,9 @@ struct Lower<'a> {
     counters: HashMap<usize, (V, Vec<(V, usize)>)>,
     /// The block a loop stopped by [`LOOP_LIMIT`] leaves the program from.
     abort: Option<usize>,
+    /// The host's guard slots ([`Lower::heap_guard`]), view heap then
+    /// sampler heap, read once.
+    guard_slots: [Option<V>; 2],
 }
 
 /// Iterations after which a loop is left (per entry into it), unless
@@ -798,6 +801,7 @@ impl<'a> Lower<'a> {
             code_table: None,
             counters: HashMap::new(),
             abort: None,
+            guard_slots: [None; 2],
         }
     }
 
@@ -1632,6 +1636,11 @@ impl<'a> Lower<'a> {
                 dword,
             },
         );
+        Val::I32(self.user_dword(index))
+    }
+
+    /// Dword `index` of the user-data buffer, read in the entry block.
+    fn user_dword(&mut self, index: u32) -> V {
         self.s.user_data = self.s.user_data.max(index + 1);
         let h = match self.user_data {
             Some(h) => h,
@@ -1651,7 +1660,7 @@ impl<'a> Lower<'a> {
             59,
             &[h, row],
         );
-        Val::I32(self.s.m.extract(entry, r, index % 4))
+        self.s.m.extract(entry, r, index % 4)
     }
 
     /// A dword of a lane mask as a number: the ballot of the lanes' bits,
@@ -4522,7 +4531,57 @@ impl<'a> Lower<'a> {
             addr = self.s.m.bin(c, Bin::Add, addr, so);
         }
         let shift = self.s.m.i32(if sampler { 4 } else { 5 });
-        Ok(self.s.m.bin(c, Bin::LShr, addr, shift))
+        let index = self.s.m.bin(c, Bin::LShr, addr, shift);
+        Ok(self.heap_guard(index, sampler))
+    }
+
+    /// `index` where it lies in the bound heap, else the heap's guard slot.
+    /// A heap index is an address the title's data computes; on the console
+    /// a wrong one reads some memory as a descriptor, but on the host an
+    /// index past the heap is undefined: NVIDIA wraps it onto an unrelated
+    /// slot, and a descriptor of another kind there hangs the GPU until the
+    /// driver resets the device. Data the host has not mirrored yet (stale
+    /// buffers) gives such indices. The host passes the guard slot in the
+    /// user data (an entry of the heap's [`RootType`]): past every slot a
+    /// title or table uses, null in a view heap; any sampler in a sampler
+    /// heap. Indices at or above it read it.
+    fn heap_guard(&mut self, index: V, sampler: bool) -> V {
+        let guard = match self.guard_slots[usize::from(sampler)] {
+            Some(g) => g,
+            None => {
+                // After every user-data dword the program's parameters
+                // reach, so it is no console dword.
+                let after = self
+                    .x
+                    .native
+                    .layout
+                    .iter()
+                    .map(|p| u32::from(p.user_data) + p.sgprs)
+                    .max()
+                    .unwrap_or(0);
+                let at = after + u32::from(sampler);
+                let root = if sampler {
+                    RootType::SamplerHeap
+                } else {
+                    RootType::ResourceHeap
+                };
+                self.user_reads.insert(
+                    at,
+                    UserData {
+                        index: at,
+                        slot: 0,
+                        root,
+                        dword: 0,
+                    },
+                );
+                let g = self.user_dword(at);
+                self.guard_slots[usize::from(sampler)] = Some(g);
+                g
+            }
+        };
+        let c = self.cur;
+        let inside = self.s.m.cmp(c, pred::IULT, index, guard);
+        self.s.m.select(c, inside, index, guard)
     }
 
     fn valu(&mut self, inst: &Inst, b: usize, i: usize) -> Result<(), Why> {
