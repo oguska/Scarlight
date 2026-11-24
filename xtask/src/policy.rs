@@ -28,10 +28,37 @@ const ALLOWED_NAMES: &[&str] = &[
 ];
 
 /// Paths explicitly exempted, with a reason. Keep this empty if at all possible.
-const EXCEPTIONS: &[(&str, &str)] = &[(
-    "crates/victory-formats/src/bcpack-tables.bin",
-    "the BCPack format's constant tables: nothing decodes without them and they cannot be derived (owner's decision, 2026-11-23; docs/asset-policy.md)",
-)];
+const EXCEPTIONS: &[(&str, &str)] = &[
+    (
+        "crates/victory-formats/src/bcpack-tables.bin",
+        "the BCPack format's constant tables: nothing decodes without them and they cannot be derived (owner's decision, 2026-11-23; docs/asset-policy.md)",
+    ),
+];
+
+/// Files whose type is not on the allowlist but which still get every other
+/// check (size, forbidden signatures, NUL bytes, encoded-data runs).
+const EXTENSION_EXCEPTIONS: &[(&str, &str)] = &[
+    (
+        "docs/brand/banner.svg",
+        "the README banner: a vector drawing of our own (wordmark strokes, tagline glyph outlines), text only",
+    ),
+    (
+        "docs/brand/logo.svg",
+        "the project logo: a hand-written vector drawing of our own, text only",
+    ),
+    (
+        "docs/brand/logo-mark.svg",
+        "the project mark: a hand-written vector drawing of our own, text only",
+    ),
+    (
+        "docs/brand/status.svg",
+        "the README pipeline-status graphic: a vector drawing of our own (label glyph outlines), text only",
+    ),
+    (
+        "docs/brand/divider.svg",
+        "the README section divider: a hand-written vector drawing of our own, text only",
+    ),
+];
 
 /// Signatures of formats that must never be committed.
 const FORBIDDEN_MAGIC: &[(&[u8], &str)] = &[
@@ -70,7 +97,8 @@ pub fn run(root: &Path, staged: bool) -> Result<()> {
                 Err(_) => continue,
             }
         };
-        for problem in check(path, &content) {
+        let skip_extension = EXTENSION_EXCEPTIONS.iter().any(|(p, _)| p == path);
+        for problem in check_with(path, &content, skip_extension) {
             violations.push(format!("{path}: {problem}"));
         }
     }
@@ -143,7 +171,14 @@ fn list_files(root: &Path, staged: bool) -> Result<Vec<String>> {
 }
 
 /// All problems with one file. Pure, for testing.
+#[cfg(test)]
 pub fn check(path: &str, content: &[u8]) -> Vec<String> {
+    check_with(path, content, false)
+}
+
+/// `check`, optionally skipping only the file-type allowlist (see
+/// `EXTENSION_EXCEPTIONS`).
+fn check_with(path: &str, content: &[u8], skip_extension: bool) -> Vec<String> {
     let mut problems = Vec::new();
     let name = path.rsplit('/').next().unwrap_or(path);
     let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
@@ -151,7 +186,7 @@ pub fn check(path: &str, content: &[u8]) -> Vec<String> {
         || ext
             .as_deref()
             .is_some_and(|e| ALLOWED_EXTENSIONS.contains(&e));
-    if !allowed {
+    if !allowed && !skip_extension {
         problems.push("file type not on the allowlist".to_owned());
     }
     if content.len() > MAX_FILE_SIZE {
@@ -183,7 +218,7 @@ fn longest_encoded_run(content: &[u8]) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::check;
+    use super::{check, check_with};
 
     /// Enforces the policy wherever tests run, even in clones without the hook.
     #[test]
@@ -219,5 +254,15 @@ mod tests {
     fn rejects_data_smuggled_into_text() {
         let blob = format!("const DATA: &str = \"{}\";", "A1".repeat(400));
         assert!(!check("src/blob.rs", blob.as_bytes()).is_empty());
+    }
+
+    #[test]
+    fn extension_exception_still_runs_other_checks() {
+        let svg = b"<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>";
+        assert!(check_with("docs/brand/logo.svg", svg, true).is_empty());
+        let embedded = format!("<svg><image href=\"data:image/png;base64,{}\"/></svg>", "A1".repeat(400));
+        assert!(!check_with("docs/brand/logo.svg", embedded.as_bytes(), true).is_empty());
+        assert!(!check_with("docs/brand/logo.svg", &vec![b'a'; 600 * 1024], true).is_empty());
+        assert!(!check_with("docs/brand/logo.svg", b"MZ\x90\0", true).is_empty());
     }
 }

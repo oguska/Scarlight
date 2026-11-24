@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Scarlight mark">
+<title>Scarlight</title>
+<defs>
+<linearGradient id="g" gradientUnits="userSpaceOnUse" x1="170" y1="100" x2="350" y2="390"><stop offset="0" stop-color="#ff2e63"/><stop offset=".55" stop-color="#ff7a3d"/><stop offset="1" stop-color="#ffc247"/></linearGradient>
+<filter id="blur" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="14"/></filter>
+</defs>
+<g fill="none" stroke-linecap="round" stroke-linejoin="round">
+<path d="M314.9 142A68 68 0 1 0 256 244A68 68 0 1 1 197.1 346" stroke="url(#g)" stroke-width="66" opacity=".32" filter="url(#blur)"/>
+<path d="M314.9 142A68 68 0 1 0 256 244A68 68 0 1 1 197.1 346" stroke="url(#g)" stroke-width="40"/>
+<path d="M314.9 142A68 68 0 1 0 256 244A68 68 0 1 1 197.1 346" stroke="#fff3e2" stroke-width="8.0" opacity=".92"/>
+</g>
+</svg>
