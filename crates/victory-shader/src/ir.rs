@@ -1,7 +1,8 @@
 //! One-to-one SSA form of a native program (decision 0003, step 1).
 //!
 //! Every machine instruction becomes one [`Inst`], except scheduling-only
-//! ones (`s_nop`, `s_waitcnt*`, `s_inst_prefetch`...), which are dropped.
+//! ones (`s_nop`, `s_waitcnt*`, `s_inst_prefetch`...), which are dropped, and
+//! recognized root-argument spill loads, which become scalar copies.
 //! Each register dword is a variable: a read names the [`Value`] it sees, a
 //! write defines a new one, and [`Phi`]s merge values where control flow
 //! joins. Nothing is raised: an instruction keeps its opcode and decoded
@@ -25,6 +26,8 @@ pub enum Reg {
     S(u8),
     Scc,
     V(u8),
+    /// A root argument's logical user SGPR, addressed through the spill table.
+    Spill(u8),
 }
 
 pub const VCC: u8 = 106;
@@ -40,12 +43,13 @@ pub struct Program {
     pub wave64: bool,
     /// VGPRs v0 up to this exist; bounds M0-relative access.
     pub vgprs: u16,
+    /// The root layout names spill-table arguments.
+    pub spilled: bool,
     /// In code order, then copies made to give every loop one entry; block 0
     /// is the entry.
     pub blocks: Vec<Block>,
-    /// Registers read before any write, with their value on entry: what the
-    /// hardware or a called fetch routine set up (user SGPRs, system values,
-    /// vertex inputs).
+    /// Registers and spill arguments read before any write, with their values
+    /// on entry.
     pub inputs: Vec<(Reg, Value)>,
 }
 
@@ -119,11 +123,176 @@ impl Inst {
     }
 }
 
+/// The first user SGPR that the spill table of root arguments stands for.
+const SPILL_FIRST: u8 = 16;
+const SPILL_END: u8 = 105;
+
+struct SpillLoad {
+    dst: u8,
+    first: u8,
+    dwords: u8,
+}
+
+/// Recognizes constant-offset loads from the spill table (`s[0:1]`, the high
+/// dword masked to the 40-bit address). Branch targets end pointer tracking.
+fn spill_loads(
+    list: &[Instruction],
+    wave64: bool,
+    code_len: usize,
+) -> Result<std::collections::BTreeMap<usize, SpillLoad>, ShaderError> {
+    use gfx10::Fields::{Smem, Sop, Valu};
+    let mut targets = std::collections::BTreeSet::new();
+    for inst in list {
+        let flow = gfx10::control(inst, code_len, |at| {
+            list[..list.partition_point(|i| i.offset < at)].last()
+        })?;
+        if let Flow::Jump(t) | Flow::Branch(t) = flow {
+            targets.insert(t);
+        }
+    }
+    let mut loads = std::collections::BTreeMap::new();
+    // 1: a copy of s0, 2: a copy of s1 (masked to the address's high bits).
+    let mut tag = [0u8; 128];
+    tag[0] = 1;
+    tag[1] = 2;
+    let scalar = |o: &Operand| match *o {
+        Operand::Scalar { code, dwords } if code < 106 => Some((code, dwords.max(1))),
+        _ => None,
+    };
+    for inst in list {
+        if targets.contains(&inst.offset) {
+            tag = [0; 128];
+        }
+        let f = inst.fields(wave64);
+        let name = inst.name().unwrap_or("");
+        // The load of the table.
+        if let Smem {
+            data: Some(ref d),
+            ref base,
+            offset,
+            ref soffset,
+            ..
+        } = f
+            && name.starts_with("s_load_dword")
+            && let Some((a, 2)) = scalar(base)
+            && tag[a as usize] == 1
+            && tag[a as usize + 1] == 2
+            && offset >= 0
+            && offset % 4 == 0
+            && matches!(*soffset, Operand::Scalar { code: 125, .. })
+            && let Some((dst, n)) = scalar(d)
+        {
+            let first = u32::from(SPILL_FIRST) + (offset as u32) / 4;
+            if first + u32::from(n) <= u32::from(SPILL_END) {
+                loads.insert(
+                    inst.offset,
+                    SpillLoad {
+                        dst,
+                        first: first as u8,
+                        dwords: n,
+                    },
+                );
+                for k in 0..n {
+                    tag[(dst + k) as usize] = 0;
+                }
+                continue;
+            }
+        }
+        // What this instruction does to the tracked registers.
+        let mut written: Vec<(u8, u8)> = Vec::new();
+        match &f {
+            Sop {
+                dst: Some(d), src, ..
+            } => {
+                if let Some((dc, dn)) = scalar(d) {
+                    let new = match (name, src.as_slice()) {
+                        ("s_mov_b32", [x]) => match scalar(x) {
+                            Some((c, _)) if tag[c as usize] != 0 => tag[c as usize],
+                            _ => 0,
+                        },
+                        ("s_and_b32", [x, y]) => {
+                            // `s1 & mask` with a small mask, either way round.
+                            let masked = |reg: &Operand, mask: &Operand| match (scalar(reg), mask) {
+                                (Some((c, _)), Operand::Literal(m)) => {
+                                    tag[c as usize] == 2 && *m <= 0xFFFF
+                                }
+                                (Some((c, _)), Operand::Const(k)) => {
+                                    tag[c as usize] == 2 && (129..=192).contains(k)
+                                }
+                                _ => false,
+                            };
+                            if masked(x, y) || masked(y, x) { 2 } else { 0 }
+                        }
+                        _ => 0,
+                    };
+                    if dn == 1 {
+                        tag[dc as usize] = new;
+                    } else {
+                        written.push((dc, dn));
+                    }
+                }
+            }
+            Smem { data: Some(d), .. } => written.extend(scalar(d)),
+            Valu(v) => {
+                written.extend(v.dst.as_ref().and_then(scalar));
+                written.extend(v.carry.as_ref().and_then(scalar));
+            }
+            _ => {}
+        }
+        for (c, n) in written {
+            for k in c..c.saturating_add(n).min(128) {
+                tag[k as usize] = 0;
+            }
+        }
+    }
+    Ok(loads)
+}
+
+/// A scalar copy from a logical spill argument into a physical SGPR.
+fn spill_copy(dst: u8, src: u8, offset: usize) -> Inst {
+    Inst {
+        machine: Instruction {
+            offset,
+            encoding: gfx10::Encoding::Sop1,
+            opcode: 3, // s_mov_b32
+            // The logical source is represented in fields rather than an ISA word.
+            words: Vec::new(),
+        },
+        fields: Fields::Sop {
+            dst: Some(Operand::Scalar {
+                code: dst,
+                dwords: 1,
+            }),
+            src: vec![Operand::Spill(src)],
+            imm: None,
+        },
+        reads: vec![(Reg::Spill(src), NONE)],
+        writes: vec![(Reg::S(dst), NONE)],
+    }
+}
+
 /// Decodes `code` and builds its SSA form; `vgprs` is the program's VGPR
 /// count. Fails on instructions the IR cannot express yet
 /// ([`ShaderError::Unsupported`]).
 pub fn build(code: &[u8], wave64: bool, vgprs: u16) -> Result<Program, ShaderError> {
+    build_with(code, wave64, vgprs, false)
+}
+
+/// [`build`]; with `spilled`, loads from the root-argument spill table that
+/// `s[0:1]` points to read the user SGPRs the table stands for (table dword
+/// `k` is user SGPR `16 + k`), as plain register copies.
+pub fn build_with(
+    code: &[u8],
+    wave64: bool,
+    vgprs: u16,
+    spilled: bool,
+) -> Result<Program, ShaderError> {
     let list = gfx10::decode(code)?;
+    let loads = if spilled {
+        spill_loads(&list, wave64, code.len())?
+    } else {
+        std::collections::BTreeMap::new()
+    };
     let lanes = 1 + u8::from(wave64);
     let isa = |offset, reason| ShaderError::Isa { offset, reason };
 
@@ -185,7 +354,11 @@ pub fn build(code: &[u8], wave64: bool, vgprs: u16) -> Result<Program, ShaderErr
                 Flow::Stop => Exit::End,
             };
         }
-        if let Some((reads, writes)) = effects(&machine, &fields, name, lanes, vgprs)? {
+        if let Some(load) = loads.get(&machine.offset) {
+            blocks[b].insts.extend(
+                (0..load.dwords).map(|k| spill_copy(load.dst + k, load.first + k, machine.offset)),
+            );
+        } else if let Some((reads, writes)) = effects(&machine, &fields, name, lanes, vgprs)? {
             let unset = |regs: Vec<Reg>| regs.into_iter().map(|r| (r, NONE)).collect();
             blocks[b].insts.push(Inst {
                 machine,
@@ -265,6 +438,7 @@ pub fn build(code: &[u8], wave64: bool, vgprs: u16) -> Result<Program, ShaderErr
     Ok(Program {
         wave64,
         vgprs,
+        spilled,
         blocks,
         inputs,
     })
@@ -273,7 +447,8 @@ pub fn build(code: &[u8], wave64: bool, vgprs: u16) -> Result<Program, ShaderErr
 /// Placeholder before renaming.
 const NONE: Value = Value(u32::MAX);
 /// SGPR codes 0-127, SCC, VGPRs 0-255.
-const REGS: usize = 128 + 1 + 256;
+const PHYSICAL_REGS: usize = 128 + 1 + 256;
+const REGS: usize = PHYSICAL_REGS + (SPILL_END - SPILL_FIRST) as usize;
 type RegSet = [u64; REGS.div_ceil(64)];
 
 fn index(reg: Reg) -> usize {
@@ -281,6 +456,7 @@ fn index(reg: Reg) -> usize {
         Reg::S(c) => usize::from(c),
         Reg::Scc => 128,
         Reg::V(r) => 129 + usize::from(r),
+        Reg::Spill(r) => PHYSICAL_REGS + usize::from(r - SPILL_FIRST),
     }
 }
 
@@ -288,7 +464,8 @@ fn reg_at(i: usize) -> Reg {
     match i {
         0..128 => Reg::S(i as u8),
         128 => Reg::Scc,
-        _ => Reg::V((i - 129) as u8),
+        129..PHYSICAL_REGS => Reg::V((i - 129) as u8),
+        _ => Reg::Spill(SPILL_FIRST + (i - PHYSICAL_REGS) as u8),
     }
 }
 
@@ -1019,6 +1196,7 @@ fn add_regs(op: &Operand, lanes: u8, out: &mut Vec<Reg>) -> Result<(), ()> {
             }
             out.extend((0..dwords).map(|i| Reg::V(reg + i)));
         }
+        Operand::Spill(r) => out.push(Reg::Spill(r)),
         Operand::Const(251) => out.extend((0..lanes).map(|i| Reg::S(VCC + i))),
         Operand::Const(252) => out.extend((0..lanes).map(|i| Reg::S(EXEC + i))),
         Operand::Const(253) => out.push(Reg::Scc),
@@ -1041,6 +1219,119 @@ mod tests {
 
     fn input(p: &Program, reg: Reg) -> Value {
         p.inputs.iter().find(|i| i.0 == reg).expect("input").1
+    }
+
+    /// A compute program whose root arguments are in the spill table `s[0:1]`
+    /// points to: the loads become copies of the logical user SGPRs.
+    #[test]
+    fn spill_table_loads_read_user_sgprs() {
+        let code: Vec<u8> = [
+            0xBE82_0300u32, // s_mov_b32 s2, s0
+            0x8703_FF01,    // s_and_b32 s3, s1, lit
+            0x0000_00FF,    //   0xff
+            0xF408_0201,    // s_load_dwordx4 s[8:11], s[2:3], 0x10
+            0xFA00_0010,
+            0xBE86_0308, // s_mov_b32 s6, s8
+            S_ENDPGM,
+        ]
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .collect();
+        let plain = build_with(&code, false, 256, false).unwrap();
+        assert!(
+            plain
+                .blocks
+                .iter()
+                .flat_map(|b| &b.insts)
+                .any(|i| i.name() == "s_load_dwordx4")
+        );
+        let p = build_with(&code, false, 256, true).unwrap();
+        let insts: Vec<_> = p.blocks.iter().flat_map(|b| &b.insts).collect();
+        assert!(!insts.iter().any(|i| i.name().starts_with("s_load")));
+        // Table dwords 4..8 are logical user SGPRs 20..24.
+        for k in 0..4 {
+            assert!(
+                p.inputs.iter().any(|i| i.0 == Reg::Spill(20 + k)),
+                "logical spill argument {} read",
+                20 + k,
+            );
+        }
+        // s2, the four loaded dwords, s6.
+        assert_eq!(
+            insts.iter().filter(|i| i.name() == "s_mov_b32").count(),
+            1 + 4 + 1
+        );
+    }
+
+    /// A later table load still reads the arguments as they were on entry,
+    /// although an earlier load wrote the physical SGPRs with those numbers.
+    #[test]
+    fn spill_table_loads_read_entry_values() {
+        let code: Vec<u8> = [
+            0xBE82_0300u32, // s_mov_b32 s2, s0
+            0x8703_FF01,    // s_and_b32 s3, s1, lit
+            0x0000_00FF,    //   0xff
+            0xF40C_0301,    // s_load_dwordx8 s[12:19], s[2:3], 0x10 (writes s16..s19)
+            0xFA00_0010,
+            0xF404_0101, // s_load_dwordx2 s[4:5], s[2:3], 0 (table dwords 0..1)
+            0xFA00_0000,
+            0xBE86_0304, // s_mov_b32 s6, s4
+            S_ENDPGM,
+        ]
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .collect();
+        let p = build_with(&code, false, 256, true).unwrap();
+        let insts: Vec<_> = p.blocks.iter().flat_map(|b| &b.insts).collect();
+        assert!(!insts.iter().any(|i| i.name().starts_with("s_load")));
+        // The two loads read logical user SGPRs 16..17 and 20..27.
+        for reg in (16..18).chain(20..28) {
+            assert!(
+                p.inputs.iter().any(|i| i.0 == Reg::Spill(reg)),
+                "logical spill argument {reg} read",
+            );
+        }
+        let entry = input(&p, Reg::Spill(16));
+        let copied = |v: Value| {
+            insts
+                .iter()
+                .find(|i| i.name() == "s_mov_b32" && i.writes.iter().any(|w| w.1 == v))
+                .and_then(|i| i.reads.first().map(|r| r.1))
+        };
+        let mut value = insts
+            .iter()
+            .rev()
+            .find_map(|i| i.write(Reg::S(6)))
+            .expect("s6 written");
+        while value != entry {
+            value = copied(value).expect("a chain of copies back to the entry value");
+        }
+    }
+
+    /// Loads from a pointer that is not the spill table stay loads.
+    #[test]
+    fn spill_table_leaves_other_loads() {
+        let code: Vec<u8> = [
+            0xF408_0A00u32, // s_load_dwordx4 s[8:11], s[0:1], 0 (s0:1 not yet copied: tagged)
+            0xFA00_0000,
+            0xBE82_0380, // s_mov_b32 s2, 0
+            0xF408_0201, // s_load_dwordx4 s[8:11], s[2:3], 0 (s2 overwritten)
+            0xFA00_0000,
+            S_ENDPGM,
+        ]
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .collect();
+        let p = build_with(&code, false, 256, true).unwrap();
+        let loads = p
+            .blocks
+            .iter()
+            .flat_map(|b| &b.insts)
+            .filter(|i| i.name().starts_with("s_load"))
+            .count();
+        // The first load is from s[0:1] itself, so it is rewritten; the second
+        // reads a pointer the program overwrote, so it stays.
+        assert_eq!(loads, 1);
     }
 
     #[test]
