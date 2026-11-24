@@ -37,8 +37,42 @@ pub(crate) enum C {
     TexWatched,
     TexHashed,
     TexChanged,
+    /// Pages of buffer copies: copied because written since their last
+    /// copy, and left alone because not.
+    StalePages,
+    CleanPages,
+    /// Bytes copied whole because the memory is not write-watched: whether
+    /// they were written since the last copy is unknown (a re-copy).
+    Unverified,
 }
-const COUNTERS: usize = 22;
+const COUNTERS: usize = 25;
+
+/// What a copy is for.
+#[derive(Clone, Copy)]
+pub(crate) enum Kind {
+    /// Title memory into a buffer's host copy (submit-time refresh).
+    Buffer = 0,
+    /// Title memory into title memory (a resource's first upload).
+    TitleCopy = 1,
+    /// A sampled texture's staging buffer.
+    Texture = 2,
+    /// A buffer's host copy back into title memory (what shaders wrote).
+    CopyBack = 3,
+}
+const KINDS: usize = 4;
+static KIND: [[AtomicU64; KINDS]; 3] = [
+    [const { AtomicU64::new(0) }; KINDS],
+    [const { AtomicU64::new(0) }; KINDS],
+    [const { AtomicU64::new(0) }; KINDS],
+];
+
+/// One copy of `bytes` of `kind` took `us`.
+pub(crate) fn kind(kind: Kind, bytes: usize, us: u64) {
+    let i = kind as usize;
+    KIND[0][i].fetch_add(1, Relaxed);
+    KIND[1][i].fetch_add(bytes as u64, Relaxed);
+    KIND[2][i].fetch_add(us, Relaxed);
+}
 static COUNT: [AtomicU64; COUNTERS] = [const { AtomicU64::new(0) }; COUNTERS];
 
 pub(crate) fn add(c: C, n: u64) {
@@ -126,6 +160,32 @@ pub(crate) fn log(frames: f64) {
         mb(c[C::TexWatched as usize]),
         mb(c[C::TexHashed as usize]),
         mb(c[C::TexChanged as usize]),
+    );
+    let k: Vec<f64> = (0..3)
+        .flat_map(|row| {
+            KIND[row]
+                .iter()
+                .map(move |a| a.swap(0, Relaxed) as f64 / frames)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let names = ["buffer refresh", "title copy", "texture staging", "copy-back"];
+    let mut by = String::new();
+    for (i, name) in names.iter().enumerate() {
+        by.push_str(&format!(
+            "{}{name} {:.0} calls {:.1} MB {:.1} ms",
+            if i == 0 { "" } else { "; " },
+            k[i],
+            mb(k[KINDS + i]),
+            ms(k[2 * KINDS + i])
+        ));
+    }
+    tracing::info!(
+        "copies by kind per frame: {by}; pages {:.0} copied after a write, {:.0} left alone \
+         since their last copy, {:.1} MB copied without a write watch",
+        c[C::StalePages as usize],
+        c[C::CleanPages as usize],
+        mb(c[C::Unverified as usize]),
     );
     let ranges = RANGES.lock().unwrap_or_else(|e| e.into_inner()).take();
     let mut ranges: Vec<_> = ranges.into_iter().flatten().collect();
