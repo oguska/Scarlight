@@ -22,8 +22,6 @@
 //!    on, pass every thread start and end on to the attached images.
 
 #[cfg(windows)]
-mod console_insn;
-#[cfg(windows)]
 mod crash;
 #[cfg(windows)]
 mod hooks;
