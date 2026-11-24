@@ -211,6 +211,13 @@ pub(crate) struct Module {
 }
 
 impl Module {
+    /// The instructions in the module so far: what a test checks the shape of
+    /// an emitted program by.
+    #[cfg(test)]
+    pub(crate) fn instructions(&self) -> usize {
+        self.insts.len()
+    }
+
     fn ty(&mut self, def: TypeDef) -> Ty {
         if let Some(&t) = self.type_ids.get(&def) {
             return Ty(t);
@@ -357,6 +364,19 @@ impl Module {
     pub fn new_block(&mut self) -> usize {
         self.blocks.push(Block::default());
         self.blocks.len() - 1
+    }
+
+    /// The bits of an integer or float constant (integers as stored,
+    /// sign-extended).
+    pub fn known(&self, v: V) -> Option<i64> {
+        match v {
+            V::Const(i) => match self.consts[i as usize].1 {
+                Const::Int(x) => Some(x),
+                Const::Float(bits) => Some(i64::from(bits)),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     pub fn type_of(&self, v: V) -> Ty {
