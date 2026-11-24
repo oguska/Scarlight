@@ -105,6 +105,10 @@ impl Allocation {
         self.start <= first && end <= self.end && self.is_live()
     }
 
+    pub(crate) fn is_private_span(self, first: usize, end: usize) -> bool {
+        self.private && self.contains(first / PAGE * PAGE, end.div_ceil(PAGE) * PAGE)
+    }
+
     pub(crate) fn is_empty_private(self, first: usize, end: usize) -> bool {
         self.private && self.empty && self.contains(first, end)
     }
@@ -240,6 +244,11 @@ impl Journal {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static KERNEL_WATCH_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 static JOURNAL: Mutex<Journal> = Mutex::new(Journal {
     asked: 0,
     changes: BTreeMap::new(),
@@ -308,6 +317,8 @@ fn query(
     #[cfg(feature = "diagnostics")]
     let started = std::time::Instant::now();
     let mut ask = |flags| {
+        #[cfg(test)]
+        KERNEL_WATCH_CALLS.with(|calls| calls.set(calls.get() + 1));
         let mut count = capacity;
         let mut granularity = 0;
         // SAFETY: the answer buffer holds `capacity` entries.
@@ -624,6 +635,81 @@ pub(crate) mod tests {
         VirtualFree,
     };
     const MEM_WRITE_WATCH: u32 = 0x20_0000;
+
+    #[test]
+    fn journal_index_preserves_order_bounds_and_older_observers() {
+        let mut journal = Journal {
+            asked: 12,
+            changes: BTreeMap::new(),
+            found: Vec::new(),
+        };
+        Journal::record(&mut journal.changes, 62, 66, 3);
+        Journal::record(&mut journal.changes, 65, 66, 8);
+        Journal::record(&mut journal.changes, 128, 130, 12);
+
+        assert_eq!(journal.since(63, 129, 7), (12, vec![(65, 8), (128, 12)]));
+        assert_eq!(journal.since(64, 129, 10), (12, vec![(128, 12)]));
+        assert_eq!(
+            journal.since(63, 66, 0),
+            (12, vec![(63, 3), (64, 3), (65, 8)])
+        );
+        assert_eq!(journal.since(63, 129, 12), (12, Vec::new()));
+    }
+
+    #[test]
+    fn clean_guarded_observation_sees_later_title_and_runtime_writes() {
+        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::System::Memory::{
+            CreateFileMappingW, FILE_MAP_WRITE, MapViewOfFile, UnmapViewOfFile,
+        };
+        // SAFETY: this test owns the anonymous section and its view.
+        let (section, view) = unsafe {
+            let section = CreateFileMappingW(
+                INVALID_HANDLE_VALUE,
+                std::ptr::null(),
+                PAGE_READWRITE,
+                0,
+                (2 * BLOCK) as u32,
+                std::ptr::null(),
+            );
+            assert!(!section.is_null());
+            (
+                section,
+                MapViewOfFile(section, FILE_MAP_WRITE, 0, 0, 2 * BLOCK),
+            )
+        };
+        let start = view.Value as usize;
+        assert_ne!(start, 0);
+        let end = start + 2 * BLOCK;
+        let (at, _) = writes(start, end, true).unwrap();
+        let native_before = KERNEL_WATCH_CALLS.with(|calls| calls.get());
+        let (clean, changes) = shadow_writes(start, end, at, &mut None).unwrap();
+        assert!(changes.is_empty());
+        assert_eq!(KERNEL_WATCH_CALLS.with(|calls| calls.get()), native_before);
+
+        // SAFETY: a CPU store to our mapped view opens its tracked guard.
+        unsafe { view.Value.cast::<u8>().write(7) };
+        let mut region = None;
+        let (dirty, changes) = shadow_writes(start, end, clean, &mut region).unwrap();
+        assert_eq!(changes, [(start / PAGE, dirty)]);
+        assert!(
+            region.is_none(),
+            "the dirty guard still belongs to the known view"
+        );
+        writing(start + BLOCK, 1);
+        let (opened, changes) = shadow_writes(start, end, dirty, &mut None).unwrap();
+        assert_eq!(changes, [(start / PAGE + 1, opened)]);
+
+        // SAFETY: unmap and close the test's own view and section.
+        unsafe {
+            assert_ne!(UnmapViewOfFile(view), 0);
+            assert_ne!(CloseHandle(section), 0);
+        }
+        title_memory_remapped(start, 2 * BLOCK);
+        let g = guards();
+        assert!(!g.views.contains(&(start / BLOCK)));
+        assert!(!g.clean.contains(&(start / BLOCK)));
+    }
 
     #[test]
     fn written_pages_are_reported_to_every_asker() {
