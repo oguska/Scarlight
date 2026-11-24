@@ -5,7 +5,7 @@
 //! `v_med3_f32`/`v_med3_f16` with NaN operands, `v_fract_f32`/`v_fract_f16`
 //! near `1.0`, and turn-range reduction for `v_sin_*`/`v_cos_*`.
 
-use super::host::{Dispatch, Host, Root, View};
+use super::host::{Dispatch, Host, Root, Unavailable, View};
 use super::{HostShader, lower, validator};
 use crate::native::{
     ComputeIo, HwStage, NativeProgram, ResourceType, RootParam, RootType, StageIo, UsedResource,
@@ -256,9 +256,16 @@ fn run_cases_on(
     let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     let mut ran = 0;
     for &(label, warp) in backends {
-        let Ok(host) = Host::new(warp) else {
-            eprintln!("no SM 6.6 {label} device; skipped");
-            continue;
+        // Only a missing adapter (a runner without a GPU, or a platform
+        // without WARP) and a device below SM 6.6 skip: a DXGI or D3D12
+        // failure on a machine that has one fails the test.
+        let host = match Host::new(warp) {
+            Ok(host) => host,
+            Err(Unavailable::NoSm66Adapter | Unavailable::BelowSm66(_)) => {
+                eprintln!("no SM 6.6 {label} device; skipped");
+                continue;
+            }
+            Err(e) => panic!("{label}: {e}"),
         };
         let (root, pso) = host
             .compute_pipeline(shader)
@@ -288,7 +295,12 @@ fn run_cases_on(
         }
         ran += 1;
     }
-    assert!(ran > 0, "no SM 6.6 device of {backends:?} available");
+    if ran == 0 {
+        // A runner without an SM 6.6 adapter (CI, a headless box) skips, as
+        // the other device tests here do; a machine that has one still fails
+        // on the first mismatched case.
+        eprintln!("no SM 6.6 device of {backends:?}; skipped");
+    }
 }
 
 fn is_f16_nan(bits: u16) -> bool {
@@ -1090,9 +1102,9 @@ fn run_wave_cs(wave64: bool, body: &[u32], mut check: impl FnMut(&str, &[u32])) 
         samplers: lowered.samplers,
         static_samplers: Vec::new(),
         root_cbvs: lowered.root_cbvs,
+        stride_table: lowered.stride_table,
         root_srvs: lowered.root_srvs,
         root_uavs: lowered.root_uavs,
-        stride_table: lowered.stride_table,
     };
 
     if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
@@ -1103,9 +1115,13 @@ fn run_wave_cs(wave64: bool, body: &[u32], mut check: impl FnMut(&str, &[u32])) 
     let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     let mut ran = 0;
     for (label, warp) in [("hardware", false), ("warp", true)] {
-        let Ok(host) = Host::new(warp) else {
-            eprintln!("no SM 6.6 {label} device; skipped");
-            continue;
+        let host = match Host::new(warp) {
+            Ok(host) => host,
+            Err(Unavailable::NoSm66Adapter | Unavailable::BelowSm66(_)) => {
+                eprintln!("no SM 6.6 {label} device; skipped");
+                continue;
+            }
+            Err(e) => panic!("{label}: {e}"),
         };
         let (root, pso) = match host.compute_pipeline(&shader) {
             Ok(p) => p,
@@ -1321,7 +1337,10 @@ const fn ds(op: u8, vdst: u8, addr: u8, data0: u8, offset: u16) -> [u32; 2] {
     ]
 }
 
-/// LDS programs here are one wave: wave 32, which WARP cannot run.
+/// LDS programs here are one wave: wave 32, which WARP cannot run, so these
+/// cases run on the hardware adapter only. A machine without a GPU (a CI
+/// runner) has no hardware adapter at all: `Host::new(false)` finds none and
+/// they skip.
 const HARDWARE: &[(&str, bool)] = &[("hardware", false)];
 
 const DS_WRITE_B32: u8 = 0x0d;
