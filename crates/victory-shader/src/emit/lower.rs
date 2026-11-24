@@ -4749,7 +4749,7 @@ impl<'a> Lower<'a> {
             // check reads zero and drops the write, as the contract says.
             let limit = self.s.m.i32(u32::MAX / stride);
             let over = self.s.m.cmp(c, pred::IUGT, index, limit);
-            let far = self.s.m.i32(u32::MAX & !15);
+            let far = self.s.m.i32(!15u32);
             let at = self.s.m.select(c, over, far, at);
             let at = self.s.m.bin(c, Bin::Add, at, off);
             let h = self.handle(site, src, false, (11 | u, 0))?;

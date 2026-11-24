@@ -671,6 +671,8 @@ impl State {
         // The slot is keyed to the shadow its descriptor was built from too:
         // the title can release a buffer and register another at the same
         // start within one list, and the cached slot points at the old one.
+        // SAFETY: a shadow in the table names a buffer the title keeps alive
+        // while the table holds it; this only reads its address.
         let buffer = shadow
             .as_ref()
             .map_or(0, |(_, s)| unsafe { s.buffer.GetGPUVirtualAddress() });
