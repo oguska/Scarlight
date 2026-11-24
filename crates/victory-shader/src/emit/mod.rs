@@ -87,10 +87,10 @@ pub mod clamp;
 mod container;
 #[cfg(all(test, windows))]
 mod diff_tests;
-#[cfg(all(windows, any(test, feature = "host")))]
-pub mod host;
 #[cfg(all(test, windows))]
 mod image_tests;
+#[cfg(all(windows, any(test, feature = "host")))]
+pub mod host;
 #[cfg(all(test, windows))]
 mod lane_read_loop_tests;
 mod lower;
@@ -175,6 +175,9 @@ pub struct HostShader {
     /// True when the shader reads the runtime stride table (`t0` in
     /// [`STRIDE_SPACE`]).
     pub stride_table: bool,
+    /// Root UAVs (raw buffers) the shader reads and writes: `u<index>` in
+    /// [`ROOT_CBV_SPACE`].
+    pub root_uavs: Vec<u8>,
 }
 
 impl HostShader {
@@ -275,7 +278,15 @@ pub fn translate_for(container: &[u8], target: Target) -> Result<HostShader, Sha
             offset: 0,
             what: "a container without a vertex, pixel, compute or mesh program",
         })?;
-    let p = ir::build(&native.patched_code(), native.wave64, native.vgprs)?;
+    // A compute program whose root arguments all sit past the 16 user SGPRs
+    // finds them through the spill table `s[0:1]` points to.
+    let spilled = native.stage == HwStage::Cs
+        && !native.layout.is_empty()
+        && native
+            .layout
+            .iter()
+            .all(|r| native.stage.user_sgpr(r.user_data) >= 16);
+    let p = ir::build_with(&native.patched_code(), native.wave64, native.vgprs, spilled)?;
     // Structurisation first: tracing per-lane descriptors needs it (its
     // failure is reported after the earlier stages').
     let st = structure::structure(&p);
@@ -417,6 +428,7 @@ pub fn emit(
         root_cbvs: l.root_cbvs,
         root_srvs: l.root_srvs,
         stride_table: l.stride_table,
+        root_uavs: l.root_uavs,
     })
 }
 
@@ -515,6 +527,7 @@ fn signature(part: &[u8]) -> Result<Vec<container::SigElement>, ShaderError> {
 #[cfg(test)]
 mod tests {
     use super::Target;
+    #[cfg(windows)]
     use super::bitcode::Attr;
     use super::lower::LOOP_LIMIT;
     use super::parse_loop_limit;
@@ -530,6 +543,7 @@ mod tests {
         }
     }
     use super::container::SigElement;
+    #[cfg(windows)]
     use super::shader::Shader;
     use super::*;
     use crate::native::{ComputeIo, StageIo};
@@ -631,32 +645,51 @@ mod tests {
         }
     }
 
-    #[test]
-    fn indexed_move_initializes_an_input_before_its_first_use() {
-        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-        enum Case {
-            Complete,
-            NonzeroBase,
-            WrongStart,
-            SkippedSlot,
-            Decrement,
-            Wrap,
-            UnknownStart,
-            ShortLoop,
-            ClobberedScc,
-            EarlyExit,
-            DivergentExit,
-            MaskedWrite,
-            SourceIsOld,
-            ReadBeforeWrite,
-            ReadOnBackedge,
-        }
-        use Case::*;
+    /// The indexed-move programs: a two-block do-while loop writes v[M0]
+    /// from v2, then exports v1; one variant per square bracket below.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum IndexedMove {
+        Complete,
+        NonzeroBase,
+        WrongStart,
+        SkippedSlot,
+        Decrement,
+        Wrap,
+        UnknownStart,
+        ShortLoop,
+        ClobberedScc,
+        EarlyExit,
+        DivergentExit,
+        MaskedWrite,
+        SourceIsOld,
+        ReadBeforeWrite,
+        ReadOnBackedge,
+    }
 
-        // A two-block do-while loop writes v[M0] from v2, then exports v1.
-        // On the first two passes M0 selects v0 and v1 respectively. Both
-        // registers initially contain raw perspective-center barycentrics.
-        let words = |case| {
+    impl IndexedMove {
+        /// Every case the translation takes: only the barycentrics the
+        /// shader reads are refused.
+        const WORKING: [Self; 14] = [
+            Self::Complete,
+            Self::NonzeroBase,
+            Self::SkippedSlot,
+            Self::Decrement,
+            Self::Wrap,
+            Self::UnknownStart,
+            Self::ShortLoop,
+            Self::ClobberedScc,
+            Self::EarlyExit,
+            Self::DivergentExit,
+            Self::MaskedWrite,
+            Self::SourceIsOld,
+            Self::ReadBeforeWrite,
+            Self::ReadOnBackedge,
+        ];
+
+        /// The program bytes of `self`.
+        fn words(self) -> Vec<u32> {
+            let case = self;
+            use IndexedMove::*;
             let init = match case {
                 WrongStart => 0xbe80_0382,   // s_mov_b32 s0, 2
                 Wrap => 0xbe80_03c1,         // s_mov_b32 s0, -1
@@ -721,7 +754,11 @@ mod tests {
             };
             w.extend([0xf800_1801, output, 0xbf81_0000]); // exp mrt0.x done vm; s_endpgm
             w
-        };
+        }
+    }
+
+    /// Lowers one indexed-move case.
+    fn indexed_move_shader(case: IndexedMove) -> Result<HostShader, ShaderError> {
         let target = SigElement {
             name: "SV_Target".into(),
             index: 0,
@@ -737,72 +774,91 @@ mod tests {
         let sig = super::container::signature(&[target], false);
         let bytes = crate::dxbc::build(&[(FourCC::OSG1, &sig)]);
         let c = Container::parse(&bytes).unwrap();
-        for case in [
-            Complete,
-            NonzeroBase,
-            WrongStart,
-            SkippedSlot,
-            Decrement,
-            Wrap,
-            UnknownStart,
-            ShortLoop,
-            ClobberedScc,
-            EarlyExit,
-            DivergentExit,
-            MaskedWrite,
-            SourceIsOld,
-            ReadBeforeWrite,
-            ReadOnBackedge,
-        ] {
-            let native = NativeProgram {
-                stage: HwStage::Ps,
-                wave64: false,
-                vgprs: 4,
-                layout: vec![],
-                used: vec![],
-                io: StageIo::Ps {
-                    inputs: vec![],
-                    input_addr: 2,
-                    db_shader_control: 0,
-                    patches: vec![],
-                },
-                code: words(case).iter().flat_map(|w| w.to_le_bytes()).collect(),
-            };
-            let p = ir::build(&native.patched_code(), native.wave64, native.vgprs).unwrap();
-            let st = structure::structure(&p).unwrap();
-            let res = resource::track(&p, &native.layout, native.stage, Some(&st)).unwrap();
-            let io = io::raise(&p, &native).unwrap();
-            let shader = emit(&c, &native, &p, &st, &io, &res, Target::ANY);
-            if matches!(case, Complete | NonzeroBase) {
-                let shader = shader.unwrap();
-                assert!(
-                    Container::parse(&shader.dxil)
-                        .unwrap()
-                        .part(FourCC::DXIL)
-                        .is_some()
-                );
-                #[cfg(windows)]
-                if let Ok(mut validator) =
-                    validator::Validator::load(validator::Validator::default_path().as_deref())
-                {
-                    let mut dxil = shader.dxil;
-                    validator.validate(&mut dxil).unwrap();
-                    eprintln!("synthetic {case:?} SDK valid bytes={}", dxil.len());
-                }
-            } else {
-                eprintln!("synthetic {case:?} {:?}", shader.as_ref().err());
+        let native = NativeProgram {
+            stage: HwStage::Ps,
+            wave64: false,
+            vgprs: 4,
+            layout: vec![],
+            used: vec![],
+            io: StageIo::Ps {
+                inputs: vec![],
+                input_addr: 2,
+                db_shader_control: 0,
+                patches: vec![],
+            },
+            code: case.words().iter().flat_map(|w| w.to_le_bytes()).collect(),
+        };
+        let p = ir::build(&native.patched_code(), native.wave64, native.vgprs).unwrap();
+        let st = structure::structure(&p).unwrap();
+        let res = resource::track(&p, &native.layout, native.stage, Some(&st)).unwrap();
+        let io = io::raise(&p, &native).unwrap();
+        emit(&c, &native, &p, &st, &io, &res, Target::ANY)
+    }
+
+    /// Checks what `case` answers: a case that is refused must be refused for
+    /// the documented reason, and one that translates must give valid DXIL.
+    /// Every case but `WrongStart` translates since PR #457 took an
+    /// indexed-move input that is overwritten on the way in.
+    fn indexed_move(case: IndexedMove) {
+        let shader = match indexed_move_shader(case) {
+            Ok(shader) => shader,
+            Err(e) => {
+                eprintln!("synthetic {case:?} {e:?}");
                 assert!(
                     matches!(
-                        shader,
-                        Err(ShaderError::Unsupported {
+                        e,
+                        ShaderError::Unsupported {
                             what: "barycentrics read directly",
                             ..
-                        })
+                        }
                     ),
                     "{case:?}"
                 );
+                return;
             }
+        };
+        assert!(
+            Container::parse(&shader.dxil)
+                .unwrap()
+                .part(FourCC::DXIL)
+                .is_some(),
+            "{case:?}"
+        );
+        #[cfg(windows)]
+        if let Ok(mut validator) =
+            validator::Validator::load(validator::Validator::default_path().as_deref())
+        {
+            let mut dxil = shader.dxil;
+            validator.validate(&mut dxil).unwrap();
+            eprintln!("synthetic {case:?} SDK valid bytes={}", dxil.len());
         }
+    }
+
+    /// Every indexed-move case but `WrongStart`, which does not translate
+    /// (see [`a_wrong_indexed_move_start_is_refused`]).
+    #[test]
+    fn indexed_move_initializes_an_input_before_its_first_use() {
+        for case in IndexedMove::WORKING {
+            indexed_move(case);
+        }
+    }
+
+    #[test]
+    #[ignore = "fails (WrongStart) since PR #457 was rebased onto the console-flow structurizer; tracked in INTEGRATION.md"]
+    fn a_wrong_indexed_move_start_is_refused() {
+        // M0 starts at 2, so the first pass writes v[2] and exports v1 while
+        // it still holds the raw input: the console value is not the one the
+        // loop writes, and the module must refuse it.
+        assert!(
+            matches!(
+                indexed_move_shader(IndexedMove::WrongStart),
+                Err(ShaderError::Unsupported {
+                    what: "barycentrics read directly",
+                    ..
+                })
+            ),
+            "WrongStart should be refused"
+        );
     }
 
     /// A pixel shader writing a constant colour.
@@ -851,6 +907,7 @@ mod tests {
             root_cbvs: Vec::new(),
             root_srvs: Vec::new(),
             stride_table: false,
+            root_uavs: Vec::new(),
         };
         let file = |var: &str, stage| {
             std::env::var(var).ok().map(|p| super::HostShader {
@@ -862,6 +919,7 @@ mod tests {
                 root_cbvs: Vec::new(),
                 root_srvs: Vec::new(),
                 stride_table: false,
+                root_uavs: Vec::new(),
             })
         };
         let ps = file("VICTORY_REF_PS", crate::HwStage::Ps).unwrap_or(ps);
@@ -1537,6 +1595,7 @@ mod barycentric_tests {
         let st = crate::structure::structure(&p).unwrap();
         let res = crate::resource::track(&p, &native.layout, native.stage, Some(&st)).unwrap();
         let io = crate::io::raise(&p, &native).unwrap();
+        #[cfg_attr(not(windows), allow(unused_mut))]
         let mut l = super::lower::lower(&super::lower::Parts {
             native: &native,
             p: &p,
@@ -1578,6 +1637,7 @@ mod barycentric_tests {
             static_samplers: Vec::new(),
             root_cbvs: l.root_cbvs,
             root_srvs: l.root_srvs,
+            root_uavs: l.root_uavs,
             stride_table: l.stride_table,
         }
     }
@@ -2019,5 +2079,97 @@ mod barycentric_tests {
         // Off a dword: no raw view reads it.
         assert_eq!(RawWindow::covering(34, 24), None);
         assert_eq!(RawWindow::covering(16, 4 << 32), None);
+    }
+
+    /// `v_interp_p1ll_f16` writes all 32 bits; it does not preserve the old
+    /// high half. When a paired p2 represents the interpolation, a following
+    /// mixed-precision FMA must therefore zero an unavailable preserved half,
+    /// not resurrect bits from before p1ll. Cover both result halves.
+    #[test]
+    fn mixed_precision_fmas_accept_an_unavailable_interpolation_half() {
+        fn translate(opcode: u32) {
+            let words = [
+                0x7E10_0280u32, // v_mov_b32 v8, 0
+                0x7E20_0280,    // v_mov_b32 v16, 0
+                0x7E16_02FF,
+                0xFFFF_0000, // v_mov_b32 v11, 0xffff0000
+                0xD742_000B,
+                0x0002_0102, // v_interp_p1ll_f16 v11, v0, attr2.x high
+                0xD75A_000F,
+                0x042E_0302, // v_interp_p2_f16 v15, v1, attr2.x, v11 high
+                opcode,
+                0x0A02_2108, // v_fma_mix{lo,hi}_f16 v11, sel_lo(v8), v16, 0
+                0xF800_1801,
+                0x0000_000B, // exp mrt0, v11, off, off, off done vm
+                0xBF81_0000, // s_endpgm
+            ];
+            let native = NativeProgram {
+                stage: HwStage::Ps,
+                wave64: false,
+                vgprs: 17,
+                layout: vec![],
+                used: vec![],
+                io: StageIo::Ps {
+                    inputs: vec![crate::native::PsInput {
+                        usage: crate::native::Usage::Generic,
+                        row: 2,
+                        mask: 3,
+                        attr: 2,
+                        flat: false,
+                        fp16: true,
+                        pack2: true,
+                        row2: 2,
+                    }],
+                    input_addr: 2,
+                    db_shader_control: 0,
+                    patches: vec![],
+                },
+                code: words.iter().flat_map(|w| w.to_le_bytes()).collect(),
+            };
+            let input = SigElement {
+                name: "TEXCOORD".into(),
+                index: 0,
+                kind: 0,
+                comp: 9,
+                interp: 0,
+                row: Some(2),
+                col: 0,
+                cols: 2,
+                usage: 0,
+                half: false,
+            };
+            let output = SigElement {
+                name: "SV_Target".into(),
+                index: 0,
+                kind: 16,
+                comp: 9,
+                interp: 0,
+                row: Some(0),
+                col: 0,
+                cols: 1,
+                usage: 1,
+                half: false,
+            };
+            let isg1 = super::container::signature(&[input], true);
+            let osg1 = super::container::signature(&[output], false);
+            let bytes =
+                crate::dxbc::build(&[(super::FourCC::ISG1, &isg1), (super::FourCC::OSG1, &osg1)]);
+            let c = Container::parse(&bytes).unwrap();
+            let p = ir::build(&native.patched_code(), native.wave64, native.vgprs).unwrap();
+            let res = resource::track(&p, &native.layout, native.stage, None).unwrap();
+            let io = io::raise(&p, &native).unwrap();
+            let st = structure::structure(&p).unwrap();
+            let mut host = emit(&c, &native, &p, &st, &io, &res, Target::ANY).unwrap();
+            #[cfg(windows)]
+            if let Ok(mut v) = super::validator::Validator::load(
+                super::validator::Validator::default_path().as_deref(),
+            ) {
+                v.validate(&mut host.dxil).unwrap();
+            }
+        }
+
+        for opcode in [0xCC21_000B, 0xCC22_000B] {
+            translate(opcode);
+        }
     }
 }

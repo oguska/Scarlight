@@ -342,7 +342,8 @@ impl Shader {
         h
     }
 
-    /// The handle of the root UAV (a raw buffer) of root parameter `slot`.
+    /// The handle of the root UAV (a raw buffer the shader may write) of
+    /// root parameter `slot`: `u<slot>` in [`ROOT_CBV_SPACE`].
     pub fn root_uav_handle(&mut self, slot: u8) -> V {
         if let Some(&(_, h)) = self.root_uavs.iter().find(|r| r.0 == slot) {
             return h;
@@ -360,7 +361,7 @@ impl Shader {
             217,
             &[bind, r, f],
         );
-        // A raw buffer, as a UAV.
+        // A raw buffer with unordered access.
         let h = self.annotate(block, h, 11 | 0x1000, 0);
         self.flags |= flags::RAW_BUFFERS;
         self.root_uavs.push((slot, h));
@@ -643,13 +644,13 @@ impl Shader {
                 samplers = Some(self.m.md_node(list));
             }
             resources = Some(self.m.md_node(vec![srvs, uavs, cbvs, samplers]));
-            // PSV0 lists them as the module does: CBVs, samplers, SRVs,
-            // UAVs.
+            // PSV0 lists them as the module does: CBVs, samplers, SRVs, UAVs.
             bindings.sort_by_key(|b| match b.kind {
                 2 => 0,
                 1 => 1,
                 4 => 2,
-                _ => 3,
+                7 => 3,
+                _ => 2,
             });
         }
         if let Some(r) = resources {
