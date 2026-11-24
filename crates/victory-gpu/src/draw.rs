@@ -778,6 +778,7 @@ impl State {
             return;
         };
         if let Some(view) = host.mirror(index, handle, true) {
+            host.refresh_slot(index, list);
             readable(list, u, &view);
         }
     }
@@ -864,6 +865,7 @@ impl State {
             if let Some(&first) = self.fresh_tables.get(&key) {
                 for u in entries.iter().filter(|u| u.kind != ResourceType::Cbv) {
                     let handle = table + u64::from(u.table_offset_dwords) * 4;
+                    host.refresh_slot(first + u.table_offset_dwords / 8, list);
                     if let Some(view) = crate::descriptor::view(handle) {
                         readable(list, u, &view);
                     }
@@ -899,6 +901,7 @@ impl State {
                     }
                     Some(view) => {
                         host.make_at(index, &view);
+                        host.refresh_slot(index, list);
                         if let Some(u) = used {
                             readable(list, u, &view);
                         }

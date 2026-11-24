@@ -9361,6 +9361,7 @@ mod tests {
 #[cfg(test)]
 mod select_tests {
     use super::super::emit;
+    use super::super::Target;
     use crate::native::{ComputeIo, RootParam};
     use crate::{Container, FourCC, HwStage, NativeProgram, ResourceType, RootType, UsedResource};
 
@@ -9517,7 +9518,12 @@ mod select_tests {
         let st = crate::structure::structure(&p).unwrap();
         let io = crate::io::raise(&p, &native).unwrap();
         let res = crate::resource::track(&p, &native.layout, native.stage, Some(&st)).unwrap();
-        let shader = emit(&c, &native, &p, &st, &io, &res).unwrap();
+        let mut shader = emit(&c, &native, &p, &st, &io, &res, Target::ANY).unwrap();
         assert!(!shader.dxil.is_empty());
+        #[cfg(windows)]
+        if let Ok(mut v) = crate::emit::validator::Validator::load(None) {
+            v.validate(&mut shader.dxil)
+                .expect("structured scalar SRV load DXIL must validate");
+        }
     }
 }
