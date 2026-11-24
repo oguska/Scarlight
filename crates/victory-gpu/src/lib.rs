@@ -44,6 +44,7 @@ pub mod resource;
 pub mod root;
 #[cfg(windows)]
 mod sampler;
+mod scissor;
 #[cfg(windows)]
 pub mod shader_cache;
 #[cfg(windows)]
