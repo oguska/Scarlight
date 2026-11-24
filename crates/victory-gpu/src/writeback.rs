@@ -123,7 +123,7 @@ fn worker() -> &'static Worker {
                         crate::watch::back_open(*at, *bytes);
                         what.write(*at as *mut u8, *bytes);
                     }
-                    crate::watch::back_release(&job.blocks);
+                    crate::watch::back_release(&job.blocks, &job.done());
                     job.done.finish();
                     #[cfg(feature = "diagnostics")]
                     {

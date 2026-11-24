@@ -271,7 +271,12 @@ pub(crate) fn back_begin(done: &Arc<Done>, at: usize, len: usize) -> Vec<usize> 
     let mut taken = Vec::new();
     let mut back = back();
     for block in first..last {
-        if back.contains_key(&block) {
+        if let Some(&(old, _)) = back.get(&block) {
+            // An earlier job still holds it: the hold passes to this job, so
+            // it stays inaccessible until this one has written too. The
+            // earlier job's release will not lift it (see `back_release`).
+            back.insert(block, (old, done.clone()));
+            taken.push(block);
             continue;
         }
         let mut old = 0;
@@ -287,11 +292,19 @@ pub(crate) fn back_begin(done: &Arc<Done>, at: usize, len: usize) -> Vec<usize> 
     taken
 }
 
-/// After the job: gives the blocks back the protection they had.
-pub(crate) fn back_release(blocks: &[usize]) {
+/// After the job: gives the blocks back the protection they had. Only the
+/// blocks it still holds: one a later job took ([`back_begin`]) stays
+/// inaccessible until that job is done, and that job restores it.
+pub(crate) fn back_release(blocks: &[usize], done: &Arc<Done>) {
     use windows_sys::Win32::System::Memory::VirtualProtect;
     let mut back = back();
     for &block in blocks {
+        if !back
+            .get(&block)
+            .is_some_and(|(_, d)| std::sync::Arc::ptr_eq(d, done))
+        {
+            continue;
+        }
         if let Some((old, _)) = back.remove(&block) {
             let mut was = 0;
             // SAFETY: a block this job made inaccessible.
@@ -312,14 +325,29 @@ pub(crate) fn back_pending(at: usize) -> Option<Arc<Done>> {
 pub(crate) fn back_open(at: usize, len: usize) {
     use windows_sys::Win32::System::Memory::{PAGE_READWRITE, VirtualProtect};
     let (first, last) = (at / BLOCK, at.saturating_add(len).div_ceil(BLOCK));
-    let mut back = back();
-    for block in first..last {
-        if back.remove(&block).is_some() {
-            let mut old = 0;
-            // SAFETY: a block a write-back job made inaccessible.
-            unsafe {
-                VirtualProtect((block * BLOCK) as *const _, BLOCK, PAGE_READWRITE, &mut old)
-            };
+    let mut opened = Vec::new();
+    {
+        let mut back = back();
+        for block in first..last {
+            if back.remove(&block).is_some() {
+                let mut old = 0;
+                // SAFETY: a block a write-back job made inaccessible.
+                unsafe {
+                    VirtualProtect((block * BLOCK) as *const _, BLOCK, PAGE_READWRITE, &mut old)
+                };
+                opened.push(block);
+            }
+        }
+    }
+    // The bytes at `[at, at + len)` are the caller's now. A guarded block in
+    // range must not stay recorded as clean: the kernel's write did not fault
+    // into `open`, and the next copy would take the block as unchanged and
+    // skip it.
+    if !opened.is_empty() {
+        let mut g = guards();
+        for block in opened {
+            g.protected.remove(&block);
+            g.clean.remove(&block);
         }
     }
 }
@@ -408,15 +436,14 @@ fn install() {
         // SAFETY: the system passes the exception being dispatched.
         let r = unsafe { &*(*info).ExceptionRecord };
         const WRITE: usize = 1;
-        if r.ExceptionCode != EXCEPTION_ACCESS_VIOLATION as NTSTATUS
-            || r.NumberParameters < 2
-            || r.ExceptionInformation[0] != WRITE
-        {
+        if r.ExceptionCode != EXCEPTION_ACCESS_VIOLATION as NTSTATUS || r.NumberParameters < 2 {
             return EXCEPTION_CONTINUE_SEARCH;
         }
+        let is_write = r.ExceptionInformation[0] == WRITE;
         let at = r.ExceptionInformation[1];
-        // A write-back job has this block: wait for the GPU's bytes to be
-        // put back before the instruction reads or writes them.
+        // A write-back job has this block (it is inaccessible to both reads
+        // and writes): wait for the GPU's bytes to be put back before the
+        // instruction reads or writes them.
         if let Some(done) = back_pending(at) {
             // The worker itself must never wait for its own job: it opens the
             // block and goes on (its write is the one to wait for).
@@ -438,6 +465,10 @@ fn install() {
             // The job released the block (or wrote it, through the kernel).
             // Retry: if a newer job holds it again, the fault comes back here.
             return EXCEPTION_CONTINUE_EXECUTION;
+        }
+        if !is_write {
+            // A read of memory that is not ours: as before, someone else's.
+            return EXCEPTION_CONTINUE_SEARCH;
         }
         // Held across both checks: another thread may have opened the block
         // since this one faulted, and a copy may have guarded it again since
@@ -502,9 +533,40 @@ mod tests {
         assert!(!writable(at), "held inaccessible while the job runs");
         assert!(back_pending(at + BLOCK).is_some());
         done.finish();
-        back_release(&blocks);
+        back_release(&blocks, &done);
         assert!(writable(at), "given back after the job");
         assert!(back_pending(at).is_none());
+        // SAFETY: the memory allocated above.
+        unsafe { VirtualFree(at as *mut _, 0, MEM_RELEASE) };
+    }
+
+    /// A block a job holds passes to the next job that declares it: the
+    /// earlier job's release does not give it back while the later job's
+    /// copy-back is still queued.
+    #[test]
+    fn a_held_block_passes_to_the_next_job() {
+        // SAFETY: one block of private memory, freed at the end.
+        let at = unsafe {
+            VirtualAlloc(
+                std::ptr::null(),
+                BLOCK,
+                MEM_COMMIT | MEM_RESERVE,
+                PAGE_READWRITE,
+            ) as usize
+        };
+        assert_ne!(at, 0);
+        let first = Arc::new(Done::default());
+        let second = Arc::new(Done::default());
+        let taken = back_begin(&first, at, BLOCK);
+        assert_eq!(taken, [at / BLOCK]);
+        let taken_again = back_begin(&second, at, BLOCK);
+        assert_eq!(taken_again, [at / BLOCK], "the later job takes the block");
+        first.finish();
+        back_release(&taken, &first);
+        assert!(!writable(at), "still inaccessible: the later job's bytes are not in");
+        second.finish();
+        back_release(&taken_again, &second);
+        assert!(writable(at), "given back by the job that last held it");
         // SAFETY: the memory allocated above.
         unsafe { VirtualFree(at as *mut _, 0, MEM_RELEASE) };
     }
