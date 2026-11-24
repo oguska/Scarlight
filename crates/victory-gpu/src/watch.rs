@@ -1468,7 +1468,11 @@ pub(crate) mod tests {
         // SAFETY: the last byte of the live watched reservation.
         unsafe { first.0.cast::<u8>().add(watched - 1).write(9) };
         assert_eq!(shadow.update(start + watched - 4, 8), 8);
-        assert_eq!(shadow.update(start, watched), PAGE - 4);
+        // A failed probe copies whole through `Shadow::copy`, which has no
+        // write time to record, so the last page's copied mark stays where it
+        // was and the full request copies that page again (4 bytes of it were
+        // already fresh): PAGE, not PAGE - 4.
+        assert_eq!(shadow.update(start, watched), PAGE);
         assert_eq!(shadow.update(start, watched), 0);
     }
 
