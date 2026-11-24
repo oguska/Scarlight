@@ -819,8 +819,11 @@ impl Host {
         &self,
         desc: Option<&D3D12_RENDER_TARGET_VIEW_DESC>,
     ) -> D3D12_CPU_DESCRIPTOR_HANDLE {
+        // A null descriptor must be one a real resource could use: forwarding a
+        // format the adapter cannot render to breaks that contract, and some
+        // drivers reject a descriptor that does.
         let desc = desc
-            .filter(|d| d.Format != DXGI_FORMAT_UNKNOWN)
+            .filter(|d| d.Format != DXGI_FORMAT_UNKNOWN && self.renders(d.Format))
             .copied()
             .unwrap_or(D3D12_RENDER_TARGET_VIEW_DESC {
                 Format: DXGI_FORMAT_R8G8B8A8_UNORM,
@@ -836,6 +839,21 @@ impl Host {
                 .CreateRenderTargetView(None::<&ID3D12Resource>, Some(&desc), handle);
             handle
         }
+    }
+
+    /// Whether the adapter offers `format` as a render target, the use a null
+    /// render-target descriptor stands in for.
+    fn renders(&self, format: DXGI_FORMAT) -> bool {
+        let mut support = D3D12_FEATURE_DATA_FORMAT_SUPPORT { Format: format, ..Default::default() };
+        // SAFETY: plain feature query into our struct.
+        let queried = unsafe {
+            self.device.CheckFeatureSupport(
+                D3D12_FEATURE_FORMAT_SUPPORT,
+                (&raw mut support).cast(),
+                size_of::<D3D12_FEATURE_DATA_FORMAT_SUPPORT>() as u32,
+            )
+        };
+        queried.is_ok() && support.Support1.0 as u32 & D3D12_FORMAT_SUPPORT1_RENDER_TARGET.0 as u32 != 0
     }
 
     /// A host depth view of `resource`, valid until it is recorded.
