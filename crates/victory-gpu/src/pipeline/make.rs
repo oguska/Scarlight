@@ -305,7 +305,7 @@ impl Queues {
 
     /// Pops the highest-priority unclaimed pipeline: repeat-demanded entries
     /// (with non-mesh, oldest-queued tie-break) ahead of 1-hit demand entries,
-    /// interleaving an oldest waiting demand entry after `FAIR_STRIDE` high-tier
+    /// interleaving an oldest waiting demand entry after `FAIR_STRIDE` further
     /// pops so 1-hit work cannot permanently starve, and draining `early` last.
     fn pop_claimed(&mut self) -> Option<Arc<Pending>> {
         while self
@@ -325,11 +325,11 @@ impl Queues {
         }
         while let Some(item) = self.demand.pop() {
             if item.pending.claim() {
-                if item.tier >= 2 {
-                    self.high_streak += 1;
-                } else {
-                    self.high_streak = 0;
-                }
+                // Every pop advances the stride, not only repeat-demand ones:
+                // 1-hit non-mesh entries also rank ahead of a 1-hit mesh entry
+                // waiting in `fair_fifo` (`WorkItem::cmp` prefers non-mesh), so
+                // a stream of them would otherwise reset the stride forever.
+                self.high_streak += 1;
                 return Some(item.pending);
             }
         }
@@ -631,5 +631,25 @@ mod tests {
             Some(Arc::as_ptr(&hot[FAIR_STRIDE as usize]))
         );
         assert!(q.try_pop().is_none());
+
+        // A stream of 1-hit non-mesh pipelines must not starve a 1-hit mesh
+        // pipeline: tier-1 pops advance the stride too, so the mesh entry is
+        // served once the stride is reached instead of waiting forever behind
+        // the non-mesh tie-break.
+        let one_hit_mesh = Arc::new(Pending::with_non_mesh(Vec::new(), None, false));
+        enqueue_on(&one_hit_mesh, true, &waiting, &peak, &q);
+        for _ in 0..FAIR_STRIDE {
+            let p = Arc::new(Pending::with_non_mesh(Vec::new(), None, true));
+            enqueue_on(&p, true, &waiting, &peak, &q);
+        }
+        for _ in 0..FAIR_STRIDE {
+            let popped = q.try_pop().expect("1-hit pop");
+            assert_ne!(Arc::as_ptr(&popped), Arc::as_ptr(&one_hit_mesh));
+        }
+        assert_eq!(
+            q.try_pop().map(|p| Arc::as_ptr(&p)),
+            Some(Arc::as_ptr(&one_hit_mesh)),
+            "a 1-hit mesh pipeline must not starve behind 1-hit non-mesh demand"
+        );
     }
 }
