@@ -126,7 +126,7 @@ pub(crate) struct State {
     root_srv_slots: std::collections::HashMap<(usize, u64), u32>,
     /// Root UAVs bound as one-view tables in this list: (host heap, title
     /// address) → dynamic slot.
-    root_uav_slots: std::collections::HashMap<(usize, u64), u32>,
+    root_uav_slots: std::collections::HashMap<(usize, u64, u64), u32>,
 }
 
 impl Drop for State {
@@ -720,7 +720,19 @@ impl State {
             return false;
         };
         let shadow = address.and_then(|a| crate::shadow::find(a, 1).map(|s| (a, s)));
-        let key = (std::ptr::from_ref(heap) as usize, address.unwrap_or(0));
+        // The slot is keyed to the shadow its descriptor was built from too:
+        // the title can release a buffer and register another at the same
+        // start within one list, and the cached slot points at the old one.
+        // SAFETY: a shadow in the table names a buffer the title keeps alive
+        // while the table holds it; this only reads its address.
+        let buffer = shadow
+            .as_ref()
+            .map_or(0, |(_, s)| unsafe { s.buffer.GetGPUVirtualAddress() });
+        let key = (
+            std::ptr::from_ref(heap) as usize,
+            address.unwrap_or(0),
+            buffer,
+        );
         let index = match self.root_uav_slots.get(&key) {
             Some(&index) => index,
             None => {

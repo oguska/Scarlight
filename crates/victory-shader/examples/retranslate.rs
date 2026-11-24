@@ -7,6 +7,13 @@ fn main() {
     let (input, out) = (&args[1], &args[2]);
     let filter = args.get(3).cloned().unwrap_or_default();
     std::fs::create_dir_all(out).unwrap();
+    // A translation replaces each `.dxbc` with `host.dxil` of the same name,
+    // so writing into the dump directory would destroy the sources.
+    let canon = |p: &String| std::fs::canonicalize(p).unwrap_or_else(|_| p.into());
+    if canon(input) == canon(out) {
+        eprintln!("retranslate: input and output are the same directory ({input}); refusing");
+        std::process::exit(64);
+    }
     let (mut ok, mut failed) = (0, 0);
     let mut reasons: std::collections::BTreeMap<String, u32> = Default::default();
     let mut list = String::new();
@@ -20,7 +27,16 @@ fn main() {
         let result = std::panic::catch_unwind(|| victory_shader::emit::translate(&bytes));
         match result {
             Ok(Ok(host)) => {
-                std::fs::write(std::path::Path::new(out).join(&name), &host.dxil).unwrap();
+                let dest = std::path::Path::new(out).join(&name);
+                // A hard link (or symlink) in the output directory that shares
+                // the source's inode would be truncated in place, so drop the
+                // entry first and let the write create a file of its own.
+                match std::fs::remove_file(&dest) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => panic!("retranslate: {dest:?}: {e}"),
+                }
+                std::fs::write(&dest, &host.dxil).unwrap();
                 ok += 1;
             }
             Ok(Err(e)) => {

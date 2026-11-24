@@ -216,11 +216,15 @@ fn encode(s: &HostShader) -> Vec<u8> {
             word(&mut out, v);
         }
     }
-    for slots in [&s.root_cbvs, &s.root_srvs, &s.root_uavs] {
+    for slots in [&s.root_cbvs, &s.root_srvs] {
         word(&mut out, slots.len() as u32);
         out.extend(slots);
     }
     word(&mut out, u32::from(s.stride_table));
+    // `decode` reads the root UAVs after `stride_table`: write them in that
+    // order.
+    word(&mut out, s.root_uavs.len() as u32);
+    out.extend(&s.root_uavs);
     out
 }
 

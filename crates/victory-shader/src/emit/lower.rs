@@ -823,7 +823,7 @@ impl<'a> Lower<'a> {
         let (g, base, len) = match self.code_table {
             Some(t) => t,
             None => {
-                let first = self
+                let (first, relative) = self
                     .x
                     .res
                     .scalar
@@ -836,9 +836,17 @@ impl<'a> Lower<'a> {
                         })
                     }))
                     .filter(|a| a.param == CODE)
-                    .map(|a| a.offset & !3)
-                    .min()
-                    .ok_or("a code table")?;
+                    .fold((u32::MAX, false), |(first, relative), a| {
+                        (first.min(a.offset & !3), relative || a.rel.is_some())
+                    });
+                // A relative address is offset from any byte of the program,
+                // including ones before the first static access (a backward
+                // `s_getpc_b64` reference), so the table starts at the code's
+                // start to cover it.
+                let first = if relative { 0 } else { first };
+                if first == u32::MAX {
+                    return Err("a code table");
+                }
                 let code = &self.x.native.code;
                 let words: Vec<u32> = code
                     .get(first as usize..)
@@ -2593,6 +2601,36 @@ impl<'a> Lower<'a> {
         r
     }
 
+    /// The console wave's first lane in EXEC (lane 0 when none is active).
+    fn console_first_lane(&mut self, inst: &Inst) -> Result<V, Why> {
+        let word = |l: &mut Self, r: u8| -> Result<V, Why> {
+            match l.get(inst.read(Reg::S(r)).ok_or("EXEC")?)? {
+                Val::I32(x) => Ok(x),
+                _ => Err(LANE_MASK),
+            }
+        };
+        let c = self.cur;
+        let lo = word(self, EXEC)?;
+        let hi = if self.x.native.wave64 {
+            word(self, EXEC + 1)?
+        } else {
+            self.s.m.i32(0)
+        };
+        let i32t = self.s.t.i32;
+        let flo = self
+            .s
+            .op(c, "unaryBits.i32", Attr::ReadNone, i32t, 32, &[lo]);
+        let fhi = self
+            .s
+            .op(c, "unaryBits.i32", Attr::ReadNone, i32t, 32, &[hi]);
+        let (z, k32) = (self.s.m.i32(0), self.s.m.i32(32));
+        let fhi = self.s.m.bin(c, Bin::Add, fhi, k32);
+        let none_hi = self.s.m.cmp(c, pred::EQ, hi, z);
+        let fhi = self.s.m.select(c, none_hi, z, fhi);
+        let some_lo = self.s.m.cmp(c, pred::NE, lo, z);
+        Ok(self.s.m.select(c, some_lo, flo, fhi))
+    }
+
     /// Console flow: `x` of console lane `lane` (uniform), from whichever
     /// half holds it.
     fn console_read_lane(&mut self, x: V, lane: V) -> V {
@@ -2614,6 +2652,18 @@ impl<'a> Lower<'a> {
         let h = self.s.m.bin(c, Bin::And, h, one);
         let low = self.s.m.cmp(c, pred::EQ, h, z);
         self.s.m.select(c, low, x0, x1)
+    }
+
+    /// Whether the instruction defining `v` runs in every lane (EXEC full
+    /// there), so a lane read it makes reads lane 0.
+    fn runs_in_every_lane(&self, v: Value) -> bool {
+        let Some(&(b, i)) = self.def_site.get(&v) else {
+            return false;
+        };
+        matches!(
+            self.x.st.execs.get(b).and_then(|e| e.get(i)).copied().flatten(),
+            None | Some(Bool::TRUE)
+        )
     }
 
     fn read_lane(&mut self, x: V, lane: V) -> V {
@@ -4266,6 +4316,9 @@ impl<'a> Lower<'a> {
         match *op {
             Operand::Scalar { code, .. } if code != NULL => inst.read(Reg::S(code)),
             Operand::Vector { reg, .. } => inst.read(Reg::V(reg)),
+            // A logical spill argument reachable as an address base (the
+            // tracer tags it), so the replay can follow its `s_mov_b32`.
+            Operand::Spill(reg) => inst.read(Reg::Spill(reg)),
             _ => None,
         }
     }
@@ -4626,6 +4679,21 @@ impl<'a> Lower<'a> {
                         let op0 = f.src.first().ok_or("a missing operand")?;
                         if let Some(sv) = self.uniform_vgpr_src(inst, op0) {
                             self.rel_offset(sv, base, local)?
+                        } else if !self.split && self.runs_in_every_lane(v) {
+                            // The definition ran in every lane, so the lane it
+                            // read was lane 0: the load's EXEC (possibly
+                            // narrower, and not the definition's) does not
+                            // change which lane that was.
+                            let a = self.rel_offset_op(inst, op0, base, local)?;
+                            let z = self.s.m.i32(0);
+                            self.read_lane(a, z)
+                        } else if self.console_cf {
+                            // The console wave's first lane, as `valu_op`
+                            // reads it: the upper half's own first lane is
+                            // not it.
+                            let a = self.rel_offset_op(inst, op0, base, local)?;
+                            let first = self.console_first_lane(inst)?;
+                            self.console_read_lane(a, first)
                         } else {
                             let a = self.rel_offset_op(inst, op0, base, local)?;
                             self.s.flags |= flags::WAVE_OPS;
@@ -4657,7 +4725,11 @@ impl<'a> Lower<'a> {
                             } else {
                                 self.cross_lane(false)?;
                             }
-                            self.read_lane(a, lane)
+                            if self.console_cf {
+                                self.console_read_lane(a, lane)
+                            } else {
+                                self.read_lane(a, lane)
+                            }
                         }
                     }
                     "v_add_co_u32" | "v_add_nc_u32" | "v_add_nc_i32" | "v_or_b32" => {
@@ -4799,7 +4871,20 @@ impl<'a> Lower<'a> {
             let c = self.cur;
             let s = self.s.m.i32(stride);
             let at = self.s.m.bin(c, Bin::Mul, index, s);
-            let at = self.s.m.bin(c, Bin::Add, at, off);
+            // An index whose byte position wraps would land back inside the
+            // view; send it past the view's end instead, where the hardware's
+            // check reads zero and drops the write, as the contract says.
+            let limit = self.s.m.i32(u32::MAX / stride);
+            let over = self.s.m.cmp(c, pred::IUGT, index, limit);
+            let far = self.s.m.i32(!15u32);
+            let base = self.s.m.select(c, over, far, at);
+            let sum = self.s.m.bin(c, Bin::Add, base, off);
+            // The member offset is a runtime value: it turns a position at the
+            // view's end into a wrapped one, and the sentinel itself into a
+            // low byte. A sum below its addend wrapped, so send that past the
+            // end too; a position that did not wrap stands as it is.
+            let wrap = self.s.m.cmp(c, pred::IULT, sum, base);
+            let at = self.s.m.select(c, wrap, far, sum);
             let h = self.handle(site, src, false, (11 | u, 0))?;
             return Ok((h, at, self.s.m.undef(self.s.t.i32)));
         }
@@ -5767,9 +5852,11 @@ impl<'a> Lower<'a> {
                 let Some(Operand::Vector { reg, .. }) = v.dst else {
                     return Err("a mixed-precision result");
                 };
-                let old = match inst.read(Reg::V(reg)) {
-                    Some(o) => self.i32_of(o)?,
-                    None => self.s.m.i32(0),
+                // An unavailable old value is zero, as for other partial
+                // writes; never resurrect bits from before a full write.
+                let old = match inst.read(Reg::V(reg)).map(|o| self.i32_of(o)) {
+                    Some(Ok(o)) => o,
+                    _ => self.s.m.i32(0),
                 };
                 let h = self
                     .s
@@ -5956,31 +6043,7 @@ impl<'a> Lower<'a> {
             "v_readfirstlane_b32" if self.console_cf => {
                 // The console's first lane in EXEC (lane 0 when none).
                 let a = s(self, 0)?;
-                let word = |l: &mut Self, r: u8| -> Result<V, Why> {
-                    match l.get(inst.read(Reg::S(r)).ok_or("EXEC")?)? {
-                        Val::I32(x) => Ok(x),
-                        _ => Err(LANE_MASK),
-                    }
-                };
-                let lo = word(self, EXEC)?;
-                let hi = if self.x.native.wave64 {
-                    word(self, EXEC + 1)?
-                } else {
-                    self.s.m.i32(0)
-                };
-                let i32t = self.s.t.i32;
-                let flo = self
-                    .s
-                    .op(c, "unaryBits.i32", Attr::ReadNone, i32t, 32, &[lo]);
-                let fhi = self
-                    .s
-                    .op(c, "unaryBits.i32", Attr::ReadNone, i32t, 32, &[hi]);
-                let (z, k32) = (self.s.m.i32(0), self.s.m.i32(32));
-                let fhi = self.s.m.bin(c, Bin::Add, fhi, k32);
-                let none_hi = self.s.m.cmp(c, pred::EQ, hi, z);
-                let fhi = self.s.m.select(c, none_hi, z, fhi);
-                let some_lo = self.s.m.cmp(c, pred::NE, lo, z);
-                let first = self.s.m.select(c, some_lo, flo, fhi);
+                let first = self.console_first_lane(inst)?;
                 let r = self.console_read_lane(a, first);
                 int(self, r)
             }
@@ -9299,21 +9362,8 @@ impl<'a> Lower<'a> {
 
     fn fill_phis(&mut self) -> Result<(), Stop> {
         let p = self.x.p;
-        // A phi that only another read phi consumes is live too. Without this, a value with no DXIL form that
-        // reaches a read through two joins is taken for dead at the first join and replaced by zero below, and the
-        // lowering accepts what it refuses when the same value is read directly.
-        let mut work: Vec<Value> = self.read_phis.iter().copied().collect();
-        while let Some(v) = work.pop() {
-            let Some(&(b, i)) = self.phi_at.get(&v) else {
-                continue;
-            };
-            for &arg in &p.blocks[b].phis[i].args {
-                if self.phi_at.contains_key(&arg) && self.read_phis.insert(arg) {
-                    work.push(arg);
-                }
-            }
-        }
-        // Address phis: the base comes from `rel_offset` per predecessor, so lower them here.
+        // Address phis: the base comes from `rel_offset` per predecessor, so lower them here. Before the liveness
+        // walk below: replaying an edge can read a numeric phi (its offset), and the walk has to see those reads.
         while let Some((phi, b, i, base)) = self.pending_addr_phis.pop() {
             let ir_phi = &p.blocks[b].phis[i];
             let offset = p.blocks[b].offset;
@@ -9333,6 +9383,20 @@ impl<'a> Lower<'a> {
                 incoming.push((x, qb));
             }
             self.s.m.set_phi(phi, incoming);
+        }
+        // A phi that only another read phi consumes is live too. Without this, a value with no DXIL form that
+        // reaches a read through two joins is taken for dead at the first join and replaced by zero below, and the
+        // lowering accepts what it refuses when the same value is read directly.
+        let mut work: Vec<Value> = self.read_phis.iter().copied().collect();
+        while let Some(v) = work.pop() {
+            let Some(&(b, i)) = self.phi_at.get(&v) else {
+                continue;
+            };
+            for &arg in &p.blocks[b].phis[i].args {
+                if self.phi_at.contains_key(&arg) && self.read_phis.insert(arg) {
+                    work.push(arg);
+                }
+            }
         }
         for (v, b, i) in std::mem::take(&mut self.data_phis) {
             let phi = &p.blocks[b].phis[i];
@@ -10405,6 +10469,7 @@ mod tests {
             let st = structure::structure(&p).unwrap();
             let res = resource::track(&p, &native.layout, native.stage, Some(&st)).unwrap();
             let io = io::raise(&p, &native).unwrap();
+            #[cfg_attr(not(windows), allow(unused_mut))]
             let mut lowered = lower(&Parts {
                 native: &native,
                 p: &p,
