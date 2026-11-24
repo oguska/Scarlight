@@ -40,7 +40,7 @@ const EXCEPTIONS: &[(&str, &str)] = &[
 const EXTENSION_EXCEPTIONS: &[(&str, &str)] = &[
     (
         "docs/brand/banner.svg",
-        "the README banner: a hand-written vector drawing of our own, text only",
+        "the README banner: a vector drawing of our own (wordmark strokes, tagline glyph outlines), text only",
     ),
     (
         "docs/brand/logo.svg",
@@ -49,6 +49,14 @@ const EXTENSION_EXCEPTIONS: &[(&str, &str)] = &[
     (
         "docs/brand/logo-mark.svg",
         "the project mark: a hand-written vector drawing of our own, text only",
+    ),
+    (
+        "docs/brand/status.svg",
+        "the README pipeline-status graphic: a vector drawing of our own (label glyph outlines), text only",
+    ),
+    (
+        "docs/brand/divider.svg",
+        "the README section divider: a hand-written vector drawing of our own, text only",
     ),
 ];
 
