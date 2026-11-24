@@ -382,6 +382,12 @@ pub struct Structured {
     /// values: the halves of a mask held as a number need not come from
     /// one instruction.
     pub pairs: HashMap<Value, Value>,
+    /// The condition of each `v_cndmask_b32` whose mask is the same in
+    /// every lane without deriving from EXEC or a VALU result (SCC as all
+    /// lanes or none, the compilers' form of a uniform condition, or a
+    /// constant), by the value the select writes. Read as data such a mask
+    /// is a number, so it is no lane mask in [`Structured::masks`].
+    pub uniform_selects: HashMap<Value, Bool>,
 }
 
 impl Structured {
@@ -461,6 +467,8 @@ struct Lanes<'a> {
     when: Vec<Option<Bool>>,
     /// See [`Structured::active`].
     active: HashSet<Value>,
+    /// See [`Structured::uniform_selects`].
+    uniform_selects: Map<Value, Bool>,
 }
 
 /// A mask join taken as `value` in every lane that reaches `block`: each
@@ -526,6 +534,7 @@ impl<'a> Lanes<'a> {
             first: vec![Bool::FALSE; blocks.len()],
             when: vec![None; blocks.len()],
             active: HashSet::new(),
+            uniform_selects: Map::default(),
         })
     }
 
@@ -538,6 +547,7 @@ impl<'a> Lanes<'a> {
         self.first.fill(Bool::FALSE);
         self.when.fill(None);
         self.active.clear();
+        self.uniform_selects.clear();
     }
 
     /// Lane masks, branch conditions and forward-edge knowledge, block by
@@ -683,6 +693,7 @@ impl<'a> Lanes<'a> {
                 .map(|&(lo, hi)| (hi, lo))
                 .collect(),
             active: self.active,
+            uniform_selects: self.uniform_selects.into_iter().collect(),
             bools: self.b,
             exits,
             guards,
@@ -1042,7 +1053,19 @@ impl<'a> Lanes<'a> {
                     && code != NULL
                     && let Some(k) = self.key(|r| inst.read(r), code)
                 {
-                    self.mask(k);
+                    let (m, derived) = self.mask(k);
+                    // The same in every lane: the select's condition, though
+                    // the mask is a number to any other reader.
+                    if !derived
+                        && let Some(&(_, w)) = inst.writes.first()
+                        && self
+                            .b
+                            .support(m)
+                            .iter()
+                            .all(|a| matches!(a, Atom::Uniform(_)))
+                    {
+                        self.uniform_selects.insert(w, m);
+                    }
                 }
                 if name.starts_with("v_cmpx") {
                     if let Some(k) = self.key(|r| inst.write(r), EXEC) {

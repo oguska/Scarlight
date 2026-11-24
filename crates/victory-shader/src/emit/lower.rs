@@ -557,6 +557,13 @@ impl<'a> Lower<'a> {
                 let selectors =
                     insts()
                         .filter(|_| numeric_selects)
+                        // A mask the structure found the same in every lane
+                        // needs no lane numbering (PR #1115).
+                        .filter(|i| {
+                            !i.writes
+                                .first()
+                                .is_some_and(|w| x.st.uniform_selects.contains_key(&w.1))
+                        })
                         .filter_map(|i| match &i.fields {
                             Fields::Valu(v) if i.name() == "v_cndmask_b32" => match v.src.get(2) {
                                 Some(&Operand::Scalar { code, .. }) => i.read(Reg::S(code)),
@@ -5842,11 +5849,20 @@ impl<'a> Lower<'a> {
                 // a number. The in-half form cannot test the high word, so
                 // defer the select there and retry only if its result is used.
                 let numeric_mask = self.console_lanes && (!self.split || self.console_cf);
+                // A mask the structure found the same in every lane (SCC
+                // held as all lanes or none, a constant): every lane picks
+                // the same source, so no lane index is involved (PR #1115).
+                let uniform = inst
+                    .writes
+                    .first()
+                    .and_then(|w| self.x.st.uniform_selects.get(&w.1))
+                    .copied();
                 let m = mask
                     .and_then(|m| {
                         let others = numeric_mask.then(|| self.x.st.others.get(&m));
                         self.x.st.masks.get(&m).or(others.flatten()).copied()
                     })
+                    .or(uniform)
                     .ok_or(UNTRACKED_SELECT)?;
                 let cond = self.boolean(m, c)?;
                 if v.abs != 0 || v.neg != 0 {
@@ -10617,6 +10633,46 @@ mod tests {
             "the atomic's annotation: {:x?}",
             lowered.annotations
         );
+    }
+
+    #[test]
+    fn selects_on_masks_the_same_in_every_lane_need_no_lane_index() {
+        // The compilers' form of a select on a uniform condition: SCC as a
+        // mask of all lanes or none, then v_cndmask_b32 (here of the root
+        // constants s0 == s1); and constant masks. The result goes to LDS so
+        // the select is needed. Every lane picks the same source, so no lane
+        // index or wave operation is involved, in any stage.
+        let select = |mask: &[u32], wave64: bool| {
+            let mut words = vec![0xBF06_0100]; // s_cmp_eq_u32 s0, s1
+            words.extend_from_slice(mask);
+            words.extend_from_slice(&[
+                0xD501_0001,
+                0x000A_0080, // v_cndmask_b32 v1, 0, v0, s2 (s[2:3])
+                0xD834_0000,
+                0x0000_0100, // ds_write_b32 v0, v1
+                S_ENDPGM,
+            ]);
+            let layout = vec![
+                root(RootType::Constants, 0, 0),
+                root(RootType::Constants, 1, 1),
+            ];
+            lower_wave(&words, layout, vec![], wave64)
+        };
+        for (mask, wave64) in [
+            (0x8502_80C1, false), // s_cselect_b32 s2, -1, 0
+            (0x8502_C180, false), // s_cselect_b32 s2, 0, -1
+            (0xBE82_03C1, false), // s_mov_b32 s2, -1
+            (0xBE82_0380, false), // s_mov_b32 s2, 0
+            (0x8582_80C1, true),  // s_cselect_b64 s[2:3], -1, 0
+            (0xBE82_04C1, true),  // s_mov_b64 s[2:3], -1
+        ] {
+            let l = select(&[mask], wave64).unwrap_or_else(|e| panic!("{mask:#x}: {e:?}"));
+            assert!(!l.wave_ops, "{mask:#x}");
+        }
+        // A mask whose lanes differ, built from a number, needs this lane's
+        // bit of it: the console flow's lane index, so wave operations.
+        let l = select(&[0x8F02_0081], false).unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(l.wave_ops, "a mask built from a number tests the lane's bit");
     }
 }
 
