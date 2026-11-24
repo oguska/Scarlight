@@ -596,8 +596,8 @@ pub fn debug_ps(targets: u32) -> HostShader {
         static_samplers: Vec::new(),
         root_cbvs: Vec::new(),
         root_srvs: Vec::new(),
-        stride_table: false,
         root_uavs: Vec::new(),
+        stride_table: false,
     }
 }
 

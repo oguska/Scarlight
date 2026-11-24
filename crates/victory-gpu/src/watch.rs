@@ -836,11 +836,6 @@ pub fn title_memory_remapped(at: usize, len: usize) {
         while let Some(block) = g.absent.range(from..to).next().copied() {
             g.absent.remove(&block);
         }
-        // The views there are new: their alias marks are stale (#1122).
-        let aliased: Vec<usize> = g.aliased.range(from..to).copied().collect();
-        for block in aliased {
-            g.aliased.remove(&block);
-        }
         // Write access comes back before the records go: a block the range
         // only partly covers stays ours, and a write to a page of it we did
         // not touch must not find no record (then it is not handled). Blocks
@@ -856,6 +851,8 @@ pub fn title_memory_remapped(at: usize, len: usize) {
             g.protected.remove(&block);
             g.clean.remove(&block);
         }
+        // Opens the guards of the range (and, since the views there are
+        // new, drops their stale alias marks, #1122).
         open(&mut g, at, end);
     }
     record_mapping_change(&mut journal, at, end);
@@ -1479,7 +1476,8 @@ pub(crate) mod tests {
         }
 
         // The ordinary suffix still needs copying. The watched prefix
-        // stays valid, including when the two are requested together.
+        // stays valid, including when the two are requested together: each
+        // allocation of a request is answered on its own.
         assert_eq!(shadow.update(start + watched - 4, 8), 4);
         assert_eq!(shadow.update(start, watched), 0);
         // SAFETY: the last byte of the live watched reservation.
