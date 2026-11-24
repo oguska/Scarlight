@@ -1927,10 +1927,9 @@ fn scc_after(op: u8) -> HostShader {
     ])
 }
 
-/// Checks the SCC that `op` leaves for each `(s0, s1, scc)`.
 fn check_scc(name: &str, op: u8, cases: &[(u32, u32, u32)]) {
     let inputs: Vec<[u32; 4]> = cases.iter().map(|&(a, b, _)| [a, b, 0, 0]).collect();
-    run_cases(&scc_after(op), &inputs, |backend, i, inp, got| {
+    run_cases_on(&scc_after(op), &inputs, HARDWARE, |backend, i, inp, got| {
         let want = cases[i].2;
         assert_eq!(
             got, want,
@@ -2023,7 +2022,7 @@ fn signed_scalar_add_sub_scc_matches_rdna2() {
         .iter()
         .map(|&(a, b)| [a as u32, b as u32, 0, 0])
         .collect();
-    run_cases(&add_scc, &add_in, |backend, i, _, got| {
+    run_cases_on(&add_scc, &add_in, HARDWARE, |backend, i, _, got| {
         let (a, b) = add_cases[i];
         let want = u32::from(a.overflowing_add(b).1);
         assert_eq!(
@@ -2048,7 +2047,7 @@ fn signed_scalar_add_sub_scc_matches_rdna2() {
         .iter()
         .map(|&(a, b)| [a as u32, b as u32, 0, 0])
         .collect();
-    run_cases(&sub_scc, &sub_in, |backend, i, _, got| {
+    run_cases_on(&sub_scc, &sub_in, HARDWARE, |backend, i, _, got| {
         let (a, b) = sub_cases[i];
         let want = u32::from(a.overflowing_sub(b).1);
         assert_eq!(
@@ -2062,7 +2061,7 @@ fn signed_scalar_add_sub_scc_matches_rdna2() {
         .iter()
         .map(|&a| [a as u32, 0, 0, 0])
         .collect();
-    run_cases(&addk_pos1, &addk_pos_in, |backend, i, _, got| {
+    run_cases_on(&addk_pos1, &addk_pos_in, HARDWARE, |backend, i, _, got| {
         let a = addk_pos_cases[i];
         let want = u32::from(a.overflowing_add(1).1);
         assert_eq!(
@@ -2076,7 +2075,7 @@ fn signed_scalar_add_sub_scc_matches_rdna2() {
         .iter()
         .map(|&a| [a as u32, 0, 0, 0])
         .collect();
-    run_cases(&addk_neg_min, &addk_neg_in, |backend, i, _, got| {
+    run_cases_on(&addk_neg_min, &addk_neg_in, HARDWARE, |backend, i, _, got| {
         let a = addk_neg_cases[i];
         let want = u32::from(a.overflowing_add(i32::from(i16::MIN)).1);
         assert_eq!(
