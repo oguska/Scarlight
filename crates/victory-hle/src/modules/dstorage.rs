@@ -976,7 +976,7 @@ fn into_destination(
     if super::xmem::write_physical(pages, offset, &data[..n]) {
         Ok(())
     } else {
-        // Said aloud: Grand Theft Auto VI never reads a request's result
+        // Said aloud: the title never reads a request's result
         // (it only polls for completion), so a destination left unwritten
         // is a model or texture that silently holds whatever its pages
         // held before.

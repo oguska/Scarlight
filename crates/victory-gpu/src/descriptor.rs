@@ -330,7 +330,7 @@ impl View {
 /// Views without a resource object have nothing that releases them, and a
 /// title copies descriptors as bytes, so nothing says when the last
 /// descriptor naming an entry is gone: such entries were kept for the run.
-/// Grand Theft Auto VI writes some 14,000 constant buffer views a frame,
+/// The title writes some 14,000 constant buffer views a frame,
 /// each at the address its constants have that frame: 2,450,139 entries
 /// after four minutes of play, 1,047 MB with the index, and 11,000 more
 /// every second (run 65). So the two kinds that carry an address are not
@@ -600,7 +600,7 @@ impl View {
 
 /// Title slots (their handles) written with a view of a texture object
 /// that had no host copy then, by texture. A title texture gets its host
-/// copy on first use (`resource.rs` `Hosted`), and Grand Theft Auto VI
+/// copy on first use (`resource.rs` `Hosted`), and the title
 /// writes each texture's views into its view heap when it creates the
 /// texture: making those host slots would make every host copy at once.
 /// They are made when the texture is: translated shaders index the heap

@@ -6,7 +6,7 @@ game. Everything here is off by default.
 
 ## What the title does
 
-Grand Theft Auto VI's indirect light (probes, bounce, reflections) and the
+The title's indirect light (probes, bounce, reflections) and the
 shadows of its lamps and sun are ray traced. Without them, anything the sun
 does not hit directly is black: interiors, the shadowed side of a face, rooms
 lit only by lamps.
@@ -59,7 +59,7 @@ shaders and emulates the one instruction.
    none run (`VICTORY_BVH_BUILDER=1` asks for it; `VICTORY_BVH_QUARANTINE=1`
    also keeps the builder's stores out of title memory, for a first test). A
    partly working builder wrote garbage bounds into title memory and crashed
-   the title.
+   The title.
 
 ## Known gaps
 

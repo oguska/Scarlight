@@ -1,5 +1,5 @@
 //! Draws on the host GPU (decision 0007, step 3). A list keeps the state
-//! the title sets for its draws (pipeline, descriptor heaps, root
+//! The title sets for its draws (pipeline, descriptor heaps, root
 //! arguments, vertex and index buffers, targets); each draw then brings the
 //! host list up to date: the host pipeline and our root signature, the
 //! user data the translated shaders read, the host copies of the buffers
@@ -125,7 +125,7 @@ const WINDOW_MOST: u64 = 64;
 ///
 /// The step is the one the title is seen to take, not the stride its
 /// command signature names: it draws one record a call, for which the
-/// stride means nothing, and Grand Theft Auto VI names 12 bytes (the three
+/// stride means nothing, and the title names 12 bytes (the three
 /// words of a mesh dispatch) for records it keeps 32 bytes apart (2,173 of
 /// a frame's 3,349 mesh records in run 87's listed frame; 283 are 16
 /// apart, which ends a window). Walked by the named stride the window
@@ -236,7 +236,7 @@ impl State {
 }
 
 /// An experiment on the title's scissor rectangles (`VICTORY_SCISSOR_TEST=full`):
-/// they are all widened to the whole target. Grand Theft Auto VI's room at
+/// they are all widened to the whole target. The title's room at
 /// the start of the prologue lost its walls in five runs of seven, and in
 /// those runs the player's body and the world outside were cut by one
 /// rectangle around the window (run 85, frame 2046): one run with this on
@@ -1775,7 +1775,7 @@ impl State {
             let targets: Vec<String> = self.targets.iter().filter_map(|&t| described(t)).collect();
             let _ = write!(text, " targets {targets:?} depth {:?} state [{}]", described(self.depth), p.state);
             // The title's scissor and viewport at this draw (the first of
-            // each): Grand Theft Auto VI draws what it sees through a
+            // each): the title draws what it sees through a
             // portal (a window, from inside a room) under the portal's
             // rectangle, and the listing did not say which draws those are.
             if let Some(r) = self.scissors.first() {
@@ -2327,7 +2327,7 @@ impl State {
             crate::pipeline::note_drop(self.pipeline as This);
             return false;
         };
-        // Indirect rectangles (Grand Theft Auto VI's tiled lighting, 256
+        // Indirect rectangles (the title's tiled lighting, 256
         // indirect draws a frame, makes their corners from the vertex
         // number) are completed by the pipeline's geometry stage: the
         // arguments stay the title's, three vertices a rectangle. They
@@ -2593,7 +2593,7 @@ fn readable(list: &HostList, kind: ResourceType, view: &View) {
         shadow.refresh(list, address, len);
         if kind == ResourceType::Uav {
             // A shader that cannot store to buffers leaves the range as
-            // the title has it: nothing to find afterwards.
+            // The title has it: nothing to find afterwards.
             if STORES.get() || !write_skip() {
                 shadow.gpu_writes(list, address, len);
             } else {
