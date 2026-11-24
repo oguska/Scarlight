@@ -10427,6 +10427,21 @@ mod tests {
         lowers(&words, 0x8001).unwrap();
     }
 
+    #[test]
+    fn a_constant_lane_mask_retries_with_numeric_lanes() {
+        // An inline constant selector other than 0 and -1 is a mask held as a
+        // number; a compute program with no explicit lanes must be retried
+        // with numeric lanes, not reported as unsupported (PR #1221).
+        let words = [
+            0xD501_0001,
+            0x0205_0280, // v_cndmask_b32 v1, 0, 1, 1
+            0xD834_0000,
+            0x0000_0100, // ds_write_b32 v0, v1
+            S_ENDPGM,
+        ];
+        lowers(&words, 0x8001).unwrap();
+    }
+
     /// The instructions the module `words` lowers to: the test-only count the
     /// module summary ends with.
     fn instructions(words: &[u32]) -> usize {
