@@ -119,6 +119,8 @@ fn give_back(v: Vec<u8>) {
     }
 }
 
+const WATCH_UNKNOWN: u8 = 0;
+const WATCHED: u8 = 1;
 const NOT_WATCHED: u8 = 2;
 
 // SAFETY: D3D12 resources are free-threaded; `data` is a persistent mapping
@@ -323,40 +325,114 @@ impl Shadow {
         if from >= to {
             return 0;
         }
+        self.update_ranges(&[(from, to)])
+    }
+
+    /// [`Shadow::update`] of sorted, disjoint title ranges.
+    pub(crate) fn update_ranges(&self, ranges: &[(usize, usize)]) -> usize {
+        let ready = self.ready(ranges);
+        self.update_ready(&ready)
+    }
+
+    /// The parts of `ranges` that can be brought up to date now: cut to this
+    /// copy, without the ranges shaders of the submission may be writing.
+    pub(crate) fn ready(&self, ranges: &[(usize, usize)]) -> Vec<(usize, usize)> {
+        let (start, end) = (self.start as usize, (self.start + self.len) as usize);
         let mut busy: Vec<(usize, usize)> = self
             .pending
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
             .copied()
-            .filter(|&(a, e)| a < to && e > from)
+            .filter(|&(a, e)| a < end && e > start)
             .collect();
-        if !busy.is_empty() {
-            // Around ranges shaders are writing: the gaps, each as below
-            // (in the world most submissions have such ranges; copying the
-            // gaps whole cost ~1 s per frame).
-            busy.sort_unstable();
-            let (mut at, mut bytes) = (from, 0);
-            for (a, e) in busy {
+        if busy.is_empty() {
+            return ranges
+                .iter()
+                .map(|&(from, to)| (from.max(start), to.min(end)))
+                .filter(|&(from, to)| from < to)
+                .collect();
+        }
+        // Around ranges shaders are writing: the gaps, each as below
+        // (in the world most submissions have such ranges; copying the
+        // gaps whole cost ~1 s per frame).
+        busy.sort_unstable();
+        let mut ready = Vec::with_capacity(ranges.len());
+        for &(from, to) in ranges {
+            let (mut at, to) = (from.max(start), to.min(end));
+            for &(a, e) in &busy {
+                if at >= to {
+                    break;
+                }
                 if a > at {
-                    bytes += self.update_free(at, a);
+                    ready.push((at, a.min(to)));
                 }
                 at = at.max(e);
             }
             if at < to {
-                bytes += self.update_free(at, to);
+                ready.push((at, to));
             }
-            return bytes;
         }
-        self.update_free(from, to)
+        ready
+    }
+
+    /// Whether this copy's memory was found not write-watched.
+    pub(crate) fn not_watched(&self) -> bool {
+        self.watched.load(Ordering::Relaxed) == NOT_WATCHED
+    }
+
+    /// The oldest asking after which `[from, to)`'s pages were copied, for a
+    /// question shared with other copies (`0`: never, so all of it is new).
+    pub(crate) fn floor(&self, from: usize, to: usize) -> u64 {
+        let base = self.start as usize / PAGE;
+        let first = from / PAGE - base;
+        let last = (to.div_ceil(PAGE) - base).min(self.pages());
+        let copied = self.copied.lock().unwrap_or_else(|e| e.into_inner());
+        let mut oldest = u64::MAX;
+        for &at in &copied[first.min(last)..last] {
+            if at != 0 {
+                oldest = oldest.min(at);
+            }
+        }
+        if oldest == u64::MAX { 0 } else { oldest }
+    }
+
+    /// Pages the copy tracks.
+    fn pages(&self) -> usize {
+        (self.start + self.len).div_ceil(PAGE as u64) as usize - self.start as usize / PAGE
+    }
+
+    /// Brings `[from, to)` up to date from an answer for written pages asked
+    /// over a span shared with other copies.
+    pub(crate) fn answered(
+        &self,
+        from: usize,
+        to: usize,
+        now: u64,
+        written: &[(usize, u64)],
+    ) -> usize {
+        self.watched.store(WATCHED, Ordering::Relaxed);
+        let at = written.partition_point(|&(page, _)| page < from / PAGE);
+        self.copy_stale(from, to, now, &written[at..])
     }
 
     /// [`Shadow::update`] of `[from, to)` (inside the buffer) where no
     /// shader writes.
+    pub(crate) fn update_ready(&self, ranges: &[(usize, usize)]) -> usize {
+        ranges
+            .iter()
+            .map(|&(from, to)| self.update_free(from, to))
+            .sum()
+    }
+
     fn update_free(&self, from: usize, to: usize) -> usize {
-        if self.watched.load(Ordering::Relaxed) != NOT_WATCHED {
-            if let Some((now, written)) = crate::watch::writes(from, to, true) {
-                self.watched.store(1, Ordering::Relaxed);
+        let watched = self.watched.load(Ordering::Relaxed);
+        if watched != NOT_WATCHED {
+            let mut region = None;
+            if let Some((now, written)) =
+                crate::watch::shadow_writes(from, to, self.floor(from, to), &mut region)
+            {
+                self.watched.store(WATCHED, Ordering::Relaxed);
                 let copied = self.copy_stale(from, to, now, &written);
                 #[cfg(feature = "diagnostics")]
                 {
@@ -366,10 +442,17 @@ impl Shadow {
                 }
                 return copied;
             }
-            self.watched.store(NOT_WATCHED, Ordering::Relaxed);
+            // A question that failed does not make the whole copy unwatched:
+            // it may have crossed a region boundary or met an unmapped page.
+            // Only a copy wholly inside one committed private region is.
+            let (start, end) = (self.start as usize, (self.start + self.len) as usize);
+            if watched == WATCH_UNKNOWN && crate::watch::private_region_covers(start, end, region) {
+                self.watched.store(NOT_WATCHED, Ordering::Relaxed);
+            } else {
+                return self.copy(from, to);
+            }
         }
-        self.copy(from, to);
-        to - from
+        self.copy(from, to)
     }
 
     /// Copies the pages of `[from, to)` written after their last copy
