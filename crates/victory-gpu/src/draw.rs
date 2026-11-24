@@ -23,6 +23,7 @@ use windows::core::Interface;
 use crate::host::HostList;
 use crate::object::This;
 use crate::pipeline::host::HostPipeline;
+use crate::scissor;
 
 /// A root argument as the title set it.
 #[derive(Debug, Clone, Default)]
@@ -302,8 +303,14 @@ static FRAME: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 /// The draws traced since the last call.
 #[cfg(feature = "diagnostics")]
 pub(crate) fn take_frame() -> Vec<String> {
+    SCISSORS.store(0, Ordering::Relaxed);
     std::mem::take(&mut *FRAME.lock().unwrap_or_else(|e| e.into_inner()))
 }
+
+/// The scissor sets traced this frame (diagnostics builds, see
+/// [`note_scissors`]).
+#[cfg(feature = "diagnostics")]
+static SCISSORS: AtomicU64 = AtomicU64::new(0);
 
 /// Draws, mesh dispatches and dispatches recorded but not run on the host
 /// (no host pipeline) since the last call.
@@ -570,6 +577,35 @@ impl State {
         self.viewports.clear();
         self.viewports.extend_from_slice(viewports);
         crate::draw::viewports(list, viewports);
+        if scissor::wide() && !self.scissors.is_empty() {
+            let title = rects_of(&self.scissors);
+            if let Some(wide) = scissor::widened(&title, &self.viewport_rects()) {
+                host_scissors(list, &wide);
+            }
+        }
+    }
+
+    /// The title's viewports as plain numbers, for [`crate::scissor`].
+    fn viewport_rects(&self) -> Vec<scissor::Viewport> {
+        self.viewports
+            .iter()
+            .map(|v| [v.TopLeftX, v.TopLeftY, v.Width, v.Height])
+            .collect()
+    }
+
+    /// The title's scissor rects onto the host list as it gave them (with
+    /// `VICTORY_WIDE_SCISSOR`: widened to their viewport).
+    fn title_scissors(&self, list: &HostList, rects: &[RECT]) {
+        let title = rects_of(rects);
+        let viewports = self.viewport_rects();
+        let wide = scissor::wide()
+            .then(|| scissor::widened(&title, &viewports))
+            .flatten();
+        note_scissors(&title, &viewports, wide.is_some());
+        match &wide {
+            Some(wide) => host_scissors(list, wide),
+            None => crate::draw::scissors(list, rects),
+        }
     }
 
     pub(crate) fn set_scissors(&mut self, list: &HostList, rects: &[RECT]) {
@@ -588,7 +624,7 @@ impl State {
             crate::draw::scissors(list, &vec![full; rects.len()]);
             return;
         }
-        crate::draw::scissors(list, rects);
+        self.title_scissors(list, rects);
     }
 
     pub(crate) fn set_blend_factor(&mut self, list: &HostList, factor: Option<&[f32; 4]>) {
@@ -2678,6 +2714,92 @@ pub(crate) fn scissors(list: &HostList, rects: &[RECT]) {
     // SAFETY: an open list.
     unsafe { list.list.RSSetScissorRects(rects) };
 }
+
+fn rects_of(rects: &[RECT]) -> Vec<scissor::Rect> {
+    rects
+        .iter()
+        .map(|r| [r.left, r.top, r.right, r.bottom])
+        .collect()
+}
+
+/// `rects` onto the host list.
+fn host_scissors(list: &HostList, rects: &[scissor::Rect]) {
+    let host: Vec<RECT> = rects
+        .iter()
+        .map(|r| RECT {
+            left: r[0],
+            top: r[1],
+            right: r[2],
+            bottom: r[3],
+        })
+        .collect();
+    // SAFETY: an open list.
+    unsafe { list.list.RSSetScissorRects(&host) };
+}
+
+/// What a scissor set is worth saying: with `VICTORY_WIDE_SCISSOR`, each
+/// change it makes (rate-limited); in diagnostics builds, the first pairs
+/// of every frame.
+fn note_scissors(title: &[scissor::Rect], viewports: &[scissor::Viewport], widened: bool) {
+    // The rects of this set that span less than their viewport, as text.
+    let narrow = || -> Vec<String> {
+        title
+            .iter()
+            .enumerate()
+            .filter_map(|(i, r)| {
+                let v = scissor::pair(viewports, i)?;
+                scissor::widens(r, v).then(|| {
+                    format!(
+                        "scissor {} under viewport {}",
+                        scissor::rect_text(r),
+                        scissor::viewport_text(v)
+                    )
+                })
+            })
+            .collect()
+    };
+    if widened {
+        static WIDENED: AtomicU64 = AtomicU64::new(0);
+        let n = WIDENED.fetch_add(1, Ordering::Relaxed);
+        let narrow = narrow();
+        if !narrow.is_empty() && (n < 8 || n.is_multiple_of(512)) {
+            tracing::warn!(
+                n,
+                "{}: widened to the viewport (VICTORY_WIDE_SCISSOR)",
+                narrow.join("; ")
+            );
+        }
+    }
+    #[cfg(feature = "diagnostics")]
+    {
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let n = SCISSORS.fetch_add(1, Ordering::Relaxed);
+            if n < SCISSORS_PER_FRAME {
+                let pairs: Vec<String> = title
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| {
+                        let v = scissor::pair(viewports, i);
+                        format!(
+                            "{} viewport {}",
+                            scissor::rect_text(r),
+                            v.map_or("none".into(), scissor::viewport_text)
+                        )
+                    })
+                    .collect();
+                tracing::debug!(
+                    "scissors {pairs:?}{}",
+                    if widened { " (widened)" } else { "" }
+                );
+            }
+        }
+    }
+}
+
+/// The scissor/viewport pairs a diagnostics frame logs.
+#[cfg(feature = "diagnostics")]
+const SCISSORS_PER_FRAME: u64 = 8;
+
 
 pub(crate) fn blend_factor(list: &HostList, factor: Option<&[f32; 4]>) {
     // SAFETY: an open list.
