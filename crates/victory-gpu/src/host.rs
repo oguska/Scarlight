@@ -1312,16 +1312,116 @@ impl Batch {
     }
 
     fn flush(&mut self) {
-        for (shadow, from, to) in self.refreshes.drain(..) {
-            let started = std::time::Instant::now();
-            let copied = shadow.update(from, to - from);
-            let us = started.elapsed().as_micros() as u64;
-            #[cfg(feature = "diagnostics")]
-            crate::copystat::range(from, to - from, us, 0);
-            PREPARING[0].fetch_add(us, Ordering::Relaxed);
-            PREPARING[1].fetch_add(copied as u64, Ordering::Relaxed);
+        // Each copy's ranges are ready (no shader of the submission writes
+        // there); copies close together in one reservation share a question.
+        let single = std::mem::take(&mut self.refreshes);
+        let started = std::time::Instant::now();
+        let copied = match single.as_slice() {
+            [(shadow, from, to)] => shadow.update(*from, to - from),
+            refs => {
+                let per: Vec<(std::sync::Arc<crate::shadow::Shadow>, Vec<(usize, usize)>)> = refs
+                    .iter()
+                    .map(|(shadow, from, to)| (shadow.clone(), shadow.ready(&[(*from, *to)])))
+                    .collect();
+                refresh_across(&per)
+            }
+        };
+        let us = started.elapsed().as_micros() as u64;
+        #[cfg(feature = "diagnostics")]
+        for (_, from, to) in &single {
+            // One copy's time is its own; a shared question's is not.
+            crate::copystat::range(*from, to - from, if single.len() == 1 { us } else { 0 }, 0);
+        }
+        PREPARING[0].fetch_add(us, Ordering::Relaxed);
+        PREPARING[1].fetch_add(copied as u64, Ordering::Relaxed);
+    }
+}
+
+/// Brings the copies' ready ranges up to date. Ranges of several copies close
+/// together in one private reservation (the world has many small title
+/// buffers placed side by side) share one question for written pages, each
+/// copy taking from it what its own pages missed (`Shadow::answered`); the
+/// rest goes through each copy's asking of its own (`Shadow::update_ready`).
+/// Under Wine each question is round trips to the kernel, so this is the
+/// difference between thousands of them a frame and a handful.
+fn refresh_across(per: &[(std::sync::Arc<crate::shadow::Shadow>, Vec<(usize, usize)>)]) -> usize {
+    use crate::watch::PAGE;
+    /// Ranges further apart than this are asked about separately.
+    const SPAN_GAP: usize = 1 << 20;
+    #[cfg(feature = "diagnostics")]
+    {
+        static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *OFF.get_or_init(|| std::env::var_os("VICTORY_NO_SHARED_SPANS").is_some()) {
+            return per.iter().map(|(s, r)| s.update_ready(r)).sum();
         }
     }
+    let mut flat: Vec<(usize, usize, usize)> = per
+        .iter()
+        .enumerate()
+        .flat_map(|(i, (_, r))| r.iter().map(move |&(a, e)| (a, e, i)))
+        .collect();
+    flat.sort_unstable();
+    let mut rest: Vec<Vec<(usize, usize)>> = vec![Vec::new(); per.len()];
+    let mut copied = 0;
+    let mut at = 0;
+    // The last reservation looked up: ranges in it need no new question
+    // (each is a system call, under Wine two).
+    let mut last: Option<crate::watch::Allocation> = None;
+    while at < flat.len() {
+        let (lo, mut hi, first) = flat[at];
+        let page = lo / PAGE * PAGE;
+        if !last.is_some_and(|a| a.is_live() && a.start <= page && page < a.end) {
+            last = crate::watch::allocation(page);
+        }
+        let reservation = last.filter(|a| a.is_private_span(lo, hi));
+        let (mut next, mut shared) = (at + 1, false);
+        if let Some(a) = reservation {
+            while next < flat.len()
+                && flat[next].0 <= hi + SPAN_GAP
+                && a.is_live()
+                && a.is_private_span(lo, flat[next].1.max(hi))
+            {
+                hi = hi.max(flat[next].1);
+                shared |= flat[next].2 != first;
+                next += 1;
+            }
+        }
+        let group = &flat[at..next];
+        let answer =
+            (shared && group.iter().all(|&(_, _, i)| !per[i].0.not_watched())).then(|| {
+                let after = group
+                    .iter()
+                    .map(|&(a, e, i)| per[i].0.floor(a, e))
+                    .min()
+                    .unwrap_or(u64::MAX);
+                crate::watch::grouped_writes(lo, hi, after, reservation)
+            });
+        match answer.flatten() {
+            Some((now, written)) => {
+                #[cfg(feature = "diagnostics")]
+                {
+                    use crate::copystat::{C, add};
+                    add(C::SharedSpans, 1);
+                    add(C::SharedRanges, group.len() as u64);
+                }
+                for &(a, e, i) in group {
+                    copied += per[i].0.answered(a, e, now, &written);
+                }
+            }
+            None => {
+                for &(a, e, i) in group {
+                    rest[i].push((a, e));
+                }
+            }
+        }
+        at = next;
+    }
+    for (i, ranges) in rest.iter().enumerate() {
+        if !ranges.is_empty() {
+            copied += per[i].0.update_ready(ranges);
+        }
+    }
+    copied
 }
 
 /// Copies title memory at submission. The ranges were checked against their

@@ -92,7 +92,6 @@ pub(crate) struct Allocation {
     pub(crate) start: usize,
     pub(crate) end: usize,
     private: bool,
-    committed: usize,
     revision: u64,
 }
 
@@ -101,20 +100,12 @@ impl Allocation {
         self.revision == MAPPING_REVISION.load(Ordering::Acquire)
     }
 
-    pub(crate) fn fully_committed(self) -> bool {
-        self.committed == self.end - self.start
-    }
-
     fn contains(self, first: usize, end: usize) -> bool {
         self.start <= first && end <= self.end && self.is_live()
     }
 
     pub(crate) fn is_private_span(self, first: usize, end: usize) -> bool {
         self.private && self.contains(first / PAGE * PAGE, end.div_ceil(PAGE) * PAGE)
-    }
-
-    pub(crate) fn is_empty_private(self, first: usize, end: usize) -> bool {
-        self.private && self.committed == 0 && self.contains(first, end)
     }
 }
 
@@ -188,7 +179,6 @@ pub(crate) fn allocation(address: usize) -> Option<Allocation> {
             start,
             end,
             private,
-            committed: info.CommitSize,
             revision,
         })
     }
@@ -311,9 +301,59 @@ pub(crate) fn grouped_writes(
     }
 }
 
+/// Asks for the written pages of `[start, end)`, one question per allocation:
+/// the kernel refuses a question that crosses allocations (under Wine it
+/// always does), which left whole buffers unwatched and copied again every
+/// submission. A part that cannot be answered leaves the whole answer
+/// unknown, as before.
 fn query(
     start: usize,
     end: usize,
+    guarded: bool,
+    preflight: bool,
+    after: u64,
+    mut first_region: Option<&mut Option<MemoryRegion>>,
+) -> Option<(u64, Vec<(usize, u64)>)> {
+    let (first, last) = (start / PAGE, end.div_ceil(PAGE));
+    let parts = page_parts(first, last);
+    match parts.as_slice() {
+        [] | [_] => ask_span(first, last, guarded, preflight, after, first_region),
+        parts => {
+            // Every part is asked (and its dirty bits cleared) before the
+            // answer is merged, so no page is reported twice or lost.
+            let mut now = 0;
+            let mut pages = Vec::new();
+            for (i, &(from, to)) in parts.iter().enumerate() {
+                let region = if i == 0 { first_region.take() } else { None };
+                let (asked, found) = ask_span(from, to, guarded, preflight, after, region)?;
+                now = now.max(asked);
+                pages.extend(found);
+            }
+            pages.sort_unstable_by_key(|&(page, _)| page);
+            Some((now, pages))
+        }
+    }
+}
+
+/// The page ranges of `[first, last)`, cut at mapping region boundaries (a
+/// region is inside one allocation): each is asked on its own.
+fn page_parts(first: usize, last: usize) -> Vec<(usize, usize)> {
+    let mut parts = Vec::new();
+    let mut page = first;
+    while page < last {
+        let end = memory_region(page * PAGE).map_or(last, |r| r.end / PAGE);
+        let end = end.max(page + 1).min(last);
+        parts.push((page, end));
+        page = end;
+    }
+    parts
+}
+
+/// One question for the whole of `[first, last)` (pages), which must lie in
+/// one allocation.
+fn ask_span(
+    first: usize,
+    last: usize,
     guarded: bool,
     preflight: bool,
     after: u64,
@@ -321,7 +361,6 @@ fn query(
 ) -> Option<(u64, Vec<(usize, u64)>)> {
     use windows_sys::Win32::System::Memory::GetWriteWatch;
     const WRITE_WATCH_FLAG_RESET: u32 = 1;
-    let (first, last) = (start / PAGE, end.div_ceil(PAGE));
     let mut j = JOURNAL.lock().unwrap_or_else(|e| e.into_inner());
     let j = &mut *j;
     if guarded && let Some(answer) = j.clean_guarded(first, last, after) {
