@@ -3626,8 +3626,15 @@ impl<'a> Lower<'a> {
             }
             return Ok(());
         }
-        if matches!(kind, Some(u) if u.kind == ResourceType::Srv) {
-            let h = self.handle(site, src, false, (11, 0))?;
+        // A raw view, read only or not; a constant buffer otherwise. (A
+        // UAV read through a constant buffer handle removes the device.)
+        let raw = match kind.map(|u| u.kind) {
+            Some(ResourceType::Srv) => Some(11),
+            Some(ResourceType::Uav) => Some(11 | 0x1000),
+            _ => None,
+        };
+        if let Some(props) = raw {
+            let h = self.handle(site, src, false, (props, 0))?;
             for k in 0..count {
                 let off = self.s.m.i32(4 * k);
                 let a = self.s.m.bin(c, Bin::Add, addr, off);

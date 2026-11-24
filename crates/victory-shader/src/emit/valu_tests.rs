@@ -1668,3 +1668,22 @@ fn root_srv_loop_carried_pointer_induction_phi() {
         );
     });
 }
+
+#[test]
+fn scalar_buffer_loads_read_a_uav_through_its_table() {
+    // The UAV is the one `build_valu_cs` stores to: write root constant 0
+    // to its dword 0, read it back with a scalar buffer load, and store
+    // that.
+    let body = [
+        0xE070_0000,
+        0x8002_0100, // buffer_store_dword v1, off, s[8:11], 0
+        0xF420_0304,
+        0xFA00_0000, // s_buffer_load_dword s12, s[8:11], null
+        0x7E00_020C, // v_mov_b32 v0, s12
+    ];
+    let shader = build_valu_cs(&body);
+    let cases = [[0x1234_5678, 0, 0, 0], [0xDEAD_BEEF, 0, 0, 0]];
+    run_cases(&shader, &cases, |backend, _, inp, got| {
+        assert_eq!(got, inp[0], "{backend}: read back {got:#010x}");
+    });
+}
