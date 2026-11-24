@@ -668,7 +668,21 @@ impl<'a> Lower<'a> {
                         .any(|a| matches!(a, Atom::Opaque(_) | Atom::Constant(_)))
                 })
             };
-            console_lanes = reads_whole || masks_held || insts().any(in_half);
+            // An inline constant selector other than 0 and -1 is a mask held
+            // as a number too; the split form has no console lane number to
+            // test its bit with, so the retry must lower it unsplit.
+            let inline_selectors = numeric_selects
+                && insts().any(|i| {
+                    i.name() == "v_cndmask_b32"
+                        && !i
+                            .writes
+                            .first()
+                            .is_some_and(|w| x.st.uniform_selects.contains_key(&w.1))
+                        && matches!(&i.fields, Fields::Valu(v) if matches!(v.src.get(2),
+                            Some(&Operand::Const(k))
+                                if !matches!(crate::resource::inline(k), Some(0) | Some(u32::MAX))))
+                });
+            console_lanes = reads_whole || masks_held || inline_selectors || insts().any(in_half);
             let wave = if x.native.wave64 { 64 } else { 32 };
             let one_wave = cs.threads.iter().product::<u32>() <= wave;
             // On a host without 64-lane waves, a wave64 program whose lanes
@@ -685,6 +699,7 @@ impl<'a> Lower<'a> {
                 && !reads_whole
                 && !insts().any(|i| i.name() == "v_readfirstlane_b32")
                 && !masks_held
+                && !inline_selectors
                 && s.lds_dwords == 0
                 && !x.target.runs(64)
                 && x.target.runs(32)
@@ -5914,7 +5929,7 @@ impl<'a> Lower<'a> {
                             self.s.m.bool(false)
                         } else if x == u32::MAX {
                             self.s.m.bool(true)
-                        } else if self.console_lanes {
+                        } else if numeric_mask {
                             let lo = self.s.m.i32(x);
                             let hi = self.s.m.i32(if (x as i32) < 0 { u32::MAX } else { 0 });
                             self.lane_bit(c, lo, Some(hi))
