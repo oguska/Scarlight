@@ -7,15 +7,19 @@
 //!
 //! "Changed" means a page of the memory was written since the last detiling
 //! ([`crate::watch`]), in write-watched memory; in physical-page views,
-//! which cannot be watched, a content hash of the whole memory at every
-//! submission that samples it.
+//! which cannot be watched, a content hash of each page at every
+//! submission that samples it. Only the subresources whose memory holds a
+//! changed page are detiled again (and, when watched, only the changed
+//! pages read again).
 //!
-//! shortcut: a change detiles the whole texture, not the pages written.
-//! Only textures read through descriptor tables are brought up to date
+//! shortcut: a changed subresource is detiled whole, not just its blocks in
+//! the pages written, and every subresource is still copied into the host
+//! texture. Only textures read through descriptor tables are brought up to date
 //! (directly indexed views are not known per draw); plane 0 is uploaded
 //! (every mip and array slice), depth and stencil planes are not.
 
 use std::collections::HashMap;
+use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
 use windows::Win32::Graphics::Direct3D12::*;
@@ -43,18 +47,70 @@ pub(crate) struct Staging {
     layout: victory_formats::texture::Layout,
     /// Mips per array slice.
     mips: u32,
+    /// Per subresource, the byte ranges of the memory it is detiled from.
+    extents: Vec<Vec<Range<usize>>>,
     memory: *const u8,
     last: Mutex<Last>,
 }
 
-/// What a texture's staging buffer holds: the hash of the memory detiled
-/// (memory not watched), or the write-watch asking it was detiled after,
-/// with room to read the memory into.
+/// What a texture's staging buffer holds: the hash of each page of the
+/// memory detiled (memory not watched), or the write-watch asking it was
+/// detiled after, with the memory as then read.
 #[derive(Default)]
 struct Last {
-    hash: Option<blake3::Hash>,
+    hashes: Vec<blake3::Hash>,
     asked: u64,
     read: Vec<u8>,
+}
+
+/// Whether any of `changed` overlaps any of `extents` (both sorted).
+fn overlaps(extents: &[Range<usize>], changed: &[Range<usize>]) -> bool {
+    let (mut i, mut j) = (0, 0);
+    while i < extents.len() && j < changed.len() {
+        let (e, c) = (&extents[i], &changed[j]);
+        if e.start < c.end && c.start < e.end {
+            return true;
+        }
+        if e.end <= c.end {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+    false
+}
+
+/// The parts of `[0, len)` in which `a` and `b`, hashes of its `page`-byte
+/// parts, differ; `None` when they do not hash the same parts.
+fn changed_pages(
+    a: &[blake3::Hash],
+    b: &[blake3::Hash],
+    page: usize,
+    len: usize,
+) -> Option<Vec<Range<usize>>> {
+    (a.len() == b.len()).then(|| {
+        (0..a.len())
+            .filter(|&i| a[i] != b[i])
+            .map(|i| i * page..((i + 1) * page).min(len))
+            .collect()
+    })
+}
+
+/// `[start, start + len)`'s byte ranges, relative to `start`, of the
+/// `page`-byte pages numbered `pages` (in order).
+fn page_ranges(
+    pages: impl Iterator<Item = usize>,
+    page: usize,
+    start: usize,
+    len: usize,
+) -> Vec<Range<usize>> {
+    pages
+        .map(|p| {
+            let end = ((p + 1) * page).min(start + len);
+            (p * page).max(start) - start..end.saturating_sub(start)
+        })
+        .filter(|r| r.start < r.end)
+        .collect()
 }
 
 // SAFETY: the staging mapping is written only at submission, under
@@ -188,18 +244,45 @@ impl Staging {
         let mut last = self.last.lock().unwrap_or_else(|e| e.into_inner());
         let last = &mut *last;
         if let Some((now, written)) = crate::watch::writes(start, start + size, false) {
-            if last.asked != 0 && written.iter().all(|&(_, w)| w <= last.asked) {
+            let before = last.asked;
+            if before != 0 && written.iter().all(|&(_, w)| w <= before) {
                 return 0;
             }
             last.asked = now;
             // Read through the copy, which stands unmapped pages: memory of
             // big pools is too slow to ask page by page.
-            last.read.resize(size, 0);
-            crate::host::copy_mapped(last.read.as_mut_ptr(), self.memory, size, false);
-            self.detile(&last.read);
+            if before == 0 || last.read.len() != size {
+                last.read.resize(size, 0);
+                crate::host::copy_mapped(last.read.as_mut_ptr(), self.memory, size, false);
+                self.detile(&last.read, None);
+                #[cfg(feature = "diagnostics")]
+                crate::copystat::add(crate::copystat::C::TexWatched, size as u64);
+                return size;
+            }
+            // The rest of the memory is as last read: read again only the
+            // pages written since, and detile what they hold.
+            let pages = written
+                .iter()
+                .filter(|&&(_, w)| w > before)
+                .map(|&(p, _)| p);
+            let changed = page_ranges(pages, crate::watch::PAGE, start, size);
+            let mut read = 0;
+            for r in &changed {
+                // SAFETY: `r` lies inside both the read copy and the
+                // texture's memory, each `size` bytes.
+                let (to, from) = unsafe {
+                    (
+                        last.read.as_mut_ptr().add(r.start),
+                        self.memory.add(r.start),
+                    )
+                };
+                crate::host::copy_mapped(to, from, r.len(), false);
+                read += r.len();
+            }
+            self.detile(&last.read, Some(&changed));
             #[cfg(feature = "diagnostics")]
-            crate::copystat::add(crate::copystat::C::TexWatched, size as u64);
-            return size;
+            crate::copystat::add(crate::copystat::C::TexWatched, read as u64);
+            return read;
         }
         if !committed(self.memory, size) {
             #[cfg(feature = "diagnostics")]
@@ -213,21 +296,25 @@ impl Staging {
         }
         // SAFETY: committed memory of the texture's layout size.
         let tiled = unsafe { std::slice::from_raw_parts(self.memory, size) };
-        let hash = blake3::hash(tiled);
+        let page = crate::watch::PAGE;
+        let hashes: Vec<blake3::Hash> = tiled.chunks(page).map(blake3::hash).collect();
         #[cfg(feature = "diagnostics")]
         crate::copystat::add(crate::copystat::C::TexHashed, size as u64);
-        if last.hash == Some(hash) {
+        if last.hashes == hashes {
             return size;
         }
-        last.hash = Some(hash);
-        self.detile(tiled);
+        let changed = changed_pages(&last.hashes, &hashes, page, size);
+        self.detile(tiled, changed.as_deref());
+        last.hashes = hashes;
         #[cfg(feature = "diagnostics")]
         crate::copystat::add(crate::copystat::C::TexChanged, size as u64);
         size
     }
 
-    /// Detiles `tiled` (the texture's memory) into the staging buffer.
-    fn detile(&self, tiled: &[u8]) {
+    /// Detiles `tiled` (the texture's memory) into the staging buffer: the
+    /// subresources whose memory overlaps `changed` (sorted byte ranges),
+    /// or all of them.
+    fn detile(&self, tiled: &[u8], changed: Option<&[Range<usize>]>) {
         #[cfg(feature = "diagnostics")]
         if tiled.iter().all(|&b| b == 0) {
             tracing::debug!(
@@ -237,6 +324,9 @@ impl Staging {
             );
         }
         for (i, (footprint, &rows)) in self.footprints.iter().zip(&self.rows).enumerate() {
+            if changed.is_some_and(|c| !overlaps(&self.extents[i], c)) {
+                continue;
+            }
             let (mip, slice) = (i as u32 % self.mips, i as u32 / self.mips);
             let f = footprint.Footprint;
             let pitch = f.RowPitch as usize;
@@ -327,6 +417,18 @@ fn staging(resource: This, texture: &ID3D12Resource) -> Option<Arc<Staging>> {
         )
     });
     tracing::debug!(?desc, total, "texture contents uploaded from title memory");
+    let mips = u32::from(d.MipLevels).max(1);
+    let whole: Vec<_> = std::iter::once(0..layout.size as usize).collect();
+    let extents = (0..count)
+        .map(|i| match layout.extents(i % mips, i / mips) {
+            Ok(e) => e
+                .into_iter()
+                .map(|r| r.start as usize..r.end as usize)
+                .collect(),
+            // Detiling it fails too; any change "touches" it.
+            Err(_) => whole.clone(),
+        })
+        .collect();
     let s = Arc::new(Staging {
         buffer,
         #[cfg(feature = "diagnostics")]
@@ -336,9 +438,56 @@ fn staging(resource: This, texture: &ID3D12Resource) -> Option<Arc<Staging>> {
         rows,
         layout,
         mips: u32::from(d.MipLevels),
+        extents,
         memory,
         last: Mutex::default(),
     });
     map.insert(resource as usize, s.clone());
     Some(s)
+}
+
+#[cfg(test)]
+// Single ranges in brackets are meant: lists of one range.
+#[allow(clippy::single_range_in_vec_init)]
+mod tests {
+    use super::{changed_pages, overlaps, page_ranges};
+
+    #[test]
+    fn ranges_overlap_only_when_they_share_a_byte() {
+        let extents = [10..20, 40..50];
+        assert!(overlaps(&extents, &[15..16]));
+        assert!(overlaps(&extents, &[0..5, 49..60]));
+        assert!(overlaps(&extents, &[0..11]));
+        // Touching ends share no byte.
+        assert!(!overlaps(&extents, &[20..40]));
+        assert!(!overlaps(&extents, &[0..10, 20..40, 50..90]));
+        assert!(!overlaps(&extents, &[]));
+        assert!(!overlaps(&[], &[0..100]));
+        // A long change across several extents, and the reverse.
+        assert!(overlaps(&[10..20, 40..50], &[0..100]));
+        assert!(overlaps(&[0..100], &[10..20, 40..50]));
+    }
+
+    #[test]
+    fn hashed_pages_that_differ_are_the_change() {
+        let h = |b: u8| blake3::hash(&[b]);
+        let (a, b) = ([h(1), h(2), h(3)], [h(1), h(9), h(9)]);
+        // The last page is short: the memory ends inside it.
+        assert_eq!(
+            changed_pages(&a, &b, 64, 150),
+            Some(vec![64..128, 128..150])
+        );
+        assert_eq!(changed_pages(&a, &a, 64, 150), Some(vec![]));
+        // Nothing hashed before: no part known to be unchanged.
+        assert_eq!(changed_pages(&[], &b, 64, 150), None);
+    }
+
+    #[test]
+    fn written_pages_become_ranges_of_the_memory() {
+        // Memory from 100 for 250 bytes, in 64-byte pages 1..=5.
+        let r = page_ranges([1, 3, 5].into_iter(), 64, 100, 250);
+        assert_eq!(r, vec![0..28, 92..156, 220..250]);
+        // Pages outside the memory give nothing.
+        assert!(page_ranges([0, 6].into_iter(), 64, 100, 250).is_empty());
+    }
 }
