@@ -40,10 +40,11 @@ vkd3d-proton and DXVK. Linux paths work as arguments.
 
 ```sh
 scripts/proton-run.sh config
-scripts/proton-run.sh run /path/to/game/<the title's exe> --execute
+scripts/proton-run.sh run "/path/to/game/Game.exe" --execute
 ```
 
-`PROTON` selects another Proton folder, `PREFIX` another prefix and
+`PROTON` selects another Proton folder (the prefix is set up again with that
+build's vkd3d-proton and DXVK the first time it is used), `PREFIX` another prefix and
 `VICTORY_EXE` another exe (the diagnostics build, say). Saves, settings and
 `crashes.log` live in the prefix's `%LOCALAPPDATA%\victory\data` unless
 `victory.toml` or `VICTORY_DATA_DIR` says otherwise.

@@ -4,7 +4,7 @@
 # See docs/linux-proton.md.
 #
 #   scripts/proton-run.sh config
-#   scripts/proton-run.sh run /path/to/game/<the title's exe> --execute
+#   scripts/proton-run.sh run "/path/to/game/Game.exe" --execute
 #
 # As cargo's runner (its first argument is the test exe):
 #   CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUNNER=$PWD/scripts/proton-run.sh \
@@ -30,13 +30,21 @@ if [[ -z "${PROTON:-}" || ! -x "$PROTON/files/bin/wine" ]]; then
 fi
 PREFIX="${PREFIX:-${XDG_DATA_HOME:-$HOME/.local/share}/victory/proton}"
 
-# First run: let Proton build the prefix (it installs vkd3d-proton and DXVK).
-if [[ ! -f "$PREFIX/pfx/system.reg" ]]; then
+# First run, or a run with another Proton build than the one that set the
+# prefix up: let Proton set the prefix up (it installs its vkd3d-proton and
+# DXVK, and upgrades a prefix a different build made). The wine binary runs
+# from the selected build below, so the DLLs must come from it too.
+if [[ ! -f "$PREFIX/pfx/system.reg" ]] ||
+   [[ "$(cat "$PREFIX/proton-build" 2>/dev/null)" != "$PROTON" ]]; then
     mkdir -p "$PREFIX"
     STEAM_COMPAT_DATA_PATH="$PREFIX" \
     STEAM_COMPAT_CLIENT_INSTALL_PATH="${STEAM_COMPAT_CLIENT_INSTALL_PATH:-$HOME/.steam/steam}" \
     SteamAppId=0 SteamGameId=0 \
         python3 "$PROTON/proton" run cmd /c exit >/dev/null 2>&1 || true
+    # Only a prefix that was made is stamped: a failed setup is tried again.
+    if [[ -f "$PREFIX/pfx/system.reg" ]]; then
+        printf '%s\n' "$PROTON" >"$PREFIX/proton-build"
+    fi
 fi
 
 export WINEPREFIX="$PREFIX/pfx"

@@ -842,6 +842,20 @@ fn map(physical: &mut Physical, base: usize, len: usize, slice: Slice) -> bool {
     static LOOKUP: std::sync::Once = std::sync::Once::new();
     LOOKUP.call_once(|| victory_gpu::set_alias_lookup(other_views));
     note_aliases(base, len, &slice, true);
+    // The other views of these pages (a pool the GPU side already guards as
+    // clean, say) now have a writable twin: a title store through the new
+    // view changes their bytes without opening their guards. Told as remapped
+    // they are opened and observed again, and guarded with the new view among
+    // their aliases. (Gathered first: the notice looks aliases up itself.)
+    let mut others = Vec::new();
+    for k in (0..len).step_by(PAGE) {
+        other_views(base + k, &mut others);
+    }
+    others.sort_unstable();
+    others.dedup();
+    for at in others {
+        victory_gpu::title_memory_remapped(at, PAGE);
+    }
     physical.views.insert(base, (len, slice));
     true
 }

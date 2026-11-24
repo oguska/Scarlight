@@ -331,6 +331,12 @@ pub(crate) fn shadow_writes_parts(
         .collect()
 }
 
+/// The journal's generation now: every write the kernel or a guard reports
+/// from here on is at a later one than this.
+pub(crate) fn generation() -> u64 {
+    JOURNAL.lock().unwrap_or_else(|e| e.into_inner()).asked
+}
+
 /// One fresh observation for a group of requested ranges. The caller
 /// uses it only within this preparation pass. When the reservation has
 /// been verified we can skip the non-reset probe across its own pages.
@@ -555,6 +561,28 @@ static ALIAS_LOOKUP: std::sync::OnceLock<fn(usize, &mut Vec<usize>)> = std::sync
 /// page through another).
 pub fn set_alias_lookup(lookup: fn(usize, &mut Vec<usize>)) {
     let _ = ALIAS_LOOKUP.set(lookup);
+}
+
+/// The ranges that show the same physical memory as `[from, to)`, other
+/// than itself (a write there is a write to them too). With too many blocks
+/// to look up, everything: the caller then treats every range as written.
+pub(crate) fn alias_ranges(from: usize, to: usize) -> Vec<(usize, usize)> {
+    /// A bound on the lookups.
+    const MAX_BLOCKS: usize = 1024;
+    if ALIAS_LOOKUP.get().is_none() {
+        return Vec::new();
+    }
+    let (first, last) = (from / BLOCK, to.div_ceil(BLOCK));
+    if last - first > MAX_BLOCKS {
+        return vec![(0, usize::MAX)];
+    }
+    let mut out = Vec::new();
+    let mut found = Vec::new();
+    for block in first..last {
+        aliases_of(block, &mut found);
+        out.extend(found.iter().map(|&b| (b * BLOCK, (b + 1) * BLOCK)));
+    }
+    out
 }
 
 /// The blocks showing the same physical memory as `block` (not itself).
@@ -1010,6 +1038,18 @@ pub(crate) mod tests {
         set_alias_lookup(alias_pair);
     }
 
+    /// A write to a range is a write to the views of the same pages: they are
+    /// named, and a range too big to look up stands for everything.
+    #[test]
+    fn alias_ranges_name_the_other_views() {
+        let (a, b) = (64 * BLOCK, 4096 * BLOCK);
+        set_alias_pair(a, b);
+        assert_eq!(alias_ranges(a, a + BLOCK), [(b, b + BLOCK)]);
+        assert_eq!(alias_ranges(b + 10, b + 20), [(a, a + BLOCK)]);
+        assert!(alias_ranges(a + 8 * BLOCK, a + 9 * BLOCK).is_empty());
+        assert_eq!(alias_ranges(0, 2048 * BLOCK), [(0, usize::MAX)]);
+    }
+
     /// The kernel askings `writes` made on this thread (each test runs on
     /// its own).
     fn kernel_asked() -> usize {
@@ -1074,7 +1114,10 @@ pub(crate) mod tests {
             return;
         };
         assert!(a.private, "a VirtualAlloc reservation is private");
-        assert!(a.is_private_span(p, p + 2 * PAGE));
+        // The captured bounds, apart from `is_live`: another test remapping an
+        // unrelated view in between bumps the global revision, which is not
+        // what is checked here.
+        assert!(a.start <= p && p + 2 * PAGE <= a.end);
         // SAFETY: a pagefile section of one block, mapped read-write.
         let view = unsafe {
             let section = CreateFileMappingW(

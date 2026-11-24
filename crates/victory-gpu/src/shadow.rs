@@ -263,6 +263,11 @@ impl Shadow {
             let host_at = |a: usize, b: usize| unsafe { std::slice::from_raw_parts(self.data.add(a), b - a) };
             let mut title = Vec::new();
             let mut synced = Vec::new();
+            // Taken before title memory is read: a title write after it is
+            // later than the stamp the synced pages get, so it reaches the
+            // next refresh (a stamp from after the reads could cover a write
+            // that landed between a merge and the question below).
+            let read_at = crate::watch::generation();
             let mut at = from;
             while at < to {
                 let n = (PAGE - (start + at) % PAGE).min(to - at);
@@ -285,19 +290,20 @@ impl Shadow {
                 written += self.put_back(at, end, &before[at - from..end - from], &mut title, &mut synced);
                 at = end;
             }
-            // Pages made equal to title memory are current in the copy, so
-            // our own write is not taken for the title's; others keep what
-            // they had (a title write there shows at the next refresh).
+            // Pages made equal to title memory are current in the copy as of
+            // `read_at`; others keep what they had (a title write there shows
+            // at the next refresh). Our own writes are later than the stamp,
+            // so the pages of a put-back are copied once more: harmless.
             let (first, last) = ((start + from).div_ceil(PAGE), (start + to) / PAGE);
             if first < last
                 && !synced.is_empty()
                 && self.watched.load(Ordering::Relaxed) != NOT_WATCHED
-                && let Some((now, _)) = crate::watch::writes(first * PAGE, last * PAGE, true)
+                && crate::watch::writes(first * PAGE, last * PAGE, true).is_some()
             {
                 let base = start / PAGE;
                 let mut copied = self.copied.lock().unwrap_or_else(|e| e.into_inner());
                 for page in synced.into_iter().filter(|p| (first..last).contains(p)) {
-                    copied[page - base] = now;
+                    copied[page - base] = copied[page - base].max(read_at);
                 }
             }
         }
@@ -328,7 +334,21 @@ impl Shadow {
             // still straddle a 64 KiB piece boundary.
             let first = (PIECE - (start + from) % PIECE).min(to - from);
             if first == to - from {
-                return 0;
+                if to - from <= KERNEL_PAGE {
+                    return 0;
+                }
+                // A hole inside the piece (a committed host page next to a
+                // reserved one): by host page, so what can be read is put
+                // back. A piece read in part is not noted synced: the page
+                // is copied again at the next refresh.
+                let mut written = 0;
+                let mut at = from;
+                while at < to {
+                    let end = (at + KERNEL_PAGE - (start + at) % KERNEL_PAGE).min(to);
+                    written += self.put_back(at, end, &old[at - from..end - from], title, &mut Vec::new());
+                    at = end;
+                }
+                return written;
             }
             let mut written = 0;
             let mut at = from;
@@ -341,10 +361,9 @@ impl Shadow {
         }
         // SAFETY: inside the mapping; only the submitting thread writes it.
         let host = unsafe { std::slice::from_raw_parts_mut(self.data.add(from), to - from) };
-        let first = (PIECE - (start + from) % PIECE).min(to - from);
         synced.extend((start + from) / PAGE..=(start + to - 1) / PAGE);
         let mut written = 0;
-        for (a, b) in merge(title, host, old, first) {
+        for (a, b) in merge(title, host, old) {
             crate::watch::writing(start + from + a, b - a);
             crate::host::write_mapped((start + from + a) as *mut u8, title[a..].as_ptr(), b - a);
             written += b - a;
@@ -680,34 +699,34 @@ fn loose(address: u64, end: u64) -> Option<Arc<Shadow>> {
 /// Title memory and its copy are compared by piece.
 const PIECE: usize = 64 << 10;
 
+/// The host's page: what a read of title memory can find mapped or not.
+const KERNEL_PAGE: usize = 4096;
+
 /// Puts the GPU's bytes (where `host` differs from `old`, the copy before
 /// the submission) into `title` where it lacks them, and `title` into
-/// `host`. Returns the runs of pieces (the first `first` bytes long, the
-/// rest [`PIECE`]) where `title` lacked a GPU byte, as offsets: only those
-/// go back, so title writes elsewhere are kept.
-fn merge(title: &mut [u8], host: &mut [u8], old: &[u8], first: usize) -> Vec<(usize, usize)> {
-    let len = title.len();
+/// `host`. Returns the runs, as offsets, of the bytes where `title` lacked a
+/// GPU byte (runs closer than [`JOIN`] bytes are one): only those go back, so
+/// a title write elsewhere in the piece, after `title` was read, is not
+/// written over with what was read.
+fn merge(title: &mut [u8], host: &mut [u8], old: &[u8]) -> Vec<(usize, usize)> {
     let mut runs: Vec<(usize, usize)> = Vec::new();
-    let mut at = 0;
-    while at < len {
-        let end = if at == 0 { first } else { at + PIECE }.min(len);
-        let mut changed = false;
-        for ((t, h), o) in title[at..end].iter_mut().zip(&mut host[at..end]).zip(&old[at..end]) {
-            if *h != *o && *t != *h {
-                *t = *h;
-                changed = true;
+    for (at, ((t, h), o)) in title.iter_mut().zip(host.iter_mut()).zip(old).enumerate() {
+        if *h != *o && *t != *h {
+            *t = *h;
+            match runs.last_mut() {
+                Some(run) if at - run.1 < JOIN => run.1 = at + 1,
+                _ => runs.push((at, at + 1)),
             }
-            *h = *t;
         }
-        match runs.last_mut() {
-            Some(run) if changed && run.1 == at => run.1 = end,
-            _ if changed => runs.push((at, end)),
-            _ => {}
-        }
-        at = end;
+        *h = *t;
     }
     runs
 }
+
+/// Runs of GPU bytes closer than this go back in one write: a call costs
+/// tens of microseconds however small, and what lies between was read with
+/// them.
+const JOIN: usize = 64;
 
 /// For device-removed reports: the copy of title memory whose host range
 /// starts closest below host GPU address `va`, and where `va` is in it.
@@ -880,16 +899,17 @@ mod tests {
     use super::{PIECE, merge};
 
 
-    /// GPU bytes go into title memory, which keeps its own writes; only
-    /// runs of pieces the title lacked a GPU byte in go back, joined.
+    /// GPU bytes go into title memory, which keeps its own writes; only the
+    /// bytes the title lacked go back, close ones joined.
     #[test]
-    fn put_back_writes_joined_runs_of_pieces_the_gpu_changed() {
+    fn put_back_writes_runs_of_the_bytes_the_gpu_changed() {
         let len = 10 + 3 * PIECE;
         let old = vec![0u8; len];
         let mut host = old.clone();
         let mut title = old.clone();
-        // The GPU wrote a byte in every piece.
-        for at in [2, 10 + 5, 10 + PIECE + 7, 10 + 2 * PIECE] {
+        // The GPU wrote a byte in every piece, and two close together in the
+        // third.
+        for at in [2, 10 + 5, 10 + PIECE + 7, 10 + 2 * PIECE, 10 + 2 * PIECE + 40] {
             host[at] = 1;
         }
         // The title has the second piece's byte already, and wrote its own
@@ -897,10 +917,25 @@ mod tests {
         title[10 + 5] = 1;
         title[10 + 9] = 2;
         title[10 + PIECE + 1] = 3;
-        let runs = merge(&mut title, &mut host, &old, 10);
-        assert_eq!(runs, [(0, 10), (10 + PIECE, len)]);
+        let runs = merge(&mut title, &mut host, &old);
+        assert_eq!(
+            runs,
+            [
+                (2, 3),
+                (10 + PIECE + 7, 10 + PIECE + 8),
+                (10 + 2 * PIECE, 10 + 2 * PIECE + 41),
+            ]
+        );
         let mut want = old.clone();
-        for (at, v) in [(2, 1), (15, 1), (19, 2), (10 + PIECE + 1, 3), (10 + PIECE + 7, 1), (10 + 2 * PIECE, 1)] {
+        for (at, v) in [
+            (2, 1),
+            (15, 1),
+            (19, 2),
+            (10 + PIECE + 1, 3),
+            (10 + PIECE + 7, 1),
+            (10 + 2 * PIECE, 1),
+            (10 + 2 * PIECE + 40, 1),
+        ] {
             want[at] = v;
         }
         assert!(title == want, "title memory with the GPU's bytes put in");

@@ -520,11 +520,14 @@ fn signature(part: &[u8]) -> Result<Vec<container::SigElement>, ShaderError> {
 
 /// A pixel shader for debug views (`VICTORY_DEBUG_PS` in the GPU crate):
 /// colours each pixel by the slope of its surface, from the screen-space
-/// derivatives of its depth (`SV_Position.z`), written to all `targets`
-/// colour targets. It reads nothing of the title's, so a draw's geometry
+/// derivatives of its depth (`SV_Position.z`), written to one colour target
+/// per entry of `targets`, each the DXIL component type of that target's
+/// format (9 float, 4 signed, 5 unsigned integer): an integer target gets the
+/// constant 255 in every channel, since D3D12 refuses a pipeline whose
+/// output type does not match the target's. It reads nothing of the title's, so a draw's geometry
 /// shows whether or not its own pixel shader translates: a check that the
 /// vertex and mesh stages place what they draw where it belongs.
-pub fn debug_ps(targets: u32) -> HostShader {
+pub fn debug_ps(targets: &[u8]) -> HostShader {
     use bitcode::{Attr, Bin, Term};
     use container::SigElement;
     let mut s = shader::Shader::new(true);
@@ -554,11 +557,17 @@ pub fn debug_ps(targets: u32) -> HostShader {
         s.m.bin(b, Bin::Add, n, half)
     };
     let rgb = [colour(&mut s, nx), colour(&mut s, ny), colour(&mut s, one)];
-    let targets = targets.clamp(1, 8);
-    for t in 0..targets {
+    let targets: Vec<u8> = if targets.is_empty() {
+        vec![9]
+    } else {
+        targets.iter().copied().take(8).collect()
+    };
+    let int = s.m.i32(255);
+    for (t, &comp) in (0u32..).zip(&targets) {
         for (col, v) in rgb.iter().copied().chain([one]).enumerate() {
+            let (name, v) = if comp == 9 { ("storeOutput.f32", v) } else { ("storeOutput.i32", int) };
             let args = [s.m.i32(t), s.m.i32(0), s.m.i8(col as u8), v];
-            s.op(b, "storeOutput.f32", Attr::NoUnwind, s.t.void, 5, &args);
+            s.op(b, name, Attr::NoUnwind, s.t.void, 5, &args);
         }
     }
     s.inputs = vec![SigElement {
@@ -573,12 +582,13 @@ pub fn debug_ps(targets: u32) -> HostShader {
         usage: 0b0100,
         half: false,
     }];
-    s.outputs = (0..targets)
-        .map(|t| SigElement {
+    s.outputs = (0u32..)
+        .zip(&targets)
+        .map(|(t, &comp)| SigElement {
             name: "SV_Target".into(),
             index: t,
             kind: 16,
-            comp: 9,
+            comp,
             interp: 0,
             row: Some(t),
             col: 0,
@@ -975,7 +985,7 @@ mod tests {
             eprintln!("no SM 6.6 device; skipped");
             return;
         };
-        let ps = super::debug_ps(3);
+        let ps = super::debug_ps(&[9, 4, 5]);
         let vs = super::host::stub_vs(&ps).unwrap();
         host.pipeline(&vs, &ps).unwrap();
     }

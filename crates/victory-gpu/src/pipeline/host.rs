@@ -117,6 +117,28 @@ fn integer_format(f: DXGI_FORMAT) -> bool {
     )
 }
 
+/// The DXIL component type of what a pixel shader writes to a render target
+/// of this format: 9 float (also normalized formats), 4 signed and 5
+/// unsigned integer.
+fn target_component(f: DXGI_FORMAT) -> u8 {
+    if !integer_format(f) {
+        return 9;
+    }
+    match f {
+        DXGI_FORMAT_R32G32B32A32_SINT
+        | DXGI_FORMAT_R32G32B32_SINT
+        | DXGI_FORMAT_R16G16B16A16_SINT
+        | DXGI_FORMAT_R32G32_SINT
+        | DXGI_FORMAT_R8G8B8A8_SINT
+        | DXGI_FORMAT_R16G16_SINT
+        | DXGI_FORMAT_R32_SINT
+        | DXGI_FORMAT_R8G8_SINT
+        | DXGI_FORMAT_R16_SINT
+        | DXGI_FORMAT_R8_SINT => 4,
+        _ => 5,
+    }
+}
+
 /// The title's blend state as the host takes it: blending off on integer
 /// render targets. The console ignores blending there, and titles leave it
 /// on (the world sets it on an `R8_UINT` target), but D3D12 does not allow
@@ -642,7 +664,14 @@ impl HostPipeline {
             };
         // The debug view's pixel shader, one output per colour target.
         let debug = (compute.is_none() && debug)
-            .then(|| victory_shader::emit::debug_ps(g.map_or(1, |g| g.targets.NumRenderTargets)));
+            .then(|| {
+                let comps: Vec<u8> = g.map_or(vec![9], |g| {
+                    (0..g.targets.NumRenderTargets as usize)
+                        .map(|t| target_component(g.targets.RTFormats[t]))
+                        .collect()
+                });
+                victory_shader::emit::debug_ps(&comps)
+            });
         let code = |i: usize| {
             if i == 1
                 && let Some(d) = &debug
@@ -1042,9 +1071,9 @@ mod tests {
         assert_eq!(host_blend(&blending(false), &t), blending(false));
     }
 
-    /// Padding bytes after `u8` fields in title PSO streams (such as
-    /// `RenderTargetWriteMask` or `StencilWriteMask`) must be zeroed so
-    /// identical logical states produce byte-identical D3D12 structs.
+    /// Fields of a depth-stencil state taken from title PSO streams (whose
+    /// padding after `u8` fields, such as `StencilWriteMask`, may hold
+    /// anything) survive `clean_depth` unchanged.
     #[test]
     fn cleaned_graphics_descs_zero_padding_bytes() {
         let mut raw_depth = [0xAAu8; size_of::<D3D12_DEPTH_STENCIL_DESC>()];
@@ -1072,15 +1101,10 @@ mod tests {
             std::ptr::addr_of_mut!((*p).BackFace).write_unaligned(base.BackFace);
             p.read_unaligned()
         };
-        let a = clean_depth(dirty);
-        let b = clean_depth(base);
-        // SAFETY: inspecting raw bytes of plain-old-data structs.
-        let (ba, bb) = unsafe {
-            (
-                std::slice::from_raw_parts((&raw const a).cast::<u8>(), size_of::<D3D12_DEPTH_STENCIL_DESC>()),
-                std::slice::from_raw_parts((&raw const b).cast::<u8>(), size_of::<D3D12_DEPTH_STENCIL_DESC>()),
-            )
-        };
-        assert_eq!(ba, bb);
+        // Compared by field: the padding of a struct returned by value is
+        // not guaranteed to survive the move, so reading its bytes here
+        // would read memory Rust does not promise is initialized.
+        assert_eq!(clean_depth(dirty), clean_depth(base));
+        assert_eq!(clean_depth(dirty), base);
     }
 }

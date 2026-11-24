@@ -535,7 +535,7 @@ impl Host {
         // One submission at a time from preparation to copy-back: snapshots
         // and the ranges shaders write are per host copy, not per submission.
         let mut submitted = self.submitted.lock().unwrap_or_else(|e| e.into_inner());
-        self.submit(&mut submitted, runs);
+        self.submit(&mut submitted, runs, false);
     }
 
     /// Runs a title's submission: as [`execute`](Self::execute), but first,
@@ -546,10 +546,13 @@ impl Host {
         let mut submitted = self.submitted.lock().unwrap_or_else(|e| e.into_inner());
         crate::watch::new_submission();
         crate::descriptor::resync_title_writes();
-        self.submit(&mut submitted, runs);
+        self.submit(&mut submitted, runs, true);
     }
 
-    fn submit(&self, submitted: &mut u64, runs: &[&HostList]) {
+    /// `title`: a title's submission, whose heap slots are looked at again
+    /// once its deferred copies have run (a copy into title memory can
+    /// replace a slot after the first look).
+    fn submit(&self, submitted: &mut u64, runs: &[&HostList], title: bool) {
         let started = std::time::Instant::now();
         #[cfg(feature = "diagnostics")]
         crate::copystat::add(crate::copystat::C::Submissions, 1);
@@ -566,6 +569,9 @@ impl Host {
             lists.push(list.list.cast().ok());
         }
         batch.flush();
+        if title {
+            crate::descriptor::resync_title_writes();
+        }
         let prepared = std::time::Instant::now();
         // Diagnostics: each list on its own, timed (`VICTORY_GPU_TIMING`).
         #[cfg(feature = "diagnostics")]
@@ -1419,8 +1425,12 @@ impl Batch {
         match written {
             None => self.fresh.clear(),
             Some((from, to)) => {
+                // Other views of the pages written show the write too: what
+                // was brought up to date there is not any more either.
+                let mut written = vec![(from, to)];
+                written.extend(crate::watch::alias_ranges(from, to));
                 for (_, ranges) in &mut self.fresh {
-                    ranges.retain(|&(a, b)| b <= from || to <= a);
+                    ranges.retain(|&(a, b)| written.iter().all(|&(from, to)| b <= from || to <= a));
                 }
             }
         }
