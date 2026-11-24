@@ -1904,25 +1904,31 @@ mod tests {
         // supports typed UAV on this format; many GPUs do not), so compare
         // against what the device reports.
         let host = crate::host::host().unwrap();
-        let mut support = D3D12_FEATURE_DATA_FORMAT_SUPPORT {
-            Format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT(86),
-            ..Default::default()
+        let support1 = |format: i32| {
+            let mut support = D3D12_FEATURE_DATA_FORMAT_SUPPORT {
+                Format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT(format),
+                ..Default::default()
+            };
+            // SAFETY: plain feature query into our struct.
+            unsafe {
+                host.device
+                    .CheckFeatureSupport(
+                        D3D12_FEATURE_FORMAT_SUPPORT,
+                        (&raw mut support).cast(),
+                        size_of::<D3D12_FEATURE_DATA_FORMAT_SUPPORT>() as u32,
+                    )
+                    .expect("format support query");
+            }
+            support.Support1.0
         };
-        // SAFETY: plain feature query into our struct.
-        unsafe {
-            host.device
-                .CheckFeatureSupport(
-                    D3D12_FEATURE_FORMAT_SUPPORT,
-                    (&raw mut support).cast(),
-                    size_of::<D3D12_FEATURE_DATA_FORMAT_SUPPORT>() as u32,
-                )
-                .expect("format support query");
-        }
-        let uav_supported =
-            support.Support1.0 & D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW.0 != 0;
+        let uav_supported = support1(86) & D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW.0 != 0;
+        let rt_supported = support1(86) & D3D12_FORMAT_SUPPORT1_RENDER_TARGET.0 != 0;
         let has_uav = d.Flags.0 & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS.0 != 0;
         assert_eq!(has_uav, uav_supported);
-        assert_ne!(d.Flags.0 & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET.0, 0);
+        assert_eq!(
+            d.Flags.0 & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET.0 != 0,
+            rt_supported
+        );
 
         // B4G4R4A4_UNORM (115) with ALLOW_RENDER_TARGET (1) and a non-null
         // clear value: dropping RENDER_TARGET must also omit pOptimizedClearValue
@@ -1932,7 +1938,10 @@ mod tests {
             .expect("B4G4R4A4_UNORM texture should succeed with clear value dropped");
         // SAFETY: live D3D12 resource.
         let bd = unsafe { b4g4r4a4.GetDesc() };
-        assert_eq!(bd.Flags.0 & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET.0, 0);
+        assert_eq!(
+            bd.Flags.0 & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET.0 != 0,
+            support1(115) & D3D12_FORMAT_SUPPORT1_RENDER_TARGET.0 != 0
+        );
 
         // R8G8B8A8_TYPELESS (27) with flags=5 must keep ALLOW_UNORDERED_ACCESS.
         let typeless = host_texture(&make(27, 5), 0, std::ptr::null())
