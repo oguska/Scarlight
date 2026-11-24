@@ -891,7 +891,7 @@ impl State {
             return;
         };
         if let Some(view) = host.mirror(index, handle, true) {
-            readable(list, u, &view);
+            readable(list, u, &view, host.copy_of(index));
         }
     }
 
@@ -978,7 +978,8 @@ impl State {
                 for u in entries.iter().filter(|u| u.kind != ResourceType::Cbv) {
                     let handle = table + u64::from(u.table_offset_dwords) * 4;
                     if let Some(view) = crate::descriptor::view(handle) {
-                        readable(list, u, &view);
+                        let copy = host.copy_of(first + u.table_offset_dwords / 8);
+                        readable(list, u, &view, copy);
                     }
                 }
                 made.push((slot, first * 32));
@@ -1013,7 +1014,7 @@ impl State {
                     Some(view) => {
                         host.make_at(index, &view);
                         if let Some(u) = used {
-                            readable(list, u, &view);
+                            readable(list, u, &view, host.copy_of(index));
                         }
                     }
                     None => {
@@ -1376,8 +1377,14 @@ fn host_signature(kind: u32, stride: u32) -> Option<ID3D12CommandSignature> {
 }
 
 /// Gets what a shader reads or writes through a view ready: buffer data
-/// copied, textures moved to the state they need.
-fn readable(list: &HostList, u: &UsedResource, view: &View) {
+/// copied, textures moved to the state they need. `slot_copy` is the copy of
+/// just its bytes the descriptor slot reads, if it made one.
+fn readable(
+    list: &HostList,
+    u: &UsedResource,
+    view: &View,
+    slot_copy: Option<std::sync::Arc<crate::shadow::Shadow>>,
+) {
     #[cfg(feature = "diagnostics")]
     if u.kind == ResourceType::Uav {
         crate::producers::live_write(view);
@@ -1400,11 +1407,12 @@ fn readable(list: &HostList, u: &UsedResource, view: &View) {
     // its writes until the next one. Getting that right needs every host
     // buffer's state tracked across the submission (PR #334), so that the
     // bytes can be copied on the GPU inside the list instead.
+    // That copy is the slot's own, kept from when the descriptor was made
+    // (not looked up again: a buffer registered there since does not change
+    // what the descriptor reads).
     if let Some((address, len)) = crate::descriptor::host::buffer_range(view)
         && len > 0
-        && let Some(copy) = crate::shadow::aligned_existing(address, len)
-            .filter(|_| crate::descriptor::host::off_element(view))
-            .or_else(|| crate::shadow::find(address, len))
+        && let Some(copy) = slot_copy.or_else(|| crate::shadow::find(address, len))
     {
         copy.refresh(list, address, len);
         if u.kind == ResourceType::Uav {

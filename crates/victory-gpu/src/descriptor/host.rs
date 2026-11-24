@@ -462,6 +462,15 @@ impl HostHeap {
         }
     }
 
+    /// The copy of just its bytes that slot `index` reads (a buffer view off
+    /// its host copy's elements), as it was made: draws refresh and write
+    /// back this one while the slot reads it, whatever the buffer registry
+    /// says of that memory since.
+    pub(crate) fn copy_of(&self, index: u32) -> Option<std::sync::Arc<crate::shadow::Shadow>> {
+        let held = self.kept_copy.lock().unwrap_or_else(|e| e.into_inner());
+        held.get(index as usize)?.clone()
+    }
+
     fn set_entry(&self, index: u32, entry: StrideEntry) {
         if let Some(t) = &self.strides
             && index < t.len
@@ -1244,6 +1253,15 @@ fn nulled_stride(stride: u32) -> bool {
     }
 }
 
+/// The elements a buffer view takes: the `wanted` it names (0: all that fit)
+/// cut to the `left` bytes of the host copy from the view's own start, of
+/// `element` bytes each. Counted from the view's start, not the buffer's or
+/// the copy's: the offset of a placed view into its copy is already gone.
+fn bounded_elements(wanted: u32, left: u64, element: u64) -> u32 {
+    let fit = u32::try_from(left / element.max(1)).unwrap_or(u32::MAX);
+    if wanted == 0 { fit } else { wanted.min(fit) }
+}
+
 fn buffer_srv(
     address: u64,
     len: u64,
@@ -1261,7 +1279,8 @@ fn buffer_srv(
         );
         return None;
     }
-    let (shadow, first, own) = view_copy(address, len, shader_extent(address, &desc))
+    let extent = shader_extent(address, &desc);
+    let (shadow, first, own) = view_copy(address, len, extent)
         .map_err(|why| {
             once!(
                 view = kind(placed),
@@ -1282,12 +1301,7 @@ fn buffer_srv(
     buffer.FirstElement = if own { 0 } else { first };
     // Bounded to the host copy: reads past it return zeros instead of
     // reaching whatever the host placed after the buffer.
-    let remaining = (shadow.left(address) / element).saturating_sub(first);
-    buffer.NumElements = if buffer.NumElements == 0 {
-        remaining as u32
-    } else {
-        buffer.NumElements.min(remaining as u32)
-    };
+    buffer.NumElements = bounded_elements(buffer.NumElements, shadow.left(extent.0), element);
     if buffer.NumElements == 0 {
         return None;
     }
@@ -1347,13 +1361,7 @@ fn buffer_uav(
     buffer.FirstElement = if own { 0 } else { first };
     buffer.CounterOffsetInBytes = 0;
     // Bounded to the host copy, as for a shader view.
-    let element = extent.2;
-    let remaining = (shadow.left(address) / element).saturating_sub(first);
-    buffer.NumElements = if buffer.NumElements == 0 {
-        remaining as u32
-    } else {
-        buffer.NumElements.min(remaining as u32)
-    };
+    buffer.NumElements = bounded_elements(buffer.NumElements, shadow.left(extent.0), extent.2);
     if buffer.NumElements == 0 {
         return None;
     }
@@ -1956,5 +1964,22 @@ mod tests {
                 range(unordered_extent(0x1000, &uav_desc(&words)))
             );
         }
+    }
+
+    /// A placed view in the middle of a copy keeps its elements: the bytes
+    /// left are counted from the view's own start, not taken from the
+    /// placement offset a second time.
+    #[test]
+    fn a_view_off_the_start_of_its_copy_keeps_its_elements() {
+        // A 1120-byte parent, a four-element view of stride 56 at +560: the
+        // bytes left from the view are 560, ten elements.
+        assert_eq!(bounded_elements(4, 1120 - 560, 56), 4);
+        // Cut to the copy's end.
+        assert_eq!(bounded_elements(20, 1120 - 560, 56), 10);
+        // No count: all that fit.
+        assert_eq!(bounded_elements(0, 1120 - 560, 56), 10);
+        // Nothing left, and elements of no size, take none and all.
+        assert_eq!(bounded_elements(4, 0, 56), 0);
+        assert_eq!(bounded_elements(4, 560, 0), 4);
     }
 }
