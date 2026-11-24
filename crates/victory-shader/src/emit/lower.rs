@@ -4750,8 +4750,14 @@ impl<'a> Lower<'a> {
             let limit = self.s.m.i32(u32::MAX / stride);
             let over = self.s.m.cmp(c, pred::IUGT, index, limit);
             let far = self.s.m.i32(!15u32);
-            let at = self.s.m.select(c, over, far, at);
-            let at = self.s.m.bin(c, Bin::Add, at, off);
+            let base = self.s.m.select(c, over, far, at);
+            let sum = self.s.m.bin(c, Bin::Add, base, off);
+            // The member offset is a runtime value: it turns a position at the
+            // view's end into a wrapped one, and the sentinel itself into a
+            // low byte. A sum below its addend wrapped, so send that past the
+            // end too; a position that did not wrap stands as it is.
+            let wrap = self.s.m.cmp(c, pred::IULT, sum, base);
+            let at = self.s.m.select(c, wrap, far, sum);
             let h = self.handle(site, src, false, (11 | u, 0))?;
             return Ok((h, at, self.s.m.undef(self.s.t.i32)));
         }
