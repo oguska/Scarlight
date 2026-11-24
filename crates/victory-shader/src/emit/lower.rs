@@ -1966,7 +1966,12 @@ impl<'a> Lower<'a> {
 
     /// The median of three. With a NaN among them the hardware gives the
     /// minimum of the three instead (the host's minimum skips NaNs, so that
-    /// is the smallest number among them).
+    /// is the smallest number among them). Otherwise it is the middle one
+    /// under the hardware's order of floats, where -0 is below +0 (`v_med3_f32`
+    /// as the ISA defines it: `v_max_f32(v_min_f32(a, b), v_min_f32(
+    /// v_max_f32(a, b), c))`), and DXIL's FMin/FMax give either zero for equal
+    /// zeros, so the zero the chain leaves takes the sign two of the three
+    /// share: the median of {-0, +0, +0} is +0, of {-0, -0, +0} it is -0.
     fn med3(&mut self, a: V, b: V, third: V) -> V {
         let c = self.cur;
         let lo = self.binary(36, a, b);
@@ -1974,10 +1979,27 @@ impl<'a> Lower<'a> {
         let t = self.binary(36, hi, third);
         let median = self.binary(35, lo, t);
         let least = self.binary(36, lo, third);
+        // Of three zeros the median is one of their signs, the one two of
+        // them share: AND keeps a bit where both operands have it, so the two
+        // pairs of a majority leave its sign bit through OR.
+        let (ia, ib, ic) = (self.as_int(a), self.as_int(b), self.as_int(third));
+        let ab = self.s.m.bin(c, Bin::And, ia, ib);
+        let a_or_b = self.s.m.bin(c, Bin::Or, ia, ib);
+        let c_and = self.s.m.bin(c, Bin::And, ic, a_or_b);
+        let majority = self.s.m.bin(c, Bin::Or, ab, c_and);
+        let sign = self.s.m.i32(0x8000_0000);
+        let majority = self.s.m.bin(c, Bin::And, majority, sign);
+        let signed = self.as_float(majority);
+        // ±0 compares equal to 0 (a NaN does not).
+        let zero = self.s.m.f32(0);
+        let is_zero = self.s.m.cmp(c, pred::OEQ, median, zero);
+        let settled = self.s.m.select(c, is_zero, signed, median);
+        // A NaN among them gives the minimum of the three (the host's
+        // minimum skips NaNs, so that is the smallest number among them).
         let ab = self.s.m.cmp(c, pred::UNO, a, b);
         let nan3 = self.s.m.cmp(c, pred::UNO, third, third);
         let nan = self.s.m.bin(c, Bin::Or, ab, nan3);
-        self.s.m.select(c, nan, least, median)
+        self.s.m.select(c, nan, least, settled)
     }
 
     /// `a - floor(a)`, which on the hardware never reaches 1.0: where it
@@ -9554,6 +9576,49 @@ mod tests {
         for words in [add, sub] {
             lowers(&words, 0).unwrap();
         }
+    }
+
+    /// The instructions the module `words` lowers to: the test-only count the
+    /// module summary ends with.
+    fn instructions(words: &[u32]) -> usize {
+        lower_with(words, vec![], vec![]).unwrap();
+        let summary = crate::emit::last_module_summary();
+        summary.rsplit(' ').nth(1).unwrap().parse().unwrap()
+    }
+
+    #[test]
+    fn a_median_settles_its_zero_on_the_majority_sign() {
+        // v_med3_f32 v0, v1, v2, v3 with v1 = -0.0, v2 = v3 = +0.0, stored to
+        // LDS to keep it live; the same program with a move in its place
+        // measures what the median's order of zeros adds.
+        let mut med3 = vec![
+            0x7E02_02FF, 0x8000_0000, // v_mov_b32 v1, -0.0
+            0x7E04_02FF, 0x0000_0000, // v_mov_b32 v2, +0.0
+            0x7E06_02FF, 0x0000_0000, // v_mov_b32 v3, +0.0
+        ];
+        let mut add = med3.clone();
+        med3.extend([
+            0xD557_0000,
+            0x040E_0501, // v_med3_f32 v0, v1, v2, v3
+            0xD834_0000,
+            0x0000_0004, // ds_write_b32 v4, v0
+            S_ENDPGM,
+        ]);
+        add.extend([
+            0x7E00_0301, // v_mov_b32 v0, v1
+            0xD834_0000,
+            0x0000_0004, // ds_write_b32 v4, v0
+            S_ENDPGM,
+        ]);
+        // The chain, the NaN select, and the zero's sign: three bitcasts, the
+        // pair ANDs, the ORs, the sign mask, a bitcast back, the compare with
+        // zero and the select (11 instructions: the same program with the
+        // plain chain costs 18, this one 29).
+        let extra = instructions(&med3) - instructions(&add);
+        assert_eq!(
+            extra, 24,
+            "a median is its chain, the NaN select and the zero's sign, not {extra}"
+        );
     }
 
     fn perm_features(selector: u32) -> u64 {
