@@ -574,7 +574,33 @@ impl<'a> Lower<'a> {
                         .support(g)
                         .iter()
                         .any(|a| matches!(a, Atom::Opaque(_) | Atom::Constant(_)))
-                })
+                }) || {
+                    // A mask the structure did not follow (a constant, a
+                    // number built from scalars) is tested per lane, which
+                    // needs fixed lane numbering — but only where the select's
+                    // result is read: a select whose value never lands must
+                    // not force the console flow (and its one-wave limit).
+                    let live: Vec<Value> =
+                        insts().flat_map(|i| i.reads.iter().map(|r| r.1)).collect();
+                    insts().any(|i| {
+                        matches!(
+                            i.name(),
+                            "v_cndmask_b32"
+                                | "v_add_co_ci_u32"
+                                | "v_sub_co_ci_u32"
+                                | "v_subrev_co_ci_u32"
+                        ) && i.writes.iter().any(|w| live.contains(&w.1))
+                            && match &i.fields {
+                                Fields::Valu(v) => match v.src.get(2) {
+                                    Some(&Operand::Scalar { code, .. }) => i
+                                        .read(Reg::S(code))
+                                        .is_none_or(|m| !x.st.masks.contains_key(&m)),
+                                    _ => false,
+                                },
+                                _ => false,
+                            }
+                    })
+                }
             };
             console_lanes = reads_whole || masks_held || insts().any(in_half);
             let wave = if x.native.wave64 { 64 } else { 32 };
@@ -2170,6 +2196,61 @@ impl<'a> Lower<'a> {
             }
             Atom::Opaque(_) => Err("an opaque lane mask"),
             Atom::Constant(_) => Err("a constant lane mask"),
+        }
+    }
+
+    /// This lane's bit from a mask operand (`v_cndmask_b32` / `*_ci_u32`):
+    /// uses the tracked boolean when `structure` followed it, handles inline
+    /// `0`/`-1` constants, or tests this console lane's bit of the scalar
+    /// mask register (pair in wave64) when console lanes are active.
+    fn mask_cond(
+        &mut self,
+        inst: &Inst,
+        op: Option<&Operand>,
+        at: usize,
+        err: Why,
+    ) -> Result<V, Why> {
+        match op {
+            Some(&Operand::Const(128)) => Ok(self.s.m.bool(false)),
+            Some(&Operand::Const(193)) => Ok(self.s.m.bool(true)),
+            Some(&Operand::Scalar { code, .. }) => {
+                if let Some(m) = inst.read(Reg::S(code)) {
+                    // A selector that derives from neither EXEC nor a compare
+                    // (a constant, a number built from scalars) is a mask held
+                    // as a number, filed outside `masks`. The in-half form
+                    // cannot test the high word, so defer the select there and
+                    // retry only if its result is used.
+                    let numeric_mask = self.console_lanes && (!self.split || self.console_cf);
+                    let others = numeric_mask
+                        .then(|| self.x.st.others.get(&m))
+                        .flatten()
+                        .copied();
+                    if let Some(b) = self.x.st.masks.get(&m).copied().or(others) {
+                        return self.boolean(b, at);
+                    }
+                }
+                if !self.console_lanes {
+                    return Err(err);
+                }
+                // The in-half form cannot test the high word, so defer the
+                // select there and retry only if its result is used.
+                if self.split && !self.console_cf {
+                    return Err(err);
+                }
+                let lo = inst.read(Reg::S(code)).ok_or(err)?;
+                let lo = self.i32_of(lo)?;
+                let hi = if self.x.native.wave64 {
+                    match inst.read(Reg::S(code + 1)) {
+                        Some(v) => Some(self.i32_of(v)?),
+                        None => Some(self.s.m.i32(0)),
+                    }
+                } else {
+                    None
+                };
+                self.s.flags |= flags::WAVE_OPS;
+                Ok(self.lane_bit(at, lo, hi))
+            }
+            _ => Err(err),
         }
     }
 
@@ -5707,22 +5788,8 @@ impl<'a> Lower<'a> {
                 float(self, r)
             }
             "v_cndmask_b32" => {
-                let mask = match v.src.get(2) {
-                    Some(&Operand::Scalar { code, .. }) => inst.read(Reg::S(code)),
-                    _ => None,
-                };
-                // A selector that derives from neither EXEC nor a compare
-                // (a constant, a number built from scalars) is a mask held as
-                // a number. The in-half form cannot test the high word, so
-                // defer the select there and retry only if its result is used.
-                let numeric_mask = self.console_lanes && (!self.split || self.console_cf);
-                let m = mask
-                    .and_then(|m| {
-                        let others = numeric_mask.then(|| self.x.st.others.get(&m));
-                        self.x.st.masks.get(&m).or(others.flatten()).copied()
-                    })
-                    .ok_or(UNTRACKED_SELECT)?;
-                let cond = self.boolean(m, c)?;
+                let cond =
+                    self.mask_cond(inst, v.src.get(2), c, "a select on an untracked mask")?;
                 if v.abs != 0 || v.neg != 0 {
                     let (a, bb) = (f(self, 0)?, f(self, 1)?);
                     let r = self.s.m.select(c, cond, bb, a);
@@ -5740,14 +5807,12 @@ impl<'a> Lower<'a> {
                     std::mem::swap(&mut a, &mut bb);
                 }
                 let cin = if name.ends_with("_ci_u32") {
-                    let m = match v.src.get(2) {
-                        Some(&Operand::Scalar { code, .. }) => inst.read(Reg::S(code)),
-                        _ => None,
-                    };
-                    let m = m
-                        .and_then(|m| self.x.st.masks.get(&m).copied())
-                        .ok_or("a carry-in from an untracked mask")?;
-                    Some(self.boolean(m, c)?)
+                    Some(self.mask_cond(
+                        inst,
+                        v.src.get(2),
+                        c,
+                        "a carry-in from an untracked mask",
+                    )?)
                 } else {
                     None
                 };

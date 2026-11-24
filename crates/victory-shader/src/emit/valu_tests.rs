@@ -236,11 +236,7 @@ pub(super) static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(()
 
 /// Runs `shader` on every available SM 6.6 host (hardware GPU and WARP) for
 /// each 4-dword input set and invokes `check(backend, case_index, inputs, result_dword)`.
-fn run_cases(
-    shader: &HostShader,
-    cases: &[[u32; 4]],
-    check: impl FnMut(&str, usize, [u32; 4], u32),
-) {
+fn run_cases(shader: &HostShader, cases: &[[u32; 4]], check: impl FnMut(&str, usize, [u32; 4], u32)) {
     run_cases_on(shader, cases, &[("hardware", false), ("warp", true)], check);
 }
 
@@ -1833,4 +1829,28 @@ fn signed_scalar_add_sub_scc_matches_rdna2() {
             "{backend}: s_addk_i32({a}, -32768) SCC = {got}, want {want}",
         );
     });
+}
+/// A select whose mask is a plain SGPR (here a root constant), so the
+/// structure pass does not follow it: this lane takes its own bit of the
+/// number. Inline 0 and -1 masks pick src0 and src1 in every lane.
+#[test]
+fn v_cndmask_on_an_untracked_mask_tests_this_lanes_bit() {
+    // v_cndmask_b32_e64 v0, v1, v2, <mask> (VOP3 0x101); s3 holds the mask.
+    let from_sgpr = build_valu_cs(&vop3(0x101, 0, vgpr(1), vgpr(2), sgpr(3)));
+    let hw = &[("hardware", false)];
+    run_cases_on(
+        &from_sgpr,
+        &[[10, 20, 0, 0], [10, 20, 0, 1], [10, 20, 0, 2], [10, 20, 0, !0]],
+        hw,
+        |label, i, inp, got| {
+            let want = if inp[3] & 1 != 0 { inp[1] } else { inp[0] };
+            assert_eq!(got, want, "{label} case {i}");
+        },
+    );
+    for (mask, pick) in [(128u16, 0usize), (193, 1)] {
+        let k = build_valu_cs(&vop3(0x101, 0, vgpr(1), vgpr(2), mask));
+        run_cases_on(&k, &[[10, 20, 0, 0]], hw, |label, _, inp, got| {
+            assert_eq!(got, inp[pick], "{label} inline {mask}");
+        });
+    }
 }
