@@ -369,6 +369,39 @@ fn reads_mask_as_data(st: &Structured, i: &Inst) -> bool {
     })
 }
 
+/// Whether `inst` gives each lane what it would under any EXEC: scalar
+/// code and loads that do not touch EXEC, and vector code that reads no
+/// other lane (no DPP, permutes or lane reads and writes).
+fn lane_local(inst: &Inst) -> bool {
+    // EXEC as an operand, or EXECZ.
+    let exec = |o: &Operand| {
+        matches!(*o, Operand::Scalar { code, .. } if code >= EXEC) || *o == Operand::Const(252)
+    };
+    let name = inst.name();
+    match &inst.fields {
+        Fields::Sop { .. } => !inst
+            .reads
+            .iter()
+            .chain(&inst.writes)
+            .any(|&(r, _)| r == Reg::S(EXEC) || r == Reg::S(EXEC + 1)),
+        Fields::Smem { .. } => name.starts_with("s_load_") || name.starts_with("s_buffer_load_"),
+        Fields::Valu(v) => {
+            v.dpp.is_none()
+                && !name.starts_with("v_interp_")
+                && !matches!(
+                    name,
+                    "v_readlane_b32"
+                        | "v_readfirstlane_b32"
+                        | "v_writelane_b32"
+                        | "v_permlane16_b32"
+                        | "v_permlanex16_b32"
+                )
+                && !v.src.iter().chain(&v.dst).chain(&v.carry).any(exec)
+        }
+        _ => false,
+    }
+}
+
 /// Where half `h` (dword h / 2, the high half when odd) of a parameter
 /// packing 16-bit rows `a` and `b` two per dword comes from: a row and
 /// channel of `elements`, none for padding. Channel c of `a` is half c;
@@ -947,23 +980,60 @@ impl<'a> Lower<'a> {
         }
     }
 
-    /// An instruction inside a whole-wave section: the values that leave
-    /// the section are made from what the simulation found them to be.
-    fn section_inst(&mut self, b: usize, i: usize, start: usize) {
+    /// The instructions of the whole-wave section from `start` to `end`:
+    /// the values that leave it are made from what the simulation found
+    /// them to be. A value it found no shape for, written by a step that
+    /// does not look at other lanes (scalar code the compiler scheduled
+    /// into the section, or lane-local vector code), is lowered as outside
+    /// a section: the lanes active on entry compute it as they would under
+    /// their own EXEC, and only they run on the host.
+    fn section(&mut self, b: usize, start: usize, end: usize) -> Result<(), Stop> {
         const UNKNOWN: Why = "a whole-wave section step the simulation does not follow";
-        let inst = &self.x.p.blocks[b].insts[i];
-        for &(_, w) in &inst.writes {
-            let val = if self.section_out.contains(&w) {
-                let shape = self.sections[&b][&start].shapes.get(&w).copied();
-                match shape.ok_or(UNKNOWN).and_then(|sh| self.shape(sh)) {
-                    Ok(x) => Val::I32(x),
-                    Err(why) => Val::Missing(why),
-                }
-            } else {
-                Val::Missing(UNKNOWN)
-            };
-            self.vals.insert(w, val);
+        let insts = &self.x.p.blocks[b].insts;
+        let inside: HashSet<Value> = insts[start + 1..end]
+            .iter()
+            .flat_map(|inst| inst.writes.iter().map(|w| w.1))
+            .collect();
+        let mut need: HashSet<Value> = inside
+            .iter()
+            .copied()
+            .filter(|w| self.section_out.contains(w))
+            .collect();
+        let mut plain = vec![false; end - start];
+        for j in (start + 1..end).rev() {
+            let inst = &insts[j];
+            let shapes = &self.sections[&b][&start].shapes;
+            let wanted = inst
+                .writes
+                .iter()
+                .any(|&(_, w)| need.contains(&w) && !shapes.contains_key(&w));
+            if wanted && lane_local(inst) {
+                plain[j - start] = true;
+                need.extend(
+                    inst.reads
+                        .iter()
+                        .map(|r| r.1)
+                        .filter(|r| inside.contains(r)),
+                );
+            }
         }
+        for j in start + 1..end {
+            if plain[j - start] {
+                self.inst(b, j)?;
+            }
+            for &(_, w) in &insts[j].writes {
+                let shapes = &self.sections[&b][&start].shapes;
+                let shape = need.contains(&w).then(|| shapes.get(&w).copied()).flatten();
+                let val = match (shape.map(|sh| self.shape(sh)), plain[j - start]) {
+                    (Some(Ok(x)), _) => Val::I32(x),
+                    (_, true) => continue,
+                    (Some(Err(why)), false) => Val::Missing(why),
+                    (None, false) => Val::Missing(UNKNOWN),
+                };
+                self.vals.insert(w, val);
+            }
+        }
+        Ok(())
     }
 
     /// A value a whole-wave section leaves, as DXIL wave operations over the
@@ -1215,9 +1285,7 @@ impl<'a> Lower<'a> {
             while i < p.blocks[b].insts.len() {
                 self.inst(b, i)?;
                 if let Some(end) = self.sections.get(&b).and_then(|s| s.get(&i)).map(|s| s.end) {
-                    for j in i + 1..end {
-                        self.section_inst(b, j, i);
-                    }
+                    self.section(b, i, end)?;
                     i = end;
                     continue;
                 }
@@ -9367,6 +9435,24 @@ mod tests {
             user_data,
             slot,
         }
+    }
+
+    #[test]
+    fn scalar_code_inside_a_whole_wave_section_is_lowered() {
+        // Assembled with llvm-mc (gfx1030, wave32): scalar code the
+        // compiler scheduled into a whole-wave section, branched on after.
+        let words = [
+            0xBE84_0385, // s_mov_b32 s4, 5
+            0xBE80_3DC1, // s_or_saveexec_b32 s0, -1
+            0x8005_8104, // s_add_u32 s5, s4, 1
+            0x7E02_0280, // v_mov_b32_e32 v1, 0
+            0xBEFE_0300, // s_mov_b32 exec_lo, s0
+            0xBF06_8605, // s_cmp_eq_u32 s5, 6
+            0xBF85_0001, // s_cbranch_scc1 -> s_endpgm
+            0xBE86_0380, // s_mov_b32 s6, 0
+            S_ENDPGM,
+        ];
+        lowers(&words, 0).unwrap();
     }
 
     #[test]
