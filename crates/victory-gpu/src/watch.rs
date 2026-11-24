@@ -28,6 +28,29 @@ pub(crate) const PAGE: usize = 64 << 10;
 /// The kernel's page, the unit of its answers.
 const KERNEL_PAGE: usize = 4096;
 
+/// Whether every watch page of `[start, end)` is in one committed private
+/// region. A failed query for a subrange then cannot have crossed a region
+/// boundary or encountered an unmapped page elsewhere in the shadow.
+pub(crate) fn private_region_covers(start: usize, end: usize) -> bool {
+    use windows_sys::Win32::System::Memory::{
+        MEM_COMMIT, MEM_PRIVATE, MEMORY_BASIC_INFORMATION, VirtualQuery,
+    };
+    let start = start / PAGE * PAGE;
+    let Some(end) = end.checked_next_multiple_of(PAGE) else {
+        return false;
+    };
+    // SAFETY: a query of the virtual address, without reading its memory.
+    unsafe {
+        let mut info: MEMORY_BASIC_INFORMATION = std::mem::zeroed();
+        VirtualQuery(start as *const _, &mut info, size_of_val(&info)) != 0
+            && info.State == MEM_COMMIT
+            && info.Type == MEM_PRIVATE
+            && (info.BaseAddress as usize)
+                .checked_add(info.RegionSize)
+                .is_some_and(|limit| limit >= end)
+    }
+}
+
 struct Journal {
     /// Numbers the askings; 0 is "never".
     asked: u64,
@@ -210,8 +233,7 @@ fn open(g: &mut Guards, start: usize, end: usize) -> bool {
 /// The runtime calls it (as `kernel_will_write`) before the title's kernel
 /// reads into its own memory.
 pub fn writing(at: usize, len: usize) {
-    // The length is the title's (`fread`'s size times count, saturated).
-    open(&mut guards(), at, at.saturating_add(len));
+    open(&mut guards(), at, at + len);
 }
 
 /// The runtime mapped or unmapped title memory `[at, at + len)`: what it
@@ -220,7 +242,7 @@ pub fn title_memory_remapped(at: usize, len: usize) {
     let mut g = guards();
     let blocks: Vec<usize> = g
         .protected
-        .range(at / BLOCK..at.saturating_add(len).div_ceil(BLOCK))
+        .range(at / BLOCK..(at + len).div_ceil(BLOCK))
         .copied()
         .collect();
     for block in blocks {
@@ -283,10 +305,11 @@ fn writable(at: usize) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use windows_sys::Win32::System::Memory::{
-        MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE, VirtualAlloc, VirtualFree,
+        MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_NOACCESS, PAGE_READWRITE, VirtualAlloc,
+        VirtualFree,
     };
     const MEM_WRITE_WATCH: u32 = 0x20_0000;
 
@@ -369,13 +392,105 @@ mod tests {
         title_memory_remapped(view, 2 * BLOCK);
     }
 
-    /// A write or mapping that runs past the end of the address space (a
-    /// title's `fread` with a huge count) covers up to the end; the sum used
-    /// to overflow. Up there no test has guarded blocks.
+    pub(crate) struct Reservation(pub(crate) *mut std::ffi::c_void);
+
+    impl Drop for Reservation {
+        fn drop(&mut self) {
+            // SAFETY: this is the base of a reservation owned by the test.
+            assert_ne!(unsafe { VirtualFree(self.0, 0, MEM_RELEASE) }, 0);
+        }
+    }
+
+    pub(crate) fn adjacent(watched: usize, unwatched: usize) -> (Reservation, Reservation) {
+        for _ in 0..16 {
+            // SAFETY: these independent test reservations use valid allocation flags.
+            unsafe {
+                let span = VirtualAlloc(
+                    std::ptr::null(),
+                    watched + unwatched,
+                    MEM_RESERVE,
+                    PAGE_NOACCESS,
+                );
+                assert!(!span.is_null());
+                assert_ne!(VirtualFree(span, 0, MEM_RELEASE), 0);
+                let first = VirtualAlloc(
+                    span,
+                    watched,
+                    MEM_COMMIT | MEM_RESERVE | MEM_WRITE_WATCH,
+                    PAGE_READWRITE,
+                );
+                if first.is_null() {
+                    continue;
+                }
+                let first = Reservation(first);
+                let second = VirtualAlloc(
+                    span.cast::<u8>().wrapping_add(watched).cast(),
+                    unwatched,
+                    MEM_COMMIT | MEM_RESERVE,
+                    PAGE_READWRITE,
+                );
+                if !second.is_null() {
+                    return (first, Reservation(second));
+                }
+            }
+        }
+        panic!("adjacent test reservations");
+    }
+
     #[test]
-    fn ranges_past_the_address_space_end_do_not_overflow() {
-        let top = usize::MAX - 16;
-        writing(top, PAGE);
-        title_memory_remapped(top, usize::MAX);
+    fn unwatched_subrange_does_not_disable_watch_elsewhere_in_shadow() {
+        if crate::host::host().is_none() {
+            return;
+        }
+        let watched = 16 << 20;
+        let (first, second) = adjacent(watched, PAGE);
+        let start = first.0 as usize;
+        let len = (watched + PAGE) as u64;
+        struct RegisteredBuffer(usize);
+        impl Drop for RegisteredBuffer {
+            fn drop(&mut self) {
+                crate::shadow::unregister(self.0, self.0 as u64);
+            }
+        }
+        crate::shadow::register(start, start as u64, len);
+        let _registration = RegisteredBuffer(start);
+        // SAFETY: both reservations are live. Populate demand-zero pages
+        // before the first refresh, since touching them can trip write watch.
+        unsafe {
+            first.0.cast::<u8>().write_bytes(0, watched);
+            first.0.cast::<u32>().write(13);
+            second.0.cast::<u32>().write(27);
+        }
+        let shadow = crate::shadow::find(start as u64, len).unwrap();
+        assert_eq!(shadow.update(start, watched), watched);
+        assert_eq!(shadow.update(start, watched), 0);
+
+        // A small view in the next allocation needs the CPU fallback. A large
+        // conventional view on the same shadow can still use write watching.
+        assert_eq!(shadow.update(second.0 as usize, 4), 4);
+        let refreshed: usize = (0..4).map(|_| shadow.update(start, watched)).sum();
+        eprintln!(
+            "4-byte unwatched refresh, then 4 clean watched requests copied {refreshed} bytes"
+        );
+        assert_eq!(refreshed, 0);
+
+        // SAFETY: the first allocation remains live.
+        unsafe { first.0.cast::<u32>().write(500) };
+        assert_eq!(shadow.update(start, watched), PAGE);
+        // SAFETY: the persistently mapped shadow owns the refreshed word.
+        let mut data = std::ptr::null_mut();
+        // SAFETY: the live buffer contains the refreshed word. No GPU work is in flight.
+        unsafe {
+            shadow.buffer.Map(0, None, Some(&mut data)).unwrap();
+            let word = data.cast::<u32>().read_unaligned();
+            shadow.buffer.Unmap(0, None);
+            assert_eq!(word, 500);
+        }
+
+        // A later fallback crossing into the watched allocation invalidates
+        // that page's generation without affecting the remaining pages.
+        assert_eq!(shadow.update(start + watched - 4, 8), 8);
+        assert_eq!(shadow.update(start, watched), PAGE);
+        assert_eq!(shadow.update(start, watched), 0);
     }
 }
