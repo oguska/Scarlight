@@ -47,8 +47,9 @@ pub(crate) struct Staging {
     layout: victory_formats::texture::Layout,
     /// Mips per array slice.
     mips: u32,
-    /// Per subresource, the byte ranges of the memory it is detiled from.
-    extents: Vec<Vec<Range<usize>>>,
+    /// Per subresource, the byte ranges of the memory it is detiled from:
+    /// worked out when a check first needs them (a first detile does not).
+    extents: std::sync::OnceLock<Vec<Vec<Range<usize>>>>,
     memory: *const u8,
     last: Mutex<Last>,
 }
@@ -59,6 +60,8 @@ pub(crate) struct Staging {
 #[derive(Default)]
 struct Last {
     hashes: Vec<blake3::Hash>,
+    /// Room for the hashes of this check, so a check does not allocate.
+    scratch: Vec<blake3::Hash>,
     asked: u64,
     read: Vec<u8>,
 }
@@ -97,20 +100,28 @@ fn changed_pages(
 }
 
 /// `[start, start + len)`'s byte ranges, relative to `start`, of the
-/// `page`-byte pages numbered `pages` (in order).
+/// `page`-byte pages numbered `pages` (in order), with touching ranges
+/// merged: a run of written pages is one read of the memory.
 fn page_ranges(
     pages: impl Iterator<Item = usize>,
     page: usize,
     start: usize,
     len: usize,
 ) -> Vec<Range<usize>> {
-    pages
-        .map(|p| {
-            let end = ((p + 1) * page).min(start + len);
-            (p * page).max(start) - start..end.saturating_sub(start)
-        })
-        .filter(|r| r.start < r.end)
-        .collect()
+    let mut ranges: Vec<Range<usize>> = Vec::new();
+    for p in pages {
+        let end = ((p + 1) * page).min(start + len);
+        let r = (p * page).max(start) - start..end.saturating_sub(start);
+        if r.start >= r.end {
+            continue;
+        }
+        match ranges.last_mut() {
+            // Also merges a page listed twice.
+            Some(last) if r.start <= last.end => last.end = last.end.max(r.end),
+            _ => ranges.push(r),
+        }
+    }
+    ranges
 }
 
 // SAFETY: the staging mapping is written only at submission, under
@@ -235,6 +246,15 @@ impl Staging {
         let preparing = &crate::host::PREPARING;
         preparing[2].fetch_add(started.elapsed().as_micros() as u64, Relaxed);
         preparing[3].fetch_add(read as u64, Relaxed);
+        #[cfg(feature = "diagnostics")]
+        {
+            use crate::copystat::{C, add};
+            add(C::TexChecks, 1);
+            if read == 0 {
+                add(C::TexIdle, 1);
+                add(C::TexIdleBytes, self.layout.size);
+            }
+        }
     }
 
     /// Returns the bytes of title memory read.
@@ -249,6 +269,8 @@ impl Staging {
                 return 0;
             }
             last.asked = now;
+            #[cfg(feature = "diagnostics")]
+            let started = std::time::Instant::now();
             // Read through the copy, which stands unmapped pages: memory of
             // big pools is too slow to ask page by page.
             if before == 0 || last.read.len() != size {
@@ -256,7 +278,11 @@ impl Staging {
                 crate::host::copy_mapped(last.read.as_mut_ptr(), self.memory, size, false);
                 self.detile(&last.read, None);
                 #[cfg(feature = "diagnostics")]
-                crate::copystat::add(crate::copystat::C::TexWatched, size as u64);
+                {
+                    use crate::copystat::{C, add};
+                    add(C::TexWatched, size as u64);
+                    add(C::TexReadUs, started.elapsed().as_micros() as u64);
+                }
                 return size;
             }
             // The rest of the memory is as last read: read again only the
@@ -279,6 +305,11 @@ impl Staging {
                 crate::host::copy_mapped(to, from, r.len(), false);
                 read += r.len();
             }
+            #[cfg(feature = "diagnostics")]
+            crate::copystat::add(
+                crate::copystat::C::TexReadUs,
+                started.elapsed().as_micros() as u64,
+            );
             self.detile(&last.read, Some(&changed));
             #[cfg(feature = "diagnostics")]
             crate::copystat::add(crate::copystat::C::TexWatched, read as u64);
@@ -297,18 +328,47 @@ impl Staging {
         // SAFETY: committed memory of the texture's layout size.
         let tiled = unsafe { std::slice::from_raw_parts(self.memory, size) };
         let page = crate::watch::PAGE;
-        let hashes: Vec<blake3::Hash> = tiled.chunks(page).map(blake3::hash).collect();
+        #[cfg(feature = "diagnostics")]
+        let started = std::time::Instant::now();
+        // The hashes of the check before are in `hashes`: fill `scratch` and
+        // swap, so a check allocates nothing.
+        last.scratch.clear();
+        last.scratch.extend(tiled.chunks(page).map(blake3::hash));
         #[cfg(feature = "diagnostics")]
         crate::copystat::add(crate::copystat::C::TexHashed, size as u64);
-        if last.hashes == hashes {
+        #[cfg(feature = "diagnostics")]
+        crate::copystat::add(
+            crate::copystat::C::TexHashUs,
+            started.elapsed().as_micros() as u64,
+        );
+        if last.hashes == last.scratch {
             return size;
         }
-        let changed = changed_pages(&last.hashes, &hashes, page, size);
+        let changed = changed_pages(&last.hashes, &last.scratch, page, size);
         self.detile(tiled, changed.as_deref());
-        last.hashes = hashes;
+        std::mem::swap(&mut last.hashes, &mut last.scratch);
         #[cfg(feature = "diagnostics")]
         crate::copystat::add(crate::copystat::C::TexChanged, size as u64);
         size
+    }
+
+    /// Each subresource's ranges of the memory, made on first use: the
+    /// walk that works them out is a detile's worth of work per texture, so
+    /// a texture whose contents never change again never pays it.
+    fn extents(&self) -> &[Vec<Range<usize>>] {
+        self.extents.get_or_init(|| {
+            let mips = self.mips.max(1);
+            let whole: Vec<Range<usize>> = std::iter::once(0..self.layout.size as usize).collect();
+            let one = |i: usize| match self.layout.extents(i as u32 % mips, i as u32 / mips) {
+                Ok(e) => e
+                    .into_iter()
+                    .map(|r| r.start as usize..r.end as usize)
+                    .collect(),
+                // Detiling it fails too; any change "touches" it.
+                Err(_) => whole.clone(),
+            };
+            (0..self.footprints.len()).map(one).collect()
+        })
     }
 
     /// Detiles `tiled` (the texture's memory) into the staging buffer: the
@@ -316,16 +376,26 @@ impl Staging {
     /// or all of them.
     fn detile(&self, tiled: &[u8], changed: Option<&[Range<usize>]>) {
         #[cfg(feature = "diagnostics")]
-        if tiled.iter().all(|&b| b == 0) {
+        let started = std::time::Instant::now();
+        #[cfg(feature = "diagnostics")]
+        if tiled[..tiled.len().min(4096)].iter().all(|&b| b == 0) {
+            // A sample, not the whole memory: this runs per detile, and a
+            // full scan would be counted as texture time.
             tracing::debug!(
                 memory = ?self.memory,
                 desc = ?self.layout.desc,
-                "a sampled texture's memory is all zero (not streamed yet, or a failed BCPack read)"
+                "a sampled texture's memory starts all zero (not streamed yet, or a failed BCPack read)"
             );
         }
+        #[cfg(feature = "diagnostics")]
+        let mut done = 0u32;
         for (i, (footprint, &rows)) in self.footprints.iter().zip(&self.rows).enumerate() {
-            if changed.is_some_and(|c| !overlaps(&self.extents[i], c)) {
+            if changed.is_some_and(|c| !overlaps(&self.extents()[i], c)) {
                 continue;
+            }
+            #[cfg(feature = "diagnostics")]
+            {
+                done += 1;
             }
             let (mip, slice) = (i as u32 % self.mips, i as u32 / self.mips);
             let f = footprint.Footprint;
@@ -342,6 +412,13 @@ impl Staging {
                 tracing::warn!(?e, mip, slice, "texture not detiled");
                 return;
             }
+        }
+        #[cfg(feature = "diagnostics")]
+        {
+            use crate::copystat::{C, add};
+            add(C::TexDetileUs, started.elapsed().as_micros() as u64);
+            add(C::TexSubres, u64::from(done));
+            add(C::TexSubresAll, self.footprints.len() as u64);
         }
     }
 }
@@ -417,18 +494,6 @@ fn staging(resource: This, texture: &ID3D12Resource) -> Option<Arc<Staging>> {
         )
     });
     tracing::debug!(?desc, total, "texture contents uploaded from title memory");
-    let mips = u32::from(d.MipLevels).max(1);
-    let whole: Vec<_> = std::iter::once(0..layout.size as usize).collect();
-    let extents = (0..count)
-        .map(|i| match layout.extents(i % mips, i / mips) {
-            Ok(e) => e
-                .into_iter()
-                .map(|r| r.start as usize..r.end as usize)
-                .collect(),
-            // Detiling it fails too; any change "touches" it.
-            Err(_) => whole.clone(),
-        })
-        .collect();
     let s = Arc::new(Staging {
         buffer,
         #[cfg(feature = "diagnostics")]
@@ -438,10 +503,15 @@ fn staging(resource: This, texture: &ID3D12Resource) -> Option<Arc<Staging>> {
         rows,
         layout,
         mips: u32::from(d.MipLevels),
-        extents,
+        extents: std::sync::OnceLock::new(),
         memory,
         last: Mutex::default(),
     });
+    #[cfg(feature = "diagnostics")]
+    {
+        crate::copystat::add(crate::copystat::C::TexStaged, 1);
+        crate::copystat::add(crate::copystat::C::TexStagedBytes, total);
+    }
     map.insert(resource as usize, s.clone());
     Some(s)
 }
@@ -489,5 +559,43 @@ mod tests {
         assert_eq!(r, vec![0..28, 92..156, 220..250]);
         // Pages outside the memory give nothing.
         assert!(page_ranges([0, 6].into_iter(), 64, 100, 250).is_empty());
+        // A run of written pages is one range (one read of the memory),
+        // whether the pages come in order or repeated.
+        assert_eq!(
+            page_ranges([1, 2, 3].into_iter(), 64, 100, 250),
+            vec![0..156]
+        );
+        assert_eq!(
+            page_ranges([1, 1, 3].into_iter(), 64, 100, 250),
+            vec![0..28, 92..156]
+        );
+    }
+
+    /// Timing, not correctness: `victory_gpu.exe texture::tests::the_hash_pass
+    /// --ignored --nocapture` prints what a check's hash pass costs.
+    #[test]
+    #[ignore]
+    fn the_hash_pass_costs_this_much() {
+        use std::time::Instant;
+        let size = 16 << 20;
+        let tiled: Vec<u8> = (0..size).map(|i| (i * 31 + i / 251) as u8).collect();
+        let page = crate::watch::PAGE;
+        let n = 10;
+        let t = Instant::now();
+        let mut last = 0usize;
+        for _ in 0..n {
+            last ^= tiled
+                .chunks(page)
+                .map(|p| blake3::hash(p).as_bytes()[0] as usize)
+                .fold(0, |a, b| a ^ b);
+        }
+        let per = t.elapsed().as_secs_f64() / f64::from(n);
+        println!(
+            "hash: {} MB in {:.2} ms = {:.2} GB/s ({}{last})",
+            size >> 20,
+            per * 1e3,
+            size as f64 / 1e9 / per,
+            ""
+        );
     }
 }

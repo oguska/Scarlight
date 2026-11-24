@@ -1137,6 +1137,90 @@ mod tests {
         assert!(!t.planes[0].layout.addressable());
     }
 
+    /// Timing, not correctness: `cargo test --release -p victory-formats --
+    /// --ignored --nocapture detile_costs` prints MB/s for full and
+    /// per-subresource detiles and the cost of `Layout::extents`.
+    #[test]
+    #[ignore]
+    fn detile_costs() {
+        use std::time::Instant;
+        // A 2048x2048 BC7 chain in 64 KiB `D`: 16 MiB of console memory.
+        let d = Desc {
+            block: 4,
+            ..desc(2048, 2048, 12, 16, Swizzle::SW_64KB_D)
+        };
+        let l = Layout::new(&d).unwrap();
+        let size = l.size as usize;
+        let tiled: Vec<u8> = (0..size).map(|i| (i * 31 + i / 251) as u8).collect();
+        // The linear form: rows of `width` elements, `height` of them.
+        let row_of = |mip: u32| l.mips[mip as usize].width as usize * d.element_bytes as usize;
+        let plane_of = |mip: u32| row_of(mip) * l.mips[mip as usize].height as usize;
+        let mut out: Vec<Vec<u8>> = (0..d.mips).map(|mip| vec![0u8; plane_of(mip)]).collect();
+        let n = 20;
+        let mb = size as f64 / 1e6;
+        let t = Instant::now();
+        for _ in 0..n {
+            for mip in 0..d.mips {
+                let out = &mut out[mip as usize];
+                let (row, plane) = (row_of(mip), plane_of(mip));
+                l.detile(&tiled, mip, 0, out, row, plane).unwrap();
+            }
+        }
+        let full = t.elapsed().as_secs_f64() / f64::from(n);
+        let t = Instant::now();
+        let (row, plane) = (row_of(0), plane_of(0));
+        for _ in 0..n {
+            let out = &mut out[0];
+            l.detile(&tiled, 0, 0, out, row, plane).unwrap();
+        }
+        let mip0 = t.elapsed().as_secs_f64() / f64::from(n);
+        let mip0_mb = plane_of(0) as f64 / 1e6;
+        // Which mips are the slow ones: the chain whole, then each alone.
+        let mut per: Vec<String> = Vec::new();
+        for mip in 0..d.mips {
+            let (row, plane) = (row_of(mip), plane_of(mip));
+            let t = Instant::now();
+            for _ in 0..n {
+                let out = &mut out[mip as usize];
+                l.detile(&tiled, mip, 0, out, row, plane).unwrap();
+            }
+            let us = t.elapsed().as_secs_f64() / f64::from(n) * 1e6;
+            let tail = l.mips[mip as usize].tail.is_some();
+            per.push(format!(
+                "{mip}:{us:.0}us{}{tail}",
+                0,
+                tail = if tail { "T" } else { "" }
+            ));
+        }
+        let t = Instant::now();
+        for _ in 0..n {
+            for mip in 0..d.mips {
+                let (row, plane) = (row_of(mip), plane_of(mip));
+                let out = &mut out[mip as usize];
+                l.detile(&tiled, mip, 0, out, row, plane).unwrap();
+            }
+        }
+        let full2 = t.elapsed().as_secs_f64() / f64::from(n);
+        let t = Instant::now();
+        let all: Vec<_> = (0..d.mips).map(|m| l.extents(m, 0).unwrap()).collect();
+        let extents = t.elapsed().as_secs_f64();
+        println!(
+            "detile: {mb:.1} MB whole chain {:.2} ms ({:.0} MB/s); mip 0 {mip0_mb:.1} MB {:.2} ms \
+             ({:.0} MB/s); extents of {} mips in {:.0} us",
+            full * 1e3,
+            mb / full,
+            mip0 * 1e3,
+            mip0_mb / mip0,
+            all.len(),
+            extents * 1e6,
+        );
+        println!(
+            "chain again {:.2} ms; per mip (T = in the tail): {}",
+            full2 * 1e3,
+            per.join(" ")
+        );
+    }
+
     #[test]
     fn texture_copies_reject_overflowing_pitches() {
         let layout = Layout::new(&desc(4, 2, 1, 4, Swizzle::LINEAR)).unwrap();

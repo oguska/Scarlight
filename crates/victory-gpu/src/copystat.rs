@@ -37,8 +37,23 @@ pub(crate) enum C {
     TexWatched,
     TexHashed,
     TexChanged,
+    /// Texture refreshes asked for, and those that found nothing to do.
+    TexChecks,
+    TexIdle,
+    /// Bytes of a checked texture left as they were (no page changed).
+    TexIdleBytes,
+    /// Time reading title memory into the read copy, hashing it, detiling.
+    TexReadUs,
+    TexHashUs,
+    TexDetileUs,
+    /// Subresources detiled, and those of the textures that detiled any.
+    TexSubres,
+    TexSubresAll,
+    /// Staging buffers made, and their bytes.
+    TexStaged,
+    TexStagedBytes,
 }
-const COUNTERS: usize = 22;
+const COUNTERS: usize = 32;
 static COUNT: [AtomicU64; COUNTERS] = [const { AtomicU64::new(0) }; COUNTERS];
 
 pub(crate) fn add(c: C, n: u64) {
@@ -126,6 +141,25 @@ pub(crate) fn log(frames: f64) {
         mb(c[C::TexWatched as usize]),
         mb(c[C::TexHashed as usize]),
         mb(c[C::TexChanged as usize]),
+    );
+    #[cfg(feature = "diagnostics")]
+    tracing::info!(
+        "textures per frame: {:.0} checks, {:.0} unchanged ({:.1} MB left as they were); {:.1} MB \
+         read, {:.1} MB hashed, {:.1} MB detiled into {:.0} of {:.0} subresources; read {:.2} ms, \
+         hash {:.2} ms, detile {:.2} ms; {:.0} staging buffers {:.1} MB",
+        c[C::TexChecks as usize],
+        c[C::TexIdle as usize],
+        mb(c[C::TexIdleBytes as usize]),
+        mb(c[C::TexWatched as usize]),
+        mb(c[C::TexHashed as usize]),
+        mb(c[C::TexChanged as usize]),
+        c[C::TexSubres as usize],
+        c[C::TexSubresAll as usize],
+        ms(c[C::TexReadUs as usize]),
+        ms(c[C::TexHashUs as usize]),
+        ms(c[C::TexDetileUs as usize]),
+        c[C::TexStaged as usize],
+        mb(c[C::TexStagedBytes as usize]),
     );
     let ranges = RANGES.lock().unwrap_or_else(|e| e.into_inner()).take();
     let mut ranges: Vec<_> = ranges.into_iter().flatten().collect();
