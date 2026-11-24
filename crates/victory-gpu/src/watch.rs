@@ -701,14 +701,17 @@ fn protect(g: &mut Guards, from: usize, to: usize) {
     }
 }
 
-/// Whether nothing is committed at `at` (a placeholder between views).
+/// Whether the whole block at `at` is uncommitted (a placeholder between
+/// views). The kernel's answer covers only the region starting there: one
+/// whose tail is committed is not absent, since its pages would fault
+/// while nothing guards them.
 fn unmapped(at: usize) -> bool {
     use windows_sys::Win32::System::Memory::{MEM_COMMIT, MEMORY_BASIC_INFORMATION, VirtualQuery};
     // SAFETY: plain data filled in by the query.
     let mut info: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
     // SAFETY: a valid out pointer of the right size.
     let n = unsafe { VirtualQuery(at as *const _, &mut info, size_of_val(&info)) };
-    n != 0 && info.State != MEM_COMMIT
+    n != 0 && info.State != MEM_COMMIT && info.RegionSize >= BLOCK
 }
 
 /// Gives write access back to the guarded blocks of `[start, end)` and
@@ -777,16 +780,24 @@ pub fn title_memory_remapped(at: usize, len: usize) {
         while let Some(block) = g.absent.range(from..to).next().copied() {
             g.absent.remove(&block);
         }
-        let blocks: Vec<usize> = g.protected.range(from..to).copied().collect();
-        for block in blocks {
+        // Write access comes back before the records go: a block the range
+        // only partly covers stays ours, and a write to a page of it we did
+        // not touch must not find no record (then it is not handled). Blocks
+        // unmapped since are only forgotten: their address may belong to
+        // another mapping by now, which is not ours to open.
+        let gone: Vec<usize> = g
+            .protected
+            .range(from..to)
+            .copied()
+            .filter(|&block| !committed(block * BLOCK))
+            .collect();
+        for block in gone {
             g.protected.remove(&block);
             g.clean.remove(&block);
         }
-        // The views there are new: their alias marks are stale (#1122).
-        let aliased: Vec<usize> = g.aliased.range(from..to).copied().collect();
-        for block in aliased {
-            g.aliased.remove(&block);
-        }
+        // Opens the guards of the range (and, since the views there are
+        // new, drops their stale alias marks, #1122).
+        open(&mut g, at, end);
     }
     record_mapping_change(&mut journal, at, end);
 }
@@ -817,6 +828,16 @@ pub fn title_memory_allocation_changed(at: usize, len: usize) {
         }
         record_mapping_change(&mut journal, at, end);
     }
+}
+
+/// Whether `at` is committed memory (a block still mapped where we left it).
+fn committed(at: usize) -> bool {
+    use windows_sys::Win32::System::Memory::{MEM_COMMIT, MEMORY_BASIC_INFORMATION, VirtualQuery};
+    // SAFETY: plain data filled in by the query.
+    let mut info: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
+    // SAFETY: a valid out pointer of the right size.
+    let n = unsafe { VirtualQuery(at as *const _, &mut info, size_of_val(&info)) };
+    n != 0 && info.State == MEM_COMMIT
 }
 
 fn forget_views(guards: &mut Guards, first: usize, last: usize) {
@@ -967,9 +988,11 @@ pub(crate) mod tests {
     /// the view that was there.
     fn unmap(view: usize, blocks: usize) {
         use windows_sys::Win32::System::Memory::{MEMORY_MAPPED_VIEW_ADDRESS, UnmapViewOfFile};
+        // Told first: after the unmap the address may belong to another
+        // test's view, which is not ours to open.
+        title_memory_remapped(view, blocks * BLOCK);
         // SAFETY: our view.
         unsafe { UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: view as *mut _ }) };
-        title_memory_remapped(view, blocks * BLOCK);
     }
 
     /// A private reservation is reported private, a mapped view is not
@@ -1796,5 +1819,62 @@ pub(crate) mod tests {
         let top = usize::MAX - 16;
         writing(top, PAGE);
         title_memory_remapped(top, usize::MAX);
+    }
+
+    /// The protection of the block at `at`, as the kernel reports it.
+    fn protection(at: usize) -> u32 {
+        use windows_sys::Win32::System::Memory::{MEMORY_BASIC_INFORMATION, VirtualQuery};
+        // SAFETY: plain data filled in by the query.
+        let mut info: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: a valid out pointer of the right size.
+        let n = unsafe { VirtualQuery(at as *const _, &mut info, size_of_val(&info)) };
+        assert_ne!(n, 0);
+        info.Protect
+    }
+
+    /// A remap covering one page of a guarded block gives the whole block
+    /// write access again: its other pages are not guarded any more, and a
+    /// write to one of them must not find no record.
+    #[test]
+    fn a_partly_remapped_block_is_writable_again() {
+        use windows_sys::Win32::System::Memory::{PAGE_READONLY, PAGE_READWRITE};
+        let v = view(2);
+        let pages = |block: usize| (v + block * BLOCK) / PAGE..(v + (block + 1) * BLOCK) / PAGE;
+        let all: Vec<usize> = (0..2).flat_map(pages).collect();
+        assert_eq!(guard(v, v + 2 * BLOCK), Some(all));
+        assert_eq!(protection(v), PAGE_READONLY);
+        // The runtime remaps the block's last page and the next block's
+        // first: block 0 is only partly covered.
+        title_memory_remapped(v + BLOCK - PAGE, 2 * PAGE);
+        assert_eq!(protection(v), PAGE_READWRITE, "block 0 is not guarded");
+        assert!(!guards().protected.contains(&(v / BLOCK)));
+        unmap(v, 2);
+    }
+
+    /// A block whose tail is committed is not absent: its committed pages
+    /// would fault with nothing guarding them.
+    #[test]
+    fn a_partly_committed_block_is_not_absent() {
+        use windows_sys::Win32::System::Memory::{MEM_COMMIT, PAGE_READWRITE, VirtualAlloc};
+        // SAFETY: a fresh reservation of two blocks; we commit one page in
+        // the first one's tail and free the rest.
+        let p = unsafe { VirtualAlloc(std::ptr::null(), 2 * BLOCK, MEM_RESERVE, PAGE_READWRITE) }
+            as usize;
+        assert_ne!(p, 0);
+        assert!(unmapped(p), "a fully reserved block is absent");
+        // SAFETY: reserved; commits one kernel page of it.
+        let tail = unsafe {
+            VirtualAlloc(
+                (p + BLOCK - PAGE) as *const _,
+                PAGE,
+                MEM_COMMIT,
+                PAGE_READWRITE,
+            )
+        } as usize;
+        assert_eq!(tail, p + BLOCK - PAGE);
+        assert!(!unmapped(p), "the first block's tail is committed");
+        assert!(unmapped(p + BLOCK), "the second block is whole");
+        // SAFETY: our reservation.
+        unsafe { VirtualFree(p as *mut _, 0, MEM_RELEASE) };
     }
 }
