@@ -1900,7 +1900,28 @@ mod tests {
             .expect("B5G5R5A1_UNORM texture should be created without UAV flag");
         // SAFETY: live D3D12 resource.
         let d = unsafe { b5g5r5a1.GetDesc() };
-        assert_eq!(d.Flags.0 & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS.0, 0);
+        // Whether the flag is dropped depends on the host device (WARP on CI
+        // supports typed UAV on this format; many GPUs do not), so compare
+        // against what the device reports.
+        let host = crate::host::host().unwrap();
+        let mut support = D3D12_FEATURE_DATA_FORMAT_SUPPORT {
+            Format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT(86),
+            ..Default::default()
+        };
+        // SAFETY: plain feature query into our struct.
+        unsafe {
+            host.device
+                .CheckFeatureSupport(
+                    D3D12_FEATURE_FORMAT_SUPPORT,
+                    (&raw mut support).cast(),
+                    size_of::<D3D12_FEATURE_DATA_FORMAT_SUPPORT>() as u32,
+                )
+                .expect("format support query");
+        }
+        let uav_supported =
+            support.Support1.0 & D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW.0 != 0;
+        let has_uav = d.Flags.0 & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS.0 != 0;
+        assert_eq!(has_uav, uav_supported);
         assert_ne!(d.Flags.0 & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET.0, 0);
 
         // B4G4R4A4_UNORM (115) with ALLOW_RENDER_TARGET (1) and a non-null
