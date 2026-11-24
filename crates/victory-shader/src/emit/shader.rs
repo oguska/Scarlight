@@ -126,6 +126,9 @@ pub(crate) struct Shader {
     /// Test builds: the property words of each handle annotation, in order.
     #[cfg(test)]
     pub annotations: Vec<(u32, u32)>,
+    /// Test builds: typed loads assembled from a dword-aligned pair.
+    #[cfg(test)]
+    pub unaligned_typed_loads: u32,
     pub t: Types,
     pub pixel: bool,
     pub inputs: Vec<SigElement>,
@@ -200,6 +203,8 @@ impl Shader {
             m,
             #[cfg(test)]
             annotations: Vec::new(),
+            #[cfg(test)]
+            unaligned_typed_loads: 0,
             t: Types {
                 void,
                 i1,

@@ -61,6 +61,9 @@ pub(crate) struct Lowered {
     /// Test builds: the property words of each handle annotation, in order.
     #[cfg(test)]
     pub annotations: Vec<(u32, u32)>,
+    /// Test builds: typed loads assembled from a dword-aligned pair.
+    #[cfg(test)]
+    pub unaligned_typed_loads: u32,
 }
 
 pub(crate) struct Parts<'a> {
@@ -1254,6 +1257,8 @@ impl<'a> Lower<'a> {
         Ok(Lowered {
             #[cfg(test)]
             annotations: std::mem::take(&mut self.s.annotations),
+            #[cfg(test)]
+            unaligned_typed_loads: self.s.unaligned_typed_loads,
             cmp_samplers,
             root_cbvs,
             root_srvs,
@@ -3978,6 +3983,36 @@ impl<'a> Lower<'a> {
             let byte = self.s.m.bin(c, Bin::And, off, three);
             let sh = self.s.m.bin(c, Bin::Shl, byte, three);
             vec![self.s.m.bin(c, Bin::LShr, w, sh)]
+        } else if let Some(at) = self.s.m.int_value(off) {
+            if at % 4 == 0 {
+                load(self, off, total / 32)
+            } else {
+                // A value of several dwords at a byte offset inside one: the
+                // console reads the bytes the address names, so each word is
+                // taken from the two dword-aligned words around it. Reading
+                // at the byte address itself would promise the host an
+                // alignment the console does not have, and a host that
+                // believes it can hand back zeros (`notes/vtx.md`: a
+                // position fetched at an odd byte offset collapsing every
+                // vertex to the origin).
+                #[cfg(test)]
+                {
+                    self.s.unaligned_typed_loads += 1;
+                }
+                let n = (total / 32) as usize;
+                let shift = (at % 4) as u32 * 8;
+                let aligned = self.s.m.i32((at & !3) as u32);
+                let sh = self.s.m.i32(shift);
+                let up = self.s.m.i32(32 - shift);
+                let raw = load(self, aligned, n as u32 + 1);
+                (0..n)
+                    .map(|k| {
+                        let lo = self.s.m.bin(c, Bin::LShr, raw[k], sh);
+                        let hi = self.s.m.bin(c, Bin::Shl, raw[k + 1], up);
+                        self.s.m.bin(c, Bin::Or, lo, hi)
+                    })
+                    .collect()
+            }
         } else {
             load(self, off, total / 32)
         };
@@ -9032,6 +9067,205 @@ mod tests {
             }]
         };
         lower_with(&words, layout(), used()).unwrap();
+    }
+
+    /// `v_mov_b32 vdst, src0` (`src0`: 128 is the inline zero).
+    fn v_mov(vdst: u8, src0: u16) -> u32 {
+        0x7E00_0000 | (vdst as u32) << 17 | 0x01 << 9 | (src0 as u32 & 0x1FF)
+    }
+
+    /// `ds_write_b32 v[addr], v[data]`.
+    fn ds_write_b32(addr: u8, data: u8) -> [u32; 2] {
+        [0xD834_0000, u32::from(addr) | u32::from(data) << 8]
+    }
+
+    /// A buffer access: MUBUF (`mtbuf` false, opcode in bits 18-25, a
+    /// resource and optional `idxen`/`offen`) or MTBUF (`mtbuf` true, opcode
+    /// in bits 15-18, the format in bits 19-25), `srsrc` the first of four
+    /// resource SGPRs, `vdata`/`vaddr` VGPRs and `offset` a byte offset.
+    #[allow(clippy::too_many_arguments)]
+    fn buffer(
+        opcode: u16,
+        mtbuf: bool,
+        format: u8,
+        offset: u16,
+        offen: bool,
+        idxen: bool,
+        vdata: u8,
+        vaddr: u8,
+        srsrc: u8,
+    ) -> [u32; 2] {
+        let class = if mtbuf { 0x3A } else { 0x38 };
+        let op_shift = if mtbuf { 16 } else { 18 };
+        [
+            class << 26
+                | u32::from(opcode & if mtbuf { 0x7 } else { 0x7F }) << op_shift
+                | u32::from(format) << 19
+                | u32::from(offen) << 12
+                | u32::from(idxen) << 13
+                | u32::from(offset),
+            // soffset is the inline zero, TFE and GLC clear; MTBUF keeps
+            // the top bit of its opcode here.
+            0x80 << 24
+                | u32::from(if mtbuf { opcode >> 3 } else { 0 }) << 21
+                | u32::from(srsrc >> 2) << 16
+                | u32::from(vdata) << 8
+                | u32::from(vaddr),
+        ]
+    }
+
+    /// A program that reads the descriptor at table entry 0 into `s[8:11]`,
+    /// runs `fetch` (VGPRs from 0, its address in v3) and writes its VGPRs
+    /// to LDS: the three positions of a vertex fetch, or four channels.
+    fn fetch_program(fetch: [u32; 2], channels: u8) -> Vec<u32> {
+        let mut words = vec![
+            0xBE84_0300, // s_mov_b32 s4, s0
+            0xBE85_0380, // s_mov_b32 s5, 0
+            0xF408_0202,
+            0xFA00_0000,              // s_load_dwordx4 s[8:11], s[4:5], null
+            v_mov(3, 128),            // v_mov_b32 v3, 0 (the fetch's address)
+            v_mov(channels + 1, 128), // v_mov_b32 v5, 0 (the LDS address)
+        ];
+        words.extend_from_slice(&fetch);
+        for k in 0..channels {
+            words.extend_from_slice(&ds_write_b32(channels + 1, k));
+        }
+        words.push(S_ENDPGM);
+        words
+    }
+
+    /// The descriptor at table entry 0: a typed or raw SRV of `stride` (0:
+    /// none), read as `dwords` dwords.
+    fn fetch_tables(stride: u32, dwords: u8) -> (Vec<RootParam>, Vec<UsedResource>) {
+        let layout = vec![root(RootType::Table, 0, 0)];
+        let used = vec![UsedResource {
+            kind: ResourceType::Srv,
+            root: RootType::Table,
+            table_offset_dwords: 0,
+            lower_bound: 0,
+            stride,
+            dwords,
+            user_data: 0,
+            slot: 0,
+        }];
+        (layout, used)
+    }
+
+    #[test]
+    fn every_buffer_format_names_its_bits_and_numbers() {
+        // Every number names a format, 1 to 77, and no number past that
+        // does: the element sizes the typed fetches read follow from these.
+        for format in 1..=77u8 {
+            let (bits, _) = buffer_format(format).unwrap_or_else(|| panic!("format {format}"));
+            let total: u32 = bits.iter().sum();
+            assert_eq!(total % 8, 0, "format {format}: {bits:?} is whole bytes");
+            assert!(
+                total == 8 || total == 16 || total >= 32,
+                "format {format}: {bits:?} is a dword or a byte/half inside one"
+            );
+        }
+        assert_eq!(buffer_format(78), None);
+        // The vertex fetch shapes: float3 is 12 bytes (16_16_16_16 comes
+        // first, at 65), half2 and unorm8x4 are 4.
+        let bytes = |f| -> u32 { buffer_format(f).unwrap().0.iter().sum::<u32>() / 8 };
+        assert_eq!(bytes(74), 12, "32_32_32_FLOAT");
+        assert_eq!(bytes(24), 4, "16_16_SNORM");
+        assert_eq!(bytes(56), 4, "8_8_8_8_UNORM");
+    }
+
+    #[test]
+    fn typed_vertex_fetches_read_through_a_raw_view() {
+        // `tbuffer_load_format_xyz v[0:2], v3, s[8:11], offen` in the
+        // formats the title's positions come in: each is decoded from the
+        // bytes itself (rawBufferLoad) rather than read as one float.
+        for format in [24, 56, 74] {
+            let fetch = buffer(0x002, true, format, 0, true, false, 0, 3, 8);
+            let words = fetch_program(fetch, 3);
+            // The words are the fetch meant here: MTBUF `format_xyz` (its
+            // opcode's top bit lives in the second dword) with this format.
+            let code: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+            let typed: Vec<_> = crate::gfx10::decode(&code)
+                .unwrap()
+                .into_iter()
+                .filter(|i| i.name() == Some("tbuffer_load_format_xyz"))
+                .collect();
+            assert_eq!(typed.len(), 1, "format {format}");
+            assert_eq!(typed[0].encoding, crate::gfx10::Encoding::Mtbuf);
+            assert_eq!(typed[0].words[0] >> 19 & 0x7F, u32::from(format));
+            let (layout, used) = fetch_tables(0, 4);
+            let l = lower_with(&words, layout, used)
+                .unwrap_or_else(|e| panic!("format {format}: {e:?}"));
+            // A raw buffer view of the descriptor's buffer ((11, 0): kind
+            // 3 with no size), not a typed one.
+            assert!(
+                l.annotations.contains(&(11, 0)),
+                "format {format}: {:?}",
+                l.annotations
+            );
+            let summary = crate::emit::shader::last_summary();
+            let ops: Vec<&str> = summary
+                .split("ops: ")
+                .nth(1)
+                .unwrap_or_default()
+                .split(", ")
+                .collect();
+            assert!(ops.contains(&"rawBufferLoad"), "{format}: {summary}");
+            // Not the typed read (which a format would have to match the
+            // descriptor's own for).
+            assert!(!ops.contains(&"bufferLoad"), "{format}: {summary}");
+        }
+    }
+
+    #[test]
+    fn a_typed_fetch_inside_a_dword_reads_the_pair_around_it() {
+        // `tbuffer_load_format_xyz` at byte offset 33: the console reads
+        // the bytes at 33, so the host reads the dword-aligned pair and
+        // shifts (a dword read promised at 33 can return zeros).
+        let odd = buffer(0x002, true, 74, 33, false, false, 0, 3, 8);
+        let (layout, used) = fetch_tables(0, 4);
+        let l = lower_with(&fetch_program(odd, 3), layout, used).unwrap();
+        assert_eq!(l.unaligned_typed_loads, 1);
+        // The same fetch on a dword boundary is one plain read.
+        let even = buffer(0x002, true, 74, 32, false, false, 0, 3, 8);
+        let (layout, used) = fetch_tables(0, 4);
+        let l = lower_with(&fetch_program(even, 3), layout, used).unwrap();
+        assert_eq!(l.unaligned_typed_loads, 0);
+    }
+
+    #[test]
+    fn a_typed_fetch_of_no_format_is_refused() {
+        // Format 0 is not a format: the fetch must stop rather than read
+        // whatever the descriptor holds.
+        let fetch = buffer(0x002, true, 0, 0, true, false, 0, 3, 8);
+        let (layout, used) = fetch_tables(0, 4);
+        let err = match lower_with(&fetch_program(fetch, 3), layout, used) {
+            Err(e) => e,
+            Ok(_) => panic!("a fetch of format 0 lowered"),
+        };
+        assert!(
+            matches!(
+                err,
+                crate::ShaderError::Unsupported {
+                    what: "a buffer format",
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn an_indexed_fetch_is_structured_by_its_stride_or_raw_without_one() {
+        // `buffer_load_dwordx3 v[0:2], v3, s[8:11], 0 idxen`: with a
+        // 12-byte stride the host view is structured at 12 (12, 12); with
+        // no stride it is a raw view (11, 0).
+        let fetch = buffer(0x00F, false, 0, 0, false, true, 0, 3, 8);
+        let (layout, used) = fetch_tables(12, 4);
+        let l = lower_with(&fetch_program(fetch, 3), layout, used).unwrap();
+        assert!(l.annotations.contains(&(12, 12)), "{:?}", l.annotations);
+        let (layout, used) = fetch_tables(0, 4);
+        let l = lower_with(&fetch_program(fetch, 3), layout, used).unwrap();
+        assert!(l.annotations.contains(&(11, 0)), "{:?}", l.annotations);
     }
 
     /// Tables of 2D textures at s0 and samplers at s1.
