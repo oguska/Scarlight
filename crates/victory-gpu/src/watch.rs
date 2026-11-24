@@ -1460,8 +1460,10 @@ pub(crate) mod tests {
         }
 
         // The ordinary suffix still needs copying. The watched prefix
-        // stays valid, including when the two are requested together.
-        assert_eq!(shadow.update(start + watched - 4, 8), 4);
+        // stays valid, including when the two are requested together; a
+        // range whose probe fails is copied whole (Shadow::update_free), so
+        // the watched 4 bytes are copied again rather than split out.
+        assert_eq!(shadow.update(start + watched - 4, 8), 8);
         assert_eq!(shadow.update(start, watched), 0);
         // SAFETY: the last byte of the live watched reservation.
         unsafe { first.0.cast::<u8>().add(watched - 1).write(9) };

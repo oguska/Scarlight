@@ -7,7 +7,9 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{
+    HANDLE, HWND, LPARAM, LRESULT, RECT, WAIT_FAILED, WAIT_OBJECT_0, WPARAM,
+};
 use windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_12_0;
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
@@ -253,6 +255,113 @@ mod tests {
     use super::*;
 
     #[test]
+    fn list_scratch_reclaims_chunks_unused_by_two_recordings() {
+        let Some(host) = host() else { return };
+        let list = host.new_list().unwrap();
+        let finish = || {
+            list.close();
+            host.execute(&[&list]);
+            list.reset();
+        };
+        let chunk_count = || list.scratch.lock().unwrap().chunks.len();
+        assert!(list.scratch(u64::MAX).is_none());
+
+        let first = list.scratch(SCRATCH_CHUNK).unwrap();
+        let second = list.scratch(SCRATCH_CHUNK).unwrap();
+        let third = list.scratch(SCRATCH_CHUNK).unwrap();
+        finish();
+        assert_eq!(chunk_count(), 3);
+
+        assert_eq!(list.scratch(1).unwrap(), first);
+        finish();
+        assert_eq!(chunk_count(), 3);
+
+        // An alternating workload should get its existing mappings back.
+        assert_eq!(list.scratch(SCRATCH_CHUNK).unwrap(), first);
+        assert_eq!(list.scratch(SCRATCH_CHUNK).unwrap(), second);
+        assert_eq!(list.scratch(SCRATCH_CHUNK).unwrap(), third);
+        finish();
+
+        for expected in [3, 1] {
+            assert_eq!(list.scratch(1).unwrap(), first);
+            finish();
+            assert_eq!(chunk_count(), expected);
+        }
+
+        // Large dedicated uploads do not keep the scratch cache warm.
+        list.scratch(SCRATCH_CHUNK + 1).unwrap();
+        finish();
+        assert_eq!(chunk_count(), 1);
+        finish();
+        assert_eq!(chunk_count(), 0);
+        list.scratch(1).unwrap();
+        list.close();
+    }
+
+
+    #[test]
+    fn failed_scratch_growth_leaves_room_for_a_smaller_request() {
+        let Some(host) = host() else { return };
+        let mut scratch = Scratch::default();
+        let remaining = 256;
+        let occupied = SCRATCH_CHUNK - remaining;
+        let (buffer, mapped) = host.upload_buffer(SCRATCH_CHUNK).unwrap();
+        // SAFETY: a live buffer.
+        let gpu = unsafe { buffer.GetGPUVirtualAddress() };
+        assert_eq!(
+            scratch.reserve(occupied, || Some(ScratchChunk {
+                _buffer: buffer,
+                mapped: mapped as usize,
+                gpu,
+            })),
+            Some((gpu, mapped))
+        );
+
+        assert!(scratch.reserve(2 * remaining, || None).is_none());
+        let (tail_gpu, tail_mapped) = scratch
+            .reserve(remaining, || panic!("the existing buffer still has room"))
+            .unwrap();
+        assert_eq!(tail_gpu, gpu + occupied);
+        assert_eq!(tail_mapped, mapped.wrapping_add(occupied as usize));
+    }
+
+    #[test]
+    fn retired_scratch_is_reused_across_lists_within_the_shared_budget() {
+        let Some(host) = host() else { return };
+        let idle = ScratchPool::default();
+        let mut first = Scratch::default();
+        let mut addresses = Vec::new();
+        for _ in 0..=IDLE_SCRATCH_LIMIT {
+            addresses.push(
+                first
+                    .reserve(SCRATCH_CHUNK, || {
+                        let (buffer, mapped) = host.upload_buffer(SCRATCH_CHUNK)?;
+                        // SAFETY: a live buffer.
+                        let gpu = unsafe { buffer.GetGPUVirtualAddress() };
+                        Some(ScratchChunk {
+                            _buffer: buffer,
+                            mapped: mapped as usize,
+                            gpu,
+                        })
+                    })
+                    .unwrap(),
+            );
+        }
+
+        first.reset(&idle);
+        first.reset(&idle);
+        assert!(idle.take().is_none());
+        first.reset(&idle);
+        assert!(first.chunks.is_empty());
+
+        let mut second = Scratch::default();
+        for address in addresses.into_iter().take(IDLE_SCRATCH_LIMIT).rev() {
+            assert_eq!(second.reserve(SCRATCH_CHUNK, || idle.take()), Some(address));
+        }
+        assert!(idle.take().is_none());
+    }
+
+    #[test]
     fn warp_adapter_accepts_only_software() {
         // This probes DXGI without creating a D3D12 device or running a title.
         // SAFETY: plain DXGI adapter queries.
@@ -353,19 +462,81 @@ pub(crate) fn name(object: &impl Interface, text: impl FnOnce() -> String) {
     }
 }
 
+struct ScratchChunk {
+    _buffer: ID3D12Resource,
+    mapped: usize,
+    gpu: u64,
+}
+
+/// Idle reusable scratch for the process-wide host device. A chunk enters the
+/// pool after a fenced list reset. Dedicated upload buffers bypass it.
+#[derive(Default)]
+struct ScratchPool(Mutex<Vec<ScratchChunk>>);
+
+static IDLE_SCRATCH: ScratchPool = ScratchPool(Mutex::new(Vec::new()));
+
+impl ScratchPool {
+    fn take(&self) -> Option<ScratchChunk> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).pop()
+    }
+
+    fn recycle(&self, chunks: &mut impl Iterator<Item = ScratchChunk>) {
+        let mut idle = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let free = IDLE_SCRATCH_LIMIT - idle.len();
+        idle.extend(chunks.take(free));
+    }
+}
+
 /// Upload chunks handed out front to back: the chunks, the one in use and
 /// the bytes used in it.
 #[derive(Default)]
 struct Scratch {
-    chunks: Vec<(ID3D12Resource, usize, u64)>,
+    chunks: Vec<ScratchChunk>,
     current: usize,
     used: u64,
+    previous_chunks: usize,
+}
+
+impl Scratch {
+    fn reserve(
+        &mut self,
+        len: u64,
+        allocate: impl FnOnce() -> Option<ScratchChunk>,
+    ) -> Option<(u64, *mut u8)> {
+        let (current, used) = if self.used + len > SCRATCH_CHUNK {
+            (self.current + 1, 0)
+        } else {
+            (self.current, self.used)
+        };
+        if current == self.chunks.len() {
+            self.chunks.push(allocate()?);
+        }
+        let chunk = &self.chunks[current];
+        // A failed allocation leaves room in the previous chunk available
+        // to smaller requests recorded later in this list.
+        (self.current, self.used) = (current, used + len);
+        Some((chunk.gpu + used, (chunk.mapped + used as usize) as *mut u8))
+    }
+
+    fn reset(&mut self, idle: &ScratchPool) {
+        let used_chunks = self.current + usize::from(self.used != 0);
+        // Keep the peak of the last two recordings, so a single small
+        // recording does not cause allocations on the following one.
+        let keep = used_chunks.max(self.previous_chunks);
+        if keep < self.chunks.len() {
+            idle.recycle(&mut self.chunks.drain(keep..));
+        }
+        self.previous_chunks = used_chunks;
+        (self.current, self.used) = (0, 0);
+    }
 }
 
 // SAFETY: the chunk pointers are persistent mappings of upload buffers.
 unsafe impl Send for Scratch {}
 
 const SCRATCH_CHUNK: u64 = 4 << 20;
+// The host keeps at most 4 MiB of idle upload scratch across all lists.
+const IDLE_SCRATCH_LIMIT: usize = ((4 << 20) / SCRATCH_CHUNK) as usize;
 
 /// One piece of submission-time work, in recorded order.
 enum Step {
@@ -569,18 +740,27 @@ impl Host {
             *submitted += 1;
             let started = std::time::Instant::now();
             // SAFETY: closed lists; the fence and event are ours.
-            unsafe {
+            let waited = unsafe {
                 self.queue.ExecuteCommandLists(group);
-                let waited = self
-                    .queue
+                self.queue
                     .Signal(&self.fence, *submitted)
-                    .and_then(|()| self.fence.SetEventOnCompletion(*submitted, self.event));
-                match waited {
-                    Ok(()) => {
-                        WaitForSingleObject(self.event, INFINITE);
-                    }
-                    Err(e) => tracing::warn!(error = %e, "host submission not waited for"),
-                }
+                    .and_then(|()| self.fence.SetEventOnCompletion(*submitted, self.event))
+                    .map_err(|e| e.to_string())
+                    .and_then(|()| match WaitForSingleObject(self.event, INFINITE) {
+                        WAIT_OBJECT_0 => Ok(()),
+                        WAIT_FAILED => Err(windows::core::Error::from_thread().to_string()),
+                        status => Err(format!("unexpected fence wait status {:#x}", status.0)),
+                    })
+            };
+            if let Err(e) = waited {
+                // Callers may reset lists or read GPU output as soon as we return.
+                fail(format_args!(
+                    "host GPU fence wait failed for value {} in a submission of {} lists ({e}){}{}",
+                    *submitted,
+                    runs.len(),
+                    self.removal_data(runs),
+                    last_notes(runs)
+                ));
             }
             #[cfg(feature = "diagnostics")]
             if groups.len() > 1 && started.elapsed() > std::time::Duration::from_millis(50) {
@@ -796,12 +976,18 @@ impl Host {
         first_error
     }
 
-    /// A host render target view of `resource`, valid until it is recorded.
+    /// A host render target view of `resource`, valid until it is recorded,
+    /// or `None` if the host resource lacks `ALLOW_RENDER_TARGET`.
     pub(crate) fn rtv(
         &self,
         resource: &ID3D12Resource,
         desc: Option<&D3D12_RENDER_TARGET_VIEW_DESC>,
-    ) -> D3D12_CPU_DESCRIPTOR_HANDLE {
+    ) -> Option<D3D12_CPU_DESCRIPTOR_HANDLE> {
+        // SAFETY: a live resource.
+        let flags = unsafe { resource.GetDesc() }.Flags;
+        if flags.0 & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET.0 == 0 {
+            return None;
+        }
         let slot = self.next_rtv.fetch_add(1, Ordering::Relaxed) % RTV_RING;
         // SAFETY: a slot of our heap and a live resource.
         unsafe {
@@ -809,8 +995,53 @@ impl Host {
             handle.ptr += (slot * self.rtv_size) as usize;
             self.device
                 .CreateRenderTargetView(resource, desc.map(|d| d as *const _), handle);
+            Some(handle)
+        }
+    }
+
+    /// A render target view that discards what is written to it, in `desc`'s
+    /// format (R8G8B8A8_UNORM without one), valid until it is recorded. It
+    /// holds the place of a target the host cannot render to, so the targets
+    /// after it keep their slots.
+    pub(crate) fn null_rtv(
+        &self,
+        desc: Option<&D3D12_RENDER_TARGET_VIEW_DESC>,
+    ) -> D3D12_CPU_DESCRIPTOR_HANDLE {
+        // A null descriptor must be one a real resource could use: forwarding a
+        // format the adapter cannot render to breaks that contract, and some
+        // drivers reject a descriptor that does.
+        let desc = desc
+            .filter(|d| d.Format != DXGI_FORMAT_UNKNOWN && self.renders(d.Format))
+            .copied()
+            .unwrap_or(D3D12_RENDER_TARGET_VIEW_DESC {
+                Format: DXGI_FORMAT_R8G8B8A8_UNORM,
+                ViewDimension: D3D12_RTV_DIMENSION_TEXTURE2D,
+                ..Default::default()
+            });
+        let slot = self.next_rtv.fetch_add(1, Ordering::Relaxed) % RTV_RING;
+        // SAFETY: a slot of our heap; a null resource with a description.
+        unsafe {
+            let mut handle = self.rtvs.GetCPUDescriptorHandleForHeapStart();
+            handle.ptr += (slot * self.rtv_size) as usize;
+            self.device
+                .CreateRenderTargetView(None::<&ID3D12Resource>, Some(&desc), handle);
             handle
         }
+    }
+
+    /// Whether the adapter offers `format` as a render target, the use a null
+    /// render-target descriptor stands in for.
+    fn renders(&self, format: DXGI_FORMAT) -> bool {
+        let mut support = D3D12_FEATURE_DATA_FORMAT_SUPPORT { Format: format, ..Default::default() };
+        // SAFETY: plain feature query into our struct.
+        let queried = unsafe {
+            self.device.CheckFeatureSupport(
+                D3D12_FEATURE_FORMAT_SUPPORT,
+                (&raw mut support).cast(),
+                size_of::<D3D12_FEATURE_DATA_FORMAT_SUPPORT>() as u32,
+            )
+        };
+        queried.is_ok() && support.Support1.0 as u32 & D3D12_FORMAT_SUPPORT1_RENDER_TARGET.0 as u32 != 0
     }
 
     /// A host depth view of `resource`, valid until it is recorded.
@@ -934,10 +1165,6 @@ impl HostList {
         self.pipelines.lock().unwrap_or_else(|e| e.into_inner()).clear();
         #[cfg(feature = "diagnostics")]
         self.notes.lock().unwrap_or_else(|e| e.into_inner()).clear();
-        {
-            let mut scratch = self.scratch.lock().unwrap_or_else(|e| e.into_inner());
-            (scratch.current, scratch.used) = (0, 0);
-        }
         // SAFETY: the list is not executing.
         let reset = unsafe {
             self.allocator
@@ -947,6 +1174,10 @@ impl HostList {
         if let Err(e) = reset {
             fail(format_args!("a host command list did not reset ({e})"));
         }
+        self.scratch
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .reset(&IDLE_SCRATCH);
     }
 
     /// Moves a title texture's host copy to `wanted` (a host state) in this
@@ -1143,9 +1374,8 @@ impl HostList {
     /// `len` bytes of upload memory (256-byte aligned) until the list is
     /// reset: the host GPU address and the CPU pointer.
     pub(crate) fn scratch(&self, len: u64) -> Option<(u64, *mut u8)> {
+        let len = len.max(1).checked_next_multiple_of(256)?;
         let host = host()?;
-        let mut s = self.scratch.lock().unwrap_or_else(|e| e.into_inner());
-        let len = len.max(1).next_multiple_of(256);
         if len > SCRATCH_CHUNK {
             let (buffer, data) = host.upload_buffer(len)?;
             name(&buffer, || format!("list scratch {len:#x}"));
@@ -1154,21 +1384,21 @@ impl HostList {
             self.deferred().uploads.push(buffer);
             return Some((gpu, data));
         }
-        if s.used + len > SCRATCH_CHUNK && s.current < s.chunks.len() {
-            (s.current, s.used) = (s.current + 1, 0);
-        }
-        if s.current == s.chunks.len() {
+        let mut scratch = self.scratch.lock().unwrap_or_else(|e| e.into_inner());
+        scratch.reserve(len, || {
+            if let Some(chunk) = IDLE_SCRATCH.take() {
+                return Some(chunk);
+            }
             let (buffer, data) = host.upload_buffer(SCRATCH_CHUNK)?;
             name(&buffer, || "list scratch".into());
             // SAFETY: a live buffer.
             let gpu = unsafe { buffer.GetGPUVirtualAddress() };
-            s.chunks.push((buffer, data as usize, gpu));
-            s.used = 0;
-        }
-        let (_, data, gpu) = s.chunks[s.current];
-        let at = s.used;
-        s.used += len;
-        Some((gpu + at, (data + at as usize) as *mut u8))
+            Some(ScratchChunk {
+                _buffer: buffer,
+                mapped: data as usize,
+                gpu,
+            })
+        })
     }
 
     /// The host address of the list's indirect-work budget, zeroed at each
