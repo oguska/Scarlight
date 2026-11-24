@@ -406,6 +406,9 @@ impl HostHeap {
         // these slots and publish its own stride entries.
         for index in first..first.saturating_add(n).min(self.alias_base) {
             clear(self, index);
+            // Drop the retained resource and own-bytes copy too, so a
+            // released slot does not pin a large allocation until reuse.
+            self.keep(index, None, None);
         }
         let mut guard = self.next.lock().unwrap_or_else(|e| e.into_inner());
         let end = (at + n).min(self.dynamic) as usize;
