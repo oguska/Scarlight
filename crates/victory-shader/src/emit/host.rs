@@ -62,6 +62,37 @@ fn err(e: windows::core::Error) -> String {
     e.message().to_string()
 }
 
+/// A DXGI or D3D12 call failed where a device should have been.
+fn failed(e: windows::core::Error) -> Unavailable {
+    Unavailable::Failed(err(e))
+}
+
+/// Why [`Host::new`] has no device to give. The tests skip the first two
+/// (a runner without a GPU, a device that cannot run SM 6.6 programs) and
+/// fail on [`Unavailable::Failed`], so that a broken DXGI or D3D12 setup on a
+/// machine that should have a device is not mistaken for a missing one.
+#[derive(Debug)]
+pub enum Unavailable {
+    /// No adapter of the kind asked for: a machine without a GPU has no
+    /// hardware adapter (only the Basic Render Driver, which is WARP), and
+    /// a platform may have no WARP adapter.
+    NoSm66Adapter,
+    /// The adapter is there; its highest shader model is below SM 6.6.
+    BelowSm66(u32),
+    /// A DXGI or D3D12 call failed where a device should have been.
+    Failed(String),
+}
+
+impl std::fmt::Display for Unavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoSm66Adapter => f.write_str("no SM 6.6 adapter"),
+            Self::BelowSm66(sm) => write!(f, "the device supports SM {sm:#x} only"),
+            Self::Failed(what) => f.write_str(what),
+        }
+    }
+}
+
 /// Whether an adapter is hardware. A machine without a GPU (a CI runner)
 /// can list the Microsoft Basic Render Driver, which is WARP, as an
 /// ordinary adapter without the software flag: its ids, or its name, tell.
@@ -98,7 +129,7 @@ impl Host {
     /// The default adapter, or WARP with `warp` (or `VICTORY_WARP=1`), or
     /// the first hardware adapter whose description holds
     /// `VICTORY_ADAPTER` (ignoring case: `nvidia`, `radeon`...).
-    pub fn new(warp: bool) -> Result<Self, String> {
+    pub fn new(warp: bool) -> Result<Self, Unavailable> {
         let warp = warp || std::env::var("VICTORY_WARP").is_ok_and(|v| v == "1");
         match std::env::var("VICTORY_ADAPTER") {
             Ok(name) if !warp && !name.is_empty() => Self::on(&name),
@@ -108,55 +139,66 @@ impl Host {
 
     /// The first hardware adapter whose description holds `name`,
     /// ignoring case.
-    pub fn on(name: &str) -> Result<Self, String> {
+    pub fn on(name: &str) -> Result<Self, Unavailable> {
         let want = name.to_lowercase();
         // SAFETY: plain DXGI calls.
         let adapter = unsafe {
-            let factory: IDXGIFactory1 = CreateDXGIFactory1().map_err(err)?;
+            let factory: IDXGIFactory1 = CreateDXGIFactory1().map_err(failed)?;
             let mut i = 0;
             loop {
                 let a = factory
                     .EnumAdapters1(i)
-                    .map_err(|_| format!("no adapter named {name:?}"))?;
-                let d = a.GetDesc1().map_err(err)?;
+                    .map_err(|_| {
+                        Unavailable::Failed(format!("no adapter named {name:?}"))
+                    })?;
+                let d = a.GetDesc1().map_err(failed)?;
                 if hardware(&d) && description(&d.Description).to_lowercase().contains(&want) {
                     break a;
                 }
                 i += 1;
             }
         };
-        Self::create(false, Some(adapter.cast().map_err(err)?))
+        Self::create(false, Some(adapter.cast().map_err(failed)?))
     }
 
-    fn create(warp: bool, adapter: Option<IDXGIAdapter>) -> Result<Self, String> {
+    fn create(warp: bool, adapter: Option<IDXGIAdapter>) -> Result<Self, Unavailable> {
         // SAFETY: plain D3D12/DXGI calls with valid out pointers.
         unsafe {
             let mut device: Option<ID3D12Device> = None;
             if warp {
                 let factory: IDXGIFactory4 =
-                    CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)).map_err(err)?;
-                let adapter: IDXGIAdapter = factory.EnumWarpAdapter().map_err(err)?;
-                D3D12CreateDevice(&adapter, D3D_FEATURE_LEVEL_12_0, &mut device).map_err(err)?;
+                    CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)).map_err(failed)?;
+                // A platform with no WARP adapter is not an error: it has no
+                // WARP device to run, and the tests skip that backend. Wine
+                // says `E_NOTIMPL` for the same thing.
+                let adapter: IDXGIAdapter = factory.EnumWarpAdapter().map_err(|e| {
+                    if matches!(e.code(), DXGI_ERROR_NOT_FOUND | windows::Win32::Foundation::E_NOTIMPL) {
+                        Unavailable::NoSm66Adapter
+                    } else {
+                        failed(e)
+                    }
+                })?;
+                D3D12CreateDevice(&adapter, D3D_FEATURE_LEVEL_12_0, &mut device).map_err(failed)?;
             } else if let Some(adapter) = &adapter {
-                D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_12_0, &mut device).map_err(err)?;
+                D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_12_0, &mut device).map_err(failed)?;
             } else {
                 // The default adapter of a machine without a GPU is the
                 // Basic Render Driver, which is WARP: ask for hardware
                 // explicitly so the hardware backends skip, as WARP does.
-                let factory: IDXGIFactory1 = CreateDXGIFactory1().map_err(err)?;
+                let factory: IDXGIFactory1 = CreateDXGIFactory1().map_err(failed)?;
                 let mut i = 0;
                 let first = loop {
                     let a = factory
                         .EnumAdapters1(i)
-                        .map_err(|_| "no hardware adapter")?;
-                    if hardware(&a.GetDesc1().map_err(err)?) {
+                        .map_err(|_| Unavailable::NoSm66Adapter)?;
+                    if hardware(&a.GetDesc1().map_err(failed)?) {
                         break a;
                     }
                     i += 1;
                 };
-                D3D12CreateDevice(&first, D3D_FEATURE_LEVEL_12_0, &mut device).map_err(err)?;
+                D3D12CreateDevice(&first, D3D_FEATURE_LEVEL_12_0, &mut device).map_err(failed)?;
             }
-            let device = device.ok_or("no device")?;
+            let device = device.ok_or_else(|| Unavailable::Failed("no device".to_owned()))?;
             let mut sm = D3D12_FEATURE_DATA_SHADER_MODEL {
                 HighestShaderModel: D3D_SHADER_MODEL_6_6,
             };
@@ -166,12 +208,9 @@ impl Host {
                     (&raw mut sm).cast(),
                     size_of_val(&sm) as u32,
                 )
-                .map_err(err)?;
+                .map_err(failed)?;
             if sm.HighestShaderModel.0 < D3D_SHADER_MODEL_6_6.0 {
-                return Err(format!(
-                    "the device supports SM {:#x} only",
-                    sm.HighestShaderModel.0
-                ));
+                return Err(Unavailable::BelowSm66(sm.HighestShaderModel.0 as u32));
             }
             Ok(Host { device })
         }
