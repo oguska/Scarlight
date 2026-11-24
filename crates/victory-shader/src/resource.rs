@@ -590,7 +590,7 @@ impl<'a> Tracer<'a> {
                     inst = next;
                     op = src;
                 }
-                Operand::Attr { .. } => return false,
+                Operand::Attr { .. } | Operand::Spill(_) => return false,
             }
         }
     }
