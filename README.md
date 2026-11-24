@@ -60,7 +60,7 @@ host's own Direct3D 12 driver takes the place of vkd3d-proton. Crates and import
 **Not playable yet.** In short:
 
 > [!NOTE]
-> **24 Nov 2026: first lit picture on AMD + Linux.** With the [fxceless fork](https://github.com/fxceless/victory-gta6)
+> **24 Nov 2026: first lit picture on AMD + Linux.** With the [fxceless](https://github.com/fxceless) fork
 > as the base (Scarlight's move onto it is in progress) and Microsoft's `d3dcompiler_47.dll` next to the exe as a
 > stop-gap (Wine's built-in compiler rejects its runtime helper shaders), the opening scenes render lit on an
 > RX 9070 XT under GE-Proton: 4,900-7,000 draws per frame, about 1-4 fps, menus, pad and sound working. Many
