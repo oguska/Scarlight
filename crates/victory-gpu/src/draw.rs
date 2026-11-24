@@ -989,6 +989,10 @@ impl State {
             return;
         };
         if let Some(view) = host.mirror(index, handle, true) {
+            // An unaligned structured buffer is mirrored into its own upload
+            // resource; refresh that copy at submission like `table_entry`
+            // does, or title writes between now and submit are lost.
+            host.refresh_slot(index, list);
             readable(list, u, &view);
         }
     }
@@ -1014,9 +1018,20 @@ impl State {
                 let Some(view) = host.mirror(index, handle, true) else {
                     continue;
                 };
+                // The sweep is the only refresh for slots read through
+                // `ResourceDescriptorHeap[]` with no per-entry bind, so an
+                // unaligned copy needs its submission-time fill queued here
+                // too.
+                host.refresh_slot(index, list);
                 let placed = crate::descriptor::host::placed_texture(&view);
                 let v = placed.as_ref().unwrap_or(&view);
-                if !matches!(v, View::Shader(..) | View::Unordered(..)) {
+                // Placed buffer views carry the shadow address themselves;
+                // `buffer_range` returns `None` for placed textures, so they
+                // still produce no shadow work.
+                if !matches!(
+                    v,
+                    View::Shader(..) | View::Unordered(..) | View::Placed(..)
+                ) {
                     continue;
                 }
                 if let Some((address, len)) = crate::descriptor::host::buffer_range(v)
@@ -1039,7 +1054,11 @@ impl State {
             }
             self.mutable_heap_srvs.sort_unstable();
             self.mutable_heap_srvs.dedup();
-            self.heap_refreshed = Some((host_ptr, host.generation(), forgotten));
+            // The generation captured before the sweep, not one re-read after
+            // it: a title write that registers a slot mid-sweep then leaves a
+            // key mismatch, so the next draw sweeps again instead of trusting
+            // a half-refreshed heap.
+            self.heap_refreshed = Some((host_ptr, generation, forgotten));
         }
         const SHADER_RESOURCE: u32 = 0x40 | 0x80;
         for &resource in &self.mutable_heap_srvs {
