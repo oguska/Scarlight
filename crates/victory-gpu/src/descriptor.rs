@@ -12,6 +12,8 @@ use crate::resource::{Memory, PAGEABLE_IIDS};
 
 #[cfg(windows)]
 pub(crate) mod host;
+#[cfg(all(test, windows))]
+mod raw_view_tests;
 
 const HEAP_IIDS: [Iid; 4] = [
     guid(
@@ -34,7 +36,7 @@ pub(crate) struct HeapDesc {
     nodes: u32,
 }
 
-/// Newer titles (Grand Theft Auto VI) pass the description followed by
+/// Newer titles (the title) pass the description followed by
 /// memory of their own for the descriptors: an address and its size in
 /// bytes, or a null address to have the heap allocate (inferred from the
 /// title's call sites; older titles pass the plain description).
@@ -73,7 +75,7 @@ impl Heap {
     }
 
     /// The host heap, made on first use from what the title wrote so far.
-    /// Made late because a host view heap the size of Grand Theft Auto VI's
+    /// Made late because a host view heap the size of the title's
     /// costs over 100 MB of commit, which its boot needs for its page pool.
     #[cfg(windows)]
     pub(crate) fn host(&self) -> Option<&host::HostHeap> {
@@ -222,7 +224,7 @@ impl RtvRecord {
 
     /// The description words as a host type, the format as the host has it.
     /// Without one, a typeless host copy gets a 2D view (`dimension`) in
-    /// the title's format, which the host needs spelled out.
+    /// The title's format, which the host needs spelled out.
     #[cfg(windows)]
     fn host_desc<T>(&self, dimension: u32) -> Option<T> {
         assert!(size_of::<T>() <= size_of::<[u32; 6]>());
@@ -1157,7 +1159,7 @@ mod tests {
         assert_ne!(old, new, "a new generation");
     }
 
-    /// Grand Theft Auto VI places its shader-visible heap in its own memory
+    /// The title places its shader-visible heap in its own memory
     /// and checks that the heap starts there.
     #[test]
     fn placed_heaps_start_at_the_title_memory() {

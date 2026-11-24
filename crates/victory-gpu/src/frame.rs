@@ -2,7 +2,7 @@
 //! to begin. Ours is a clock started by the first interval set, ticking
 //! once per interval; the token is the frame number. Each event kind
 //! (origin, vblank, flip) happens once per tick, so two waits for the same
-//! kind never end on the same tick: Grand Theft Auto VI polls the origin
+//! kind never end on the same tick: the title polls the origin
 //! with "token on time-out" (starting its next frame at once) and is paced
 //! by a blocking wait for the flip before each present.
 //!
@@ -115,7 +115,7 @@ fn next_tick(kind: u32) -> (u64, Duration) {
 
 /// Device method: blocks until the next tick (or the time-out); an origin
 /// wait then hands out the new frame's token. Other events keep the token
-/// the title passes. Ticks are absolute (start plus whole intervals), so
+/// The title passes. Ticks are absolute (start plus whole intervals), so
 /// lateness never accumulates.
 pub(crate) extern "system" fn wait(
     _: This,
