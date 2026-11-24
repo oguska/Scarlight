@@ -4189,6 +4189,9 @@ impl<'a> Lower<'a> {
         match *op {
             Operand::Scalar { code, .. } if code != NULL => inst.read(Reg::S(code)),
             Operand::Vector { reg, .. } => inst.read(Reg::V(reg)),
+            // A logical spill argument reachable as an address base (the
+            // tracer tags it), so the replay can follow its `s_mov_b32`.
+            Operand::Spill(reg) => inst.read(Reg::Spill(reg)),
             _ => None,
         }
     }
@@ -4741,6 +4744,13 @@ impl<'a> Lower<'a> {
             let c = self.cur;
             let s = self.s.m.i32(stride);
             let at = self.s.m.bin(c, Bin::Mul, index, s);
+            // An index whose byte position wraps would land back inside the
+            // view; send it past the view's end instead, where the hardware's
+            // check reads zero and drops the write, as the contract says.
+            let limit = self.s.m.i32(u32::MAX / stride);
+            let over = self.s.m.cmp(c, pred::IUGT, index, limit);
+            let far = self.s.m.i32(u32::MAX & !15);
+            let at = self.s.m.select(c, over, far, at);
             let at = self.s.m.bin(c, Bin::Add, at, off);
             let h = self.handle(site, src, false, (11 | u, 0))?;
             return Ok((h, at, self.s.m.undef(self.s.t.i32)));

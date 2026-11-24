@@ -211,13 +211,20 @@ fn spill_loads(
                             _ => 0,
                         },
                         ("s_and_b32", [x, y]) => {
-                            // `s1 & mask` with a small mask, either way round.
+                            // `s1 & mask`, either way round, with a mask that
+                            // keeps the address's low byte (the high VA bits
+                            // of the table are there): one that clears any of
+                            // them names other memory.
+                            let keeps = |m: u32| m & 0xFF == 0xFF;
                             let masked = |reg: &Operand, mask: &Operand| match (scalar(reg), mask) {
                                 (Some((c, _)), Operand::Literal(m)) => {
-                                    tag[c as usize] == 2 && *m <= 0xFFFF
+                                    tag[c as usize] == 2 && keeps(*m)
                                 }
                                 (Some((c, _)), Operand::Const(k)) => {
-                                    tag[c as usize] == 2 && (129..=192).contains(k)
+                                    // -1 ..= -64 as an integer.
+                                    tag[c as usize] == 2
+                                        && (129..=192).contains(k)
+                                        && keeps((-(i32::from(*k) - 128)) as u32)
                                 }
                                 _ => false,
                             };
