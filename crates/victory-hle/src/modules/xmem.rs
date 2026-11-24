@@ -637,6 +637,8 @@ pub extern "system" fn XMemMapPhysicalPagesScatter(
     n: usize,
     pages: *const usize,
 ) -> BOOL {
+    #[cfg(feature = "diagnostics")]
+    victory_gpu::stats::add(victory_gpu::stats::C::Scatter, 1);
     if addresses.is_null() {
         return 0;
     }
@@ -647,8 +649,6 @@ pub extern "system" fn XMemMapPhysicalPagesScatter(
             (!pages.is_null()).then(|| *pages.add(i)),
         )
     };
-    #[cfg(feature = "diagnostics")]
-    victory_gpu::stats::add(victory_gpu::stats::C::Scatter, 1);
     // Addresses given in runs of consecutive pages map in one call, so a run
     // pays one unmap, one view and one commit (per section run) instead of
     // three system calls per page (idea from ivall/xcl#254). Pages that are
