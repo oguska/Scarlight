@@ -8794,6 +8794,15 @@ impl<'a> Lower<'a> {
         if let Some(&Val::Bit(x)) = self.vals.get(&v) {
             return Ok(x);
         }
+        // A number an SCC is held as (a whole-wave section's simulation) is
+        // the scalar, wave-uniform result the ISA sets it from: "not zero"
+        // is the condition, as for an untracked SCC in the per-lane structure
+        // (`Atom::Uniform`, `Self::atom`).
+        if let Some(&Val::I32(x)) = self.vals.get(&v) {
+            let c = self.cur;
+            let z = self.s.m.i32(0);
+            return Ok(self.s.m.cmp(c, pred::NE, x, z));
+        }
         let b = *self
             .def_block
             .get(&v)
@@ -9476,6 +9485,57 @@ mod tests {
             S_ENDPGM,
         ];
         lowers(&words, 0).unwrap();
+    }
+
+    /// Whether a wave64 compute program of `threads` lanes translates on a
+    /// host that runs only 32-lane waves: a lane read takes the console flow,
+    /// where [`Lower::scc_bit`] is used.
+    fn console_flow_lowers(words: &[u32], threads: u32) -> Result<(), crate::ShaderError> {
+        let code: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let native = NativeProgram {
+            stage: HwStage::Cs,
+            wave64: true,
+            vgprs: 8,
+            layout: vec![],
+            used: vec![],
+            io: StageIo::Cs(ComputeIo {
+                rsrc2: 0,
+                threads: [threads, 1, 1],
+            }),
+            code,
+        };
+        let p = ir::build(&native.code, true, 8).unwrap();
+        let st = structure::structure(&p).unwrap();
+        let res = resource::track(&p, &native.layout, native.stage, Some(&st)).unwrap();
+        let io = io::raise(&p, &native).unwrap();
+        let container = crate::dxbc::build(&[]);
+        let c = crate::Container::parse(&container).unwrap();
+        let wave32 = super::super::Target {
+            lanes_min: 32,
+            lanes_max: 32,
+        };
+        super::super::emit(&c, &native, &p, &st, &io, &res, wave32).map(|_| ())
+    }
+
+    #[test]
+    fn the_console_flow_branches_on_the_scc_a_whole_wave_section_leaves() {
+        // A lane read outside the section (which only the console flow can
+        // run), the section's scalar compare of a constant, then the branch
+        // on the SCC it left.
+        let words = [
+            0xBE84_0385, // s_mov_b32 s4, 5
+            0xD761_0002, // v_readlane_b32 s2, v0, 40
+            0x0001_5100,
+            0xBE80_3DC1, // s_or_saveexec_b32 s0, -1
+            0x8005_8104, // s_add_u32 s5, s4, 1
+            0x7E02_0280, // v_mov_b32_e32 v1, 0
+            0xBEFE_0300, // s_mov_b32 exec_lo, s0
+            0xBF06_8605, // s_cmp_eq_u32 s5, 6
+            0xBF85_0001, // s_cbranch_scc1 -> s_endpgm
+            0xBE86_0380, // s_mov_b32 s6, 0
+            S_ENDPGM,
+        ];
+        console_flow_lowers(&words, 64).unwrap();
     }
 
     #[test]
