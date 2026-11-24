@@ -638,7 +638,11 @@ mod tests {
         // the non-mesh tie-break.
         let one_hit_mesh = Arc::new(Pending::with_non_mesh(Vec::new(), None, false));
         enqueue_on(&one_hit_mesh, true, &waiting, &peak, &q);
-        for _ in 0..FAIR_STRIDE {
+        // One more competitor than the stride, so the 17th pop reaches the
+        // waiting mesh entry only when the stride branch fires; a regression
+        // that lets 1-hit pops reset the stride returns a non-mesh competitor
+        // here and fails the assertion below.
+        for _ in 0..=FAIR_STRIDE {
             let p = Arc::new(Pending::with_non_mesh(Vec::new(), None, true));
             enqueue_on(&p, true, &waiting, &peak, &q);
         }
