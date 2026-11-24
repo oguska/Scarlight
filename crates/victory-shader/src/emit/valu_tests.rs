@@ -251,7 +251,12 @@ fn run_cases_on(
         }
         ran += 1;
     }
-    assert!(ran > 0, "no SM 6.6 device available ({devices:?})");
+    if ran == 0 {
+        // A runner without an SM 6.6 adapter (CI, a headless box) skips, as the
+        // other device tests here do; a machine that has one still fails on the
+        // first mismatched case.
+        eprintln!("no SM 6.6 device of {devices:?}; skipped");
+    }
 }
 
 fn is_f16_nan(bits: u16) -> bool {
