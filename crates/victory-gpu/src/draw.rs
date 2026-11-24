@@ -85,6 +85,9 @@ pub(crate) struct State {
     /// The title's last viewports, for `VICTORY_WIDE_SCISSOR` (a scissor
     /// widened to them) and the scissor log lines.
     viewports: Vec<[f32; 4]>,
+    /// The title's last scissor rects, kept only with `VICTORY_WIDE_SCISSOR`
+    /// so a viewport set after them widens them too.
+    scissors: Vec<[i32; 4]>,
     /// A fresh table of the stage being bound could not be made.
     table_failed: bool,
     /// Root SRVs bound as one-view tables in this list: (host heap, title
@@ -1490,7 +1493,9 @@ const QUADS: u32 = 19;
 const QUAD_STRIP: u32 = 20;
 
 /// Fixed-function state, straight onto the host list. The viewports are
-/// kept for `VICTORY_WIDE_SCISSOR`, which widens scissors to them.
+/// kept for `VICTORY_WIDE_SCISSOR`, which widens scissors to them: a new
+/// viewport widens the title's last scissors again, since D3D12 holds the
+/// two apart and the title may set them in either order.
 pub(crate) fn viewports(list: &HostList, state: &mut State, viewports: &[D3D12_VIEWPORT]) {
     // SAFETY: an open list.
     unsafe { list.list.RSSetViewports(viewports) };
@@ -1500,6 +1505,11 @@ pub(crate) fn viewports(list: &HostList, state: &mut State, viewports: &[D3D12_V
             .iter()
             .map(|v| [v.TopLeftX, v.TopLeftY, v.Width, v.Height]),
     );
+    if scissor::wide()
+        && let Some(wide) = scissor::widened(&state.scissors, &state.viewports)
+    {
+        set_scissors(list, &wide);
+    }
 }
 
 /// The title's scissor rects, onto the host list as it gave them (with
@@ -1514,18 +1524,27 @@ pub(crate) fn scissors(list: &HostList, state: &mut State, rects: &[RECT]) {
         .then(|| scissor::widened(&title, &state.viewports))
         .flatten();
     note_scissors(&title, &state.viewports, wide.is_some());
-    let host: Vec<RECT> = match &wide {
-        Some(wide) => wide
-            .iter()
-            .map(|r| RECT {
-                left: r[0],
-                top: r[1],
-                right: r[2],
-                bottom: r[3],
-            })
-            .collect(),
-        None => rects.to_vec(),
-    };
+    match &wide {
+        Some(wide) => set_scissors(list, wide),
+        // SAFETY: an open list.
+        None => unsafe { list.list.RSSetScissorRects(rects) },
+    }
+    if scissor::wide() {
+        state.scissors = title;
+    }
+}
+
+/// `rects` onto the host list.
+fn set_scissors(list: &HostList, rects: &[scissor::Rect]) {
+    let host: Vec<RECT> = rects
+        .iter()
+        .map(|r| RECT {
+            left: r[0],
+            top: r[1],
+            right: r[2],
+            bottom: r[3],
+        })
+        .collect();
     // SAFETY: an open list.
     unsafe { list.list.RSSetScissorRects(&host) };
 }
@@ -1541,7 +1560,7 @@ fn note_scissors(title: &[scissor::Rect], viewports: &[scissor::Viewport], widen
             .enumerate()
             .filter_map(|(i, r)| {
                 let v = scissor::pair(viewports, i)?;
-                scissor::narrower(r, v).then(|| {
+                scissor::widens(r, v).then(|| {
                     format!(
                         "scissor {} under viewport {}",
                         scissor::rect_text(r),

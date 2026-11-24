@@ -40,6 +40,29 @@ pub(crate) fn pair(viewports: &[Viewport], i: usize) -> Option<&Viewport> {
     viewports.get(i).or_else(|| viewports.last())
 }
 
+/// `rect` widened horizontally to `viewport`, its vertical bounds kept.
+///
+/// The viewport's own bounds are taken as D3D12 does: a float top left and
+/// size, rounded outwards. A viewport with no width leaves the rect alone.
+fn widen(rect: &Rect, viewport: &Viewport) -> Rect {
+    let left = viewport[0].floor();
+    let right = (viewport[0] + viewport[2]).ceil();
+    let left = if left.is_finite() {
+        left as i32
+    } else {
+        rect[0]
+    };
+    let right = if right.is_finite() {
+        right as i32
+    } else {
+        rect[2]
+    };
+    if right <= left {
+        return *rect;
+    }
+    [rect[0].min(left), rect[1], rect[2].max(right), rect[3]]
+}
+
 /// `rects` widened horizontally to the viewport each pairs with, their
 /// vertical bounds kept (whether to widen at all is [`wide`]'s call). `None`
 /// when there are no rects or no viewport is known (nothing to widen to).
@@ -51,38 +74,16 @@ pub(crate) fn widened(rects: &[Rect], viewports: &[Viewport]) -> Option<Vec<Rect
         rects
             .iter()
             .enumerate()
-            .map(|(i, &r)| {
-                let Some(v) = pair(viewports, i) else {
-                    return r;
-                };
-                // The viewport's own bounds, as D3D12 takes them: a float
-                // top left and size, rounded outwards. A viewport with no
-                // width leaves the rect's own bounds alone.
-                let left = v[0].floor();
-                let right = (v[0] + v[2]).ceil();
-                let left = if left.is_finite() { left as i32 } else { r[0] };
-                let right = if right.is_finite() {
-                    right as i32
-                } else {
-                    r[2]
-                };
-                if right <= left {
-                    return r;
-                }
-                [r[0].min(left), r[1], r[2].max(right), r[3]]
-            })
+            .map(|(i, r)| pair(viewports, i).map_or(*r, |v| widen(r, v)))
             .collect(),
     )
 }
 
-/// Whether `rect` spans less than its viewport horizontally: the case the
-/// switch changes and the log names.
-pub(crate) fn narrower(rect: &Rect, viewport: &Viewport) -> bool {
-    let width = viewport[2];
-    if !width.is_finite() || width <= 0.0 {
-        return false;
-    }
-    (rect[2] - rect[0]) < width as i32
+/// Whether widening changes `rect` against `viewport`: its left or right
+/// bound lies inside the viewport's. The case the switch acts on and the
+/// log names (a rect as wide as its viewport but shifted counts too).
+pub(crate) fn widens(rect: &Rect, viewport: &Viewport) -> bool {
+    widen(rect, viewport) != *rect
 }
 
 /// A rect as a log line shows it.
@@ -104,18 +105,27 @@ mod tests {
         // The report's own numbers: scissor 742..1994, viewport 2560x1440.
         let rects = [[742, 0, 1994, 1440]];
         let viewports = [[0.0, 0.0, 2560.0, 1440.0]];
-        assert!(narrower(&rects[0], &viewports[0]));
+        assert!(widens(&rects[0], &viewports[0]));
         let wide = widened(&rects, &viewports).expect("a rect and a viewport widen");
         assert_eq!(wide, [[0, 0, 2560, 1440]]);
-        assert!(!narrower(&wide[0], &viewports[0]));
+        assert!(!widens(&wide[0], &viewports[0]));
     }
 
     #[test]
     fn a_rect_already_as_wide_keeps_its_bounds() {
         let rects = [[-8, 12, 2640, 720]];
         let viewports = [[0.0, 0.0, 2560.0, 1440.0]];
-        assert!(!narrower(&rects[0], &viewports[0]));
+        assert!(!widens(&rects[0], &viewports[0]));
         assert_eq!(widened(&rects, &viewports), Some(rects.to_vec()));
+    }
+
+    #[test]
+    fn a_shifted_rect_of_the_viewports_width_still_widens() {
+        // Both are 512 wide, but the rect starts at 100.
+        let rect = [100, 0, 612, 100];
+        let viewport = [0.0, 0.0, 512.0, 512.0];
+        assert!(widens(&rect, &viewport));
+        assert_eq!(widened(&[rect], &[viewport]), Some(vec![[0, 0, 612, 100]]));
     }
 
     #[test]
@@ -142,7 +152,7 @@ mod tests {
         assert_eq!(widened(&rects, &half_pixel), Some(vec![[-1, 0, 100, 20]]));
         let empty = [[4.0, 0.0, 0.0, 10.0]];
         assert_eq!(widened(&rects, &empty), Some(rects.to_vec()));
-        assert!(!narrower(&rects[0], &empty[0]));
+        assert!(!widens(&rects[0], &empty[0]));
         // Nothing to widen to.
         assert_eq!(widened(&rects, &[]), None);
         assert_eq!(widened(&[], &half_pixel), None);
