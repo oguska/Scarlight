@@ -23,7 +23,9 @@
 //! (none is known to).
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+
+use crate::writeback::Done;
 
 /// The unit tracked and copied: 64 KiB, the console's page (the kernel's
 /// 4 KiB pages fold into it). Finer units made the checks of the world's
@@ -250,10 +252,131 @@ fn unmapped(at: usize) -> bool {
     n != 0 && info.State != MEM_COMMIT && info.RegionSize >= BLOCK
 }
 
+/// Blocks a write-back job is putting the GPU's bytes back into
+/// (`VICTORY_ASYNC_WRITEBACK`): their protection while it does, and the
+/// job. A title thread that reads or writes one of them faults, waits for
+/// the job and retries, so it never sees the bytes the GPU replaced.
+static BACK: Mutex<BTreeMap<usize, (u32, Arc<Done>)>> = Mutex::new(BTreeMap::new());
+
+fn back() -> std::sync::MutexGuard<'static, BTreeMap<usize, (u32, Arc<Done>)>> {
+    BACK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Makes the blocks of `[at, at + len)` inaccessible until `done` finishes
+/// (a title access waits for it), returning the blocks taken. Committed
+/// blocks only; one an earlier job still holds is left to that job.
+pub(crate) fn back_begin(done: &Arc<Done>, at: usize, len: usize) -> Vec<usize> {
+    use windows_sys::Win32::System::Memory::{PAGE_NOACCESS, VirtualProtect};
+    // A title access to a block protected below must find the handler: the
+    // hold can come before any `guard()`, and `writes()` takes the kernel's
+    // answer instead of guarding when `GetWriteWatch` succeeds. `install`
+    // is a `Once`, so this costs one atomic after the first call.
+    install();
+    let (first, last) = (at / BLOCK, at.saturating_add(len).div_ceil(BLOCK));
+    let mut taken = Vec::new();
+    let mut back = back();
+    for block in first..last {
+        if let Some(&(old, _)) = back.get(&block) {
+            // An earlier job still holds it: the hold passes to this job, so
+            // it stays inaccessible until this one has written too. The
+            // earlier job's release will not lift it (see `back_release`).
+            back.insert(block, (old, done.clone()));
+            taken.push(block);
+            continue;
+        }
+        let mut old = 0;
+        // SAFETY: title memory; only its protection changes.
+        let ok = unsafe {
+            VirtualProtect((block * BLOCK) as *const _, BLOCK, PAGE_NOACCESS, &mut old)
+        } != 0;
+        if ok {
+            back.insert(block, (old, done.clone()));
+            taken.push(block);
+        }
+    }
+    taken
+}
+
+/// After the job: gives the blocks back the protection they had. Only the
+/// blocks it still holds: one a later job took ([`back_begin`]) stays
+/// inaccessible until that job is done, and that job restores it.
+pub(crate) fn back_release(blocks: &[usize], done: &Arc<Done>) {
+    use windows_sys::Win32::System::Memory::VirtualProtect;
+    let mut back = back();
+    for &block in blocks {
+        if !back
+            .get(&block)
+            .is_some_and(|(_, d)| std::sync::Arc::ptr_eq(d, done))
+        {
+            continue;
+        }
+        if let Some((old, _)) = back.remove(&block) {
+            let mut was = 0;
+            // SAFETY: a block this job made inaccessible.
+            unsafe { VirtualProtect((block * BLOCK) as *const _, BLOCK, old, &mut was) };
+        }
+    }
+}
+
+/// The job, if any, whose write-back holds block `at / BLOCK`: a thread
+/// that faulted there waits for it.
+pub(crate) fn back_pending(at: usize) -> Option<Arc<Done>> {
+    back().get(&(at / BLOCK)).map(|(_, done)| done.clone())
+}
+
+/// Before a kernel write into title memory `[at, at + len)`: the blocks are
+/// given back writable, as [`open`] does for the guarded ones (that write is
+/// the title's, so nothing is waiting for the job there any more).
+pub(crate) fn back_open(at: usize, len: usize) {
+    use windows_sys::Win32::System::Memory::{PAGE_READWRITE, VirtualProtect};
+    let (first, last) = (at / BLOCK, at.saturating_add(len).div_ceil(BLOCK));
+    // A block a job still holds has not received the GPU's bytes yet: wait
+    // for the job (without the map's lock, `back_release` takes it) before
+    // the title's write opens the whole block, or a title read of another
+    // region of it returns stale data. In the worker the wait would be on
+    // its own job, whose write this is ([`Done::finish`] comes after), so it
+    // opens straight away.
+    if !crate::writeback::this_is_worker() {
+        let pending: Vec<Arc<Done>> = {
+            let back = back();
+            (first..last)
+                .filter_map(|block| back.get(&block).map(|(_, done)| done.clone()))
+                .collect()
+        };
+        for done in pending {
+            done.wait();
+        }
+    }
+    let mut opened = Vec::new();
+    {
+        let mut back = back();
+        for block in first..last {
+            if back.remove(&block).is_some() {
+                let mut old = 0;
+                // SAFETY: a block a write-back job made inaccessible.
+                unsafe {
+                    VirtualProtect((block * BLOCK) as *const _, BLOCK, PAGE_READWRITE, &mut old)
+                };
+                opened.push(block);
+            }
+        }
+    }
+    // The bytes at `[at, at + len)` are the caller's now. A guarded block in
+    // range must not stay recorded as clean: the kernel's write did not fault
+    // into `open`, and the next copy would take the block as unchanged and
+    // skip it.
+    if !opened.is_empty() {
+        let mut g = guards();
+        for block in opened {
+            g.protected.remove(&block);
+            g.clean.remove(&block);
+        }
+    }
+}
+
 /// Gives write access back to the guarded blocks of `[start, end)` and
 /// notes them written; true if any was guarded.
-fn open(g: &mut Guards, start: usize, end: usize) -> bool {
-    use windows_sys::Win32::System::Memory::{PAGE_READWRITE, VirtualProtect};
+fn open(g: &mut Guards, start: usize, end: usize) -> bool {    use windows_sys::Win32::System::Memory::{PAGE_READWRITE, VirtualProtect};
     let blocks: Vec<usize> = g
         .protected
         .range(start / BLOCK..end.div_ceil(BLOCK))
@@ -275,6 +398,8 @@ fn open(g: &mut Guards, start: usize, end: usize) -> bool {
 /// reads into its own memory.
 pub fn writing(at: usize, len: usize) {
     // The length is the title's (`fread`'s size times count, saturated).
+    // A block a write-back job holds is this write's now.
+    back_open(at, len);
     open(&mut guards(), at, at.saturating_add(len));
 }
 
@@ -333,13 +458,56 @@ fn install() {
         // SAFETY: the system passes the exception being dispatched.
         let r = unsafe { &*(*info).ExceptionRecord };
         const WRITE: usize = 1;
-        if r.ExceptionCode != EXCEPTION_ACCESS_VIOLATION as NTSTATUS
-            || r.NumberParameters < 2
-            || r.ExceptionInformation[0] != WRITE
-        {
+        if r.ExceptionCode != EXCEPTION_ACCESS_VIOLATION as NTSTATUS || r.NumberParameters < 2 {
             return EXCEPTION_CONTINUE_SEARCH;
         }
+        const READ: usize = 0;
+        // Only reads and writes can be answered here. Windows reports execute
+        // faults (access type 8) through the same code, and PAGE_READWRITE does
+        // not run under DEP: retrying one would re-fault at the same
+        // instruction forever, so it goes to the next handler instead.
+        let kind = r.ExceptionInformation[0];
+        if kind != READ && kind != WRITE {
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+        let is_write = kind == WRITE;
         let at = r.ExceptionInformation[1];
+        // A write-back job has this block (it is inaccessible to both reads
+        // and writes): wait for the GPU's bytes to be put back before the
+        // instruction reads or writes them.
+        if let Some(done) = back_pending(at) {
+            // The worker itself must never wait for its own job: it opens the
+            // block and goes on (its write is the one to wait for).
+            if crate::writeback::this_is_worker() {
+                back_open(at, 1);
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
+            #[cfg(feature = "diagnostics")]
+            let started = std::time::Instant::now();
+            done.wait();
+            #[cfg(feature = "diagnostics")]
+            {
+                crate::copystat::add(crate::copystat::C::AsyncWaits, 1);
+                crate::copystat::add(
+                    crate::copystat::C::AsyncWaitUs,
+                    started.elapsed().as_micros() as u64,
+                );
+            }
+            // The job released the block (or wrote it, through the kernel).
+            // Retry: if a newer job holds it again, the fault comes back here.
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+        if !is_write {
+            // The job released the block between the fault and the lookup:
+            // the memory is readable now, so retry instead of passing the
+            // fault on (nothing else would handle it). `writable` excludes
+            // guard and read-only pages, so a fault there is not retried.
+            if writable(at) {
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
+            // A read of memory that is not ours: as before, someone else's.
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
         // Held across both checks: another thread may have opened the block
         // since this one faulted, and a copy may have guarded it again since
         // (then it is ours again, not read-only for some other reason).
@@ -381,6 +549,65 @@ mod tests {
         MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE, VirtualAlloc, VirtualFree,
     };
     const MEM_WRITE_WATCH: u32 = 0x20_0000;
+
+    /// A write-back job's blocks are inaccessible to the title until the
+    /// job released them; a thread that faults there waits for the job.
+    #[test]
+    fn write_back_blocks_wait_for_their_job() {
+        use std::sync::Arc;
+        // SAFETY: two blocks of private memory, freed at the end.
+        let at = unsafe {
+            VirtualAlloc(
+                std::ptr::null(),
+                2 * BLOCK,
+                MEM_COMMIT | MEM_RESERVE,
+                PAGE_READWRITE,
+            ) as usize
+        };
+        assert_ne!(at, 0);
+        let done = Arc::new(Done::default());
+        let blocks = back_begin(&done, at, 2 * BLOCK);
+        assert_eq!(blocks, [at / BLOCK, at / BLOCK + 1]);
+        assert!(!writable(at), "held inaccessible while the job runs");
+        assert!(back_pending(at + BLOCK).is_some());
+        done.finish();
+        back_release(&blocks, &done);
+        assert!(writable(at), "given back after the job");
+        assert!(back_pending(at).is_none());
+        // SAFETY: the memory allocated above.
+        unsafe { VirtualFree(at as *mut _, 0, MEM_RELEASE) };
+    }
+
+    /// A block a job holds passes to the next job that declares it: the
+    /// earlier job's release does not give it back while the later job's
+    /// copy-back is still queued.
+    #[test]
+    fn a_held_block_passes_to_the_next_job() {
+        // SAFETY: one block of private memory, freed at the end.
+        let at = unsafe {
+            VirtualAlloc(
+                std::ptr::null(),
+                BLOCK,
+                MEM_COMMIT | MEM_RESERVE,
+                PAGE_READWRITE,
+            ) as usize
+        };
+        assert_ne!(at, 0);
+        let first = Arc::new(Done::default());
+        let second = Arc::new(Done::default());
+        let taken = back_begin(&first, at, BLOCK);
+        assert_eq!(taken, [at / BLOCK]);
+        let taken_again = back_begin(&second, at, BLOCK);
+        assert_eq!(taken_again, [at / BLOCK], "the later job takes the block");
+        first.finish();
+        back_release(&taken, &first);
+        assert!(!writable(at), "still inaccessible: the later job's bytes are not in");
+        second.finish();
+        back_release(&taken_again, &second);
+        assert!(writable(at), "given back by the job that last held it");
+        // SAFETY: the memory allocated above.
+        unsafe { VirtualFree(at as *mut _, 0, MEM_RELEASE) };
+    }
 
     thread_local! {
         /// The kernel askings `writes` made on this thread (each test runs

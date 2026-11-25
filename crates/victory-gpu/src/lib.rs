@@ -60,6 +60,8 @@ pub mod signature;
 mod texture;
 #[cfg(windows)]
 mod watch;
+#[cfg(windows)]
+mod writeback;
 
 #[cfg(windows)]
 pub use host::on_failure;

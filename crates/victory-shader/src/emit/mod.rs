@@ -2169,13 +2169,17 @@ mod barycentric_tests {
             let res = resource::track(&p, &native.layout, native.stage, None).unwrap();
             let io = io::raise(&p, &native).unwrap();
             let st = structure::structure(&p).unwrap();
-            let mut host = emit(&c, &native, &p, &st, &io, &res, Target::ANY).unwrap();
+            let host = emit(&c, &native, &p, &st, &io, &res, Target::ANY).unwrap();
             #[cfg(windows)]
             if let Ok(mut v) = super::validator::Validator::load(
                 super::validator::Validator::default_path().as_deref(),
             ) {
-                v.validate(&mut host.dxil).unwrap();
+                let mut copy = host.dxil.clone();
+                v.validate(&mut copy).unwrap();
             }
+            // Off Windows there is no dxil.dll: the DXIL is what is checked.
+            #[cfg(not(windows))]
+            assert!(!host.dxil.is_empty());
         }
 
         for opcode in [0xCC21_000B, 0xCC22_000B] {

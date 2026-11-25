@@ -72,8 +72,13 @@ static SUBMISSION_US: [std::sync::atomic::AtomicU64; 2] =
 /// After submissions: shader-written ranges compared and copied back into
 /// title memory (microseconds, bytes that differed), since the last
 /// frame-rate line.
-static COPY_BACK: [std::sync::atomic::AtomicU64; 2] =
+pub(crate) static COPY_BACK: [std::sync::atomic::AtomicU64; 2] =
     [std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0)];
+
+/// Numbers the submissions: which one declared a range a host copy's
+/// shaders may write (an asynchronous write-back must not take a later
+/// submission's range for an earlier one's).
+static NEXT_SUBMISSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// Of the preparing: title memory copies (microseconds, bytes) and texture
 /// refreshes (microseconds, bytes hashed), since the last frame-rate line.
@@ -713,8 +718,9 @@ impl Host {
         // Where each run's lists start in `lists`.
         let mut firsts = Vec::with_capacity(runs.len());
         let mut batch = Batch::default();
+        let submission = NEXT_SUBMISSION.fetch_add(1, Ordering::Relaxed);
         for list in runs {
-            list.run_deferred(&mut batch);
+            list.run_deferred(&mut batch, submission);
             firsts.push(lists.len());
             if let Some(prelude) = list.prelude() {
                 lists.push(Some(prelude));
@@ -813,15 +819,39 @@ impl Host {
                 }
             }
         }
-        for (shadow, address, len) in &back {
-            let (address, len) = (*address, *len);
-            let written = shadow.copy_back(address, len);
-            COPY_BACK[1].fetch_add(written as u64, Ordering::Relaxed);
-        }
-        COPY_BACK[0].fetch_add(copying.elapsed().as_micros() as u64, Ordering::Relaxed);
-        for list in runs {
-            for &(at, what, bytes) in &list.deferred().writes {
-                what.write(at as *mut u8, bytes);
+        // `VICTORY_ASYNC_WRITEBACK=1`: the copy-back and the writes go to the
+        // queue's worker (idea from ivall/xcl#562), so the title gets this
+        // thread back to prepare its next submission. The ranges are held
+        // inaccessible to the title until the job has put the GPU's bytes
+        // back, and a later submission's snapshot of the same copy waits for
+        // it (`Shadow::writing`).
+        let mut worker = crate::writeback::enabled().then(crate::writeback::Job::new);
+        if let Some(job) = &mut worker {
+            for (shadow, address, len) in &back {
+                shadow.write_back(*address, *len, submission, job.done());
+                job.blocks
+                    .extend(crate::watch::back_begin(&job.done(), *address, *len));
+                job.copies.push((shadow.clone(), *address, *len, submission));
+            }
+            for list in runs {
+                job.writes
+                    .extend(list.deferred().writes.iter().copied());
+            }
+            let job = worker.take().expect("the job");
+            if !job.copies.is_empty() || !job.writes.is_empty() {
+                crate::writeback::submit(job);
+            }
+        } else {
+            for (shadow, address, len) in &back {
+                let (address, len) = (*address, *len);
+                let written = shadow.copy_back(address, len, submission);
+                COPY_BACK[1].fetch_add(written as u64, Ordering::Relaxed);
+            }
+            COPY_BACK[0].fetch_add(copying.elapsed().as_micros() as u64, Ordering::Relaxed);
+            for list in runs {
+                for &(at, what, bytes) in &list.deferred().writes {
+                    what.write(at as *mut u8, bytes);
+                }
             }
         }
         self.log_messages();
@@ -1450,7 +1480,7 @@ impl HostList {
     /// Runs the list's submission-time steps; refreshes go into `batch`
     /// (the title's big buffers, a 174 MB one among them, are read by most
     /// lists of a submission, through many ranges).
-    fn run_deferred(&self, batch: &mut Batch) {
+    fn run_deferred(&self, batch: &mut Batch, submission: u64) {
         #[cfg(feature = "diagnostics")]
         use crate::copystat::{C, add};
         for step in &self.deferred().copies {
@@ -1499,7 +1529,7 @@ impl HostList {
                 Step::GpuWrite(shadow, address, len) => {
                     // The shaders start from the title's data.
                     batch.flush();
-                    shadow.writing(*address, *len);
+                    shadow.writing(*address, *len, submission);
                     continue;
                 }
                 Step::Texture(staging) => {
