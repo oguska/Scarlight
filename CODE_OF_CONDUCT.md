@@ -41,7 +41,8 @@ repository at risk:
 
 * **Never post the title's name, its developer's name, game files, shader dumps,
   extracted tables, or hashes of game data** in an issue, a pull request, a
-  comment or a commit (see [docs/asset-policy.md](docs/asset-policy.md)).
+  comment, a commit, a discussion or a discussion post (see
+  [docs/asset-policy.md](docs/asset-policy.md)).
 * **Never post a link to a build of the game or to game data.** Describing what
   happened and attaching your own log is always enough.
 

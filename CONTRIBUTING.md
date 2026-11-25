@@ -97,8 +97,9 @@ cargo test --workspace --locked
 `.rs`, `.toml`, `.md`, `.txt`, `.lock`, `.yml`/`.yaml`, `.json`, `.hlsl`/`.hlsli`, `.ps1`, `.cmd`
 and `.sh`, each under 512 KiB, text only, with no long hex or base64 runs. A new file type needs a
 change to `xtask/src/policy.rs` with a reason, and that is a pull request of its own. Run it before
-you push, not only on commit: an untracked `.bin` or `.png` in the tree fails the check even when you
-never `git add` it.
+you push, not only on commit: an untracked `.png` in the tree fails the check even when you never
+`git add` it. `.gitignore` hides the common data types; a file type it does not name is still
+checked, and `--staged` skips untracked files entirely.
 
 `cargo test` includes xtask's `repository_passes_policy`, the asset-policy check, and the shader
 tests in `crates/victory-shader/src/emit/diff_tests.rs`. Those tests compile inline HLSL cases with
