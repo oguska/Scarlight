@@ -61,6 +61,13 @@ const EXTENSION_EXCEPTIONS: &[(&str, &str)] = &[
     ),
 ];
 
+/// Path prefixes holding our own terminal recordings: screencast GIFs of our
+/// tools, made on our machines with a throwaway profile. A GIF is binary by
+/// construction, so files here skip the type allowlist and the text/NUL check;
+/// the size limit and the forbidden signatures still apply, and so does every
+/// other file in the tree. See docs/asset-policy.md.
+const RECORDING_PREFIXES: &[&str] = &["docs/img/"];
+
 /// Signatures of formats that must never be committed.
 const FORBIDDEN_MAGIC: &[(&[u8], &str)] = &[
     (b"MZ", "PE executable"),
@@ -98,8 +105,7 @@ pub fn run(root: &Path, staged: bool) -> Result<()> {
                 Err(_) => continue,
             }
         };
-        let skip_extension = EXTENSION_EXCEPTIONS.iter().any(|(p, _)| p == path);
-        for problem in check_with(path, &content, skip_extension) {
+        for problem in check_with(path, &content, policy_flags(path)) {
             violations.push(format!("{path}: {problem}"));
         }
     }
@@ -174,12 +180,23 @@ fn list_files(root: &Path, staged: bool) -> Result<Vec<String>> {
 /// All problems with one file. Pure, for testing.
 #[cfg(test)]
 pub fn check(path: &str, content: &[u8]) -> Vec<String> {
-    check_with(path, content, false)
+    check_with(path, content, policy_flags(path))
 }
 
-/// `check`, optionally skipping only the file-type allowlist (see
-/// `EXTENSION_EXCEPTIONS`).
-fn check_with(path: &str, content: &[u8], skip_extension: bool) -> Vec<String> {
+/// The two escapes a path is granted: skip the type allowlist, and (recordings
+/// only) allow binary content.
+fn policy_flags(path: &str) -> (bool, bool) {
+    let recording = RECORDING_PREFIXES
+        .iter()
+        .any(|prefix| path.starts_with(*prefix));
+    let skip_extension = recording || EXTENSION_EXCEPTIONS.iter().any(|(p, _)| *p == path);
+    (skip_extension, recording)
+}
+
+/// `check`, optionally skipping only the file-type allowlist, and (for our own
+/// recordings) the text/NUL-byte check.
+fn check_with(path: &str, content: &[u8], flags: (bool, bool)) -> Vec<String> {
+    let (skip_extension, binary_ok) = flags;
     let mut problems = Vec::new();
     let name = path.rsplit('/').next().unwrap_or(path);
     let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
@@ -203,9 +220,10 @@ fn check_with(path: &str, content: &[u8], skip_extension: bool) -> Vec<String> {
             problems.push(format!("looks like a {what}"));
         }
     }
-    if content.contains(&0) {
+    if content.contains(&0) && !binary_ok {
         problems.push("binary content (NUL bytes)".to_owned());
-    } else if let Some(run) = longest_encoded_run(content)
+    } else if !binary_ok
+        && let Some(run) = longest_encoded_run(content)
         && run > MAX_ENCODED_RUN
     {
         problems.push(format!("{run}-character hex/base64 run (embedded data?)"));
@@ -261,6 +279,25 @@ mod tests {
     }
 
     #[test]
+    fn accepts_our_recordings() {
+        // A minimal GIF: header, logical screen, one pixel, trailer.
+        let gif = b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;";
+        assert!(check("docs/img/launcher.gif", gif).is_empty());
+        assert!(
+            !check("assets/launcher.gif", gif).is_empty(),
+            "outside docs/img/ a GIF is still refused"
+        );
+        assert!(
+            !check("docs/img/launcher.gif", b"MZ\x90\0").is_empty(),
+            "magic still wins over the recording exemption"
+        );
+        assert!(
+            !check("docs/img/launcher.gif", &vec![b'a'; 600 * 1024]).is_empty(),
+            "recordings are still size-limited"
+        );
+    }
+
+    #[test]
     fn rejects_data_smuggled_into_text() {
         let blob = format!("const DATA: &str = \"{}\";", "A1".repeat(400));
         assert!(!check("src/blob.rs", blob.as_bytes()).is_empty());
@@ -296,10 +333,10 @@ mod tests {
     #[test]
     fn extension_exception_still_runs_other_checks() {
         let svg = b"<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>";
-        assert!(check_with("docs/brand/logo.svg", svg, true).is_empty());
+        assert!(check_with("docs/brand/logo.svg", svg, (true, false)).is_empty());
         let embedded = format!("<svg><image href=\"data:image/png;base64,{}\"/></svg>", "A1".repeat(400));
-        assert!(!check_with("docs/brand/logo.svg", embedded.as_bytes(), true).is_empty());
-        assert!(!check_with("docs/brand/logo.svg", &vec![b'a'; 600 * 1024], true).is_empty());
-        assert!(!check_with("docs/brand/logo.svg", b"MZ\x90\0", true).is_empty());
+        assert!(!check_with("docs/brand/logo.svg", embedded.as_bytes(), (true, false)).is_empty());
+        assert!(!check_with("docs/brand/logo.svg", &vec![b'a'; 600 * 1024], (true, false)).is_empty());
+        assert!(!check_with("docs/brand/logo.svg", b"MZ\x90\0", (true, false)).is_empty());
     }
 }

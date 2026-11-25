@@ -5,6 +5,7 @@
 <br>
 
 [![CI](https://img.shields.io/github/actions/workflow/status/pablogonz12/Scarlight/ci.yml?branch=main&style=flat-square&labelColor=14072c&label=CI&color=ff2e63)](https://github.com/pablogonz12/Scarlight/actions/workflows/ci.yml)
+[![Linux: builds on it](https://img.shields.io/github/actions/workflow/status/pablogonz12/Scarlight/linux.yml?branch=main&style=flat-square&labelColor=14072c&label=linux%20build&color=19d8ff)](https://github.com/pablogonz12/Scarlight/actions/workflows/linux.yml)
 [![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-ff7a3d?style=flat-square&labelColor=14072c)](LICENSE)
 [![Last commit](https://img.shields.io/github/last-commit/pablogonz12/Scarlight?style=flat-square&labelColor=14072c&color=19d8ff)](https://github.com/pablogonz12/Scarlight/commits/main)
 [![Mesa: built for it](https://img.shields.io/badge/Mesa-built%20for%20it-ff2e63?style=flat-square&labelColor=14072c)](https://docs.mesa3d.org/)
@@ -204,6 +205,12 @@ long-term idea, are in [docs/ROADMAP.md](docs/ROADMAP.md).
 It is one bash script (`scarlight`, plus a desktop entry template and an example profile), needs
 nothing but `vulkan-tools` for the check, and uses `gum`, `fzf`, `whiptail`/`dialog` or plain
 prompts, whichever is installed; [docs/linux.md](docs/linux.md) still has the manual setup.
+
+![The launcher: the system check, then the main menu](docs/img/launcher.gif)
+
+<sub>The check and the menu, recorded on our test machine against a throwaway profile
+([`tools/scarlight-launcher/demo/record.py`](tools/scarlight-launcher/demo/record.py) makes that
+recording again).</sub>
 
 <a id="help-us-test"></a>
 
