@@ -1,7 +1,7 @@
 # Architecture
 
 ```
- user's files (outside repo)             VIctory
+ user's files (outside repo)             Scarlight
  ───────────────────────────             ─────────────────────────────────────────
  game assets ──────────────────────────► victory-pipeline + victory-game
                                          (victory-formats, victory-shader)
