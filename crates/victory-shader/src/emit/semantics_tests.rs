@@ -2971,7 +2971,7 @@ fn else_lanes_keep_their_registers() {
 }
 
 /// DS `op` at `addr + offset`: data from `data`, result to `vdst`.
-fn ds(op: u32, vdst: u8, addr: u8, data: u8, offset: u8) -> [u32; 2] {
+fn ds(op: u32, vdst: u8, addr: u8, data: u8, offset: u16) -> [u32; 2] {
     [
         0xD800_0000 | op << 18 | u32::from(offset),
         u32::from(vdst) << 24 | u32::from(data) << 8 | u32::from(addr),
@@ -3266,7 +3266,6 @@ fn lds_rsub_serializes_contending_lanes() {
     });
 }
 
-fn ds(op: u32, vdst: u8, addr: u8, data: u8, offset: u16) -> [u32; 2] {
 
 fn lds_exchange_pair_probes() -> [Probe; 3] {
     let inputs: Vec<_> = (0..64)

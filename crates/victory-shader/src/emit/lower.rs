@@ -3528,6 +3528,7 @@ impl<'a> Lower<'a> {
                     let high = self.replicate_half_bits(high);
                     self.set(lo, Val::I32(low));
                     self.set(hi, Val::I32(high));
+                    Ok(())
                 }
                 "s_wqm_b64" => {
                     let (a, b) = (half(self, 0, 0)?, half(self, 0, 1)?);
