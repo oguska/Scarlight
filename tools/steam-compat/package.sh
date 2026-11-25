@@ -19,7 +19,8 @@
 #
 # The result is dist/Scarlight-<version>.tar.gz whose single top folder is
 # Scarlight/, holding compatibilitytool.vdf, toolmanifest.vdf, scarlight,
-# scarlight.conf, files/ and the licence texts of everything redistributed in it.
+# scarlight.conf.example, files/ and the licence texts of everything redistributed
+# in it.
 #
 # What it packs is what may be redistributed: Scarlight itself (GPL-3.0) and
 # vkd3d-proton (LGPL-2.1). Microsoft's d3dcompiler_47.dll and, by default, DXC's
@@ -132,8 +133,10 @@ if [ "$INCLUDE_DXC" = 1 ]; then
 fi
 
 # The conf a new install starts from: every option documented, Proton left for
-# the user (or the installer) to fill in.
-cat >"$STAGE/scarlight.conf" <<'CONF'
+# the user (or the installer) to fill in. Shipped as scarlight.conf.example: the
+# tool copies it to scarlight.conf on first launch only, so an upgrade of an
+# installed tool never replaces the settings someone tuned.
+cat >"$STAGE/scarlight.conf.example" <<'CONF'
 # Scarlight compatibility tool settings. Edit, then press Play again.
 # Full reference: docs/steam.md in the Scarlight repository.
 
@@ -162,7 +165,7 @@ VKD3D_CONFIG=ignore_shared_fence
 EXTRA_ENV=
 CONF
 # The packaged build name, so BUILD and files/victory-<BUILD>.exe always agree.
-sed -i "s/__BUILD__/$BUILDNAME/" "$STAGE/scarlight.conf"
+sed -i "s/__BUILD__/$BUILDNAME/" "$STAGE/scarlight.conf.example"
 
 cp "$ROOT/LICENSE" "$STAGE/LICENSE"
 cp "$HERE/licenses/LGPL-2.1.txt" "$HERE/licenses/vkd3d-proton-LGPL-2.1.txt" \
@@ -221,6 +224,6 @@ tar --sort=name --owner=0 --group=0 --numeric-owner \
   -C "$WORK" -czf "$TARBALL" Scarlight
 
 echo "$TARBALL"
-echo "  Scarlight/: compatibilitytool.vdf, toolmanifest.vdf, scarlight, scarlight.conf, LICENSE, files/"
+echo "  Scarlight/: compatibilitytool.vdf, toolmanifest.vdf, scarlight, scarlight.conf.example, LICENSE, files/"
 echo "  files/: victory-$BUILDNAME.exe, d3d12.dll, d3d12core.dll, dxil.dll, dxcompiler.dll, licenses/"
 echo "Extract it into Steam's compatibilitytools.d and restart Steam."

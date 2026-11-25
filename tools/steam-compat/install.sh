@@ -193,6 +193,8 @@ VKD3D_CONFIG=ignore_shared_fence
 # read as one string. Example: EXTRA_ENV="VICTORY_LOG=debug RUST_LOG=info"
 EXTRA_ENV=
 CONF
+  # The release layout: an upgrade never replaces an existing scarlight.conf.
+  cp "$T/scarlight.conf" "$T/scarlight.conf.example"
 fi
 
 echo "Installed to $T (on $PROTON${D3DC:+; d3dcompiler_47 from $D3DC})."

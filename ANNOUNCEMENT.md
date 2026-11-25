@@ -4,21 +4,35 @@
 
 Scarlight is changing shape. Until today it was a binary you copied next to the title and started by
 hand, around a development setup of scripts, a GPU test queue and a measurement lab. From today the
-thing we build and ship is **one Steam compatibility tool**: install it once, restart Steam, choose
-**Scarlight (Xbox Series)** under the game's *Properties → Compatibility*, press Play. That is the
-whole setup.
+thing we build and ship is **one Steam compatibility tool**: put it in Steam's `compatibilitytools.d`,
+restart Steam, choose **Scarlight (Xbox Series)** under the game's *Properties → Compatibility*, press
+Play. That is the whole setup.
 
 This is a change of packaging and of priorities, not of code: the loader, the console API layer, the
 command-stream decoder and the shader translator are the same code, and the same binary runs inside.
 
 ## What the new implementation is
 
-- **One install command.** `tools/steam-compat/install.sh` copies the tool into Steam's
-  `compatibilitytools.d` (Steam's own folder, or Flatpak Steam's if that is what you use) together
-  with the build and the DLLs it needs.
+- **One install.** Either extract the release tarball (`Scarlight-<version>.tar.gz`, whose top folder
+  is `Scarlight/`) into Steam's `compatibilitytools.d` — Steam's own folder, or Flatpak Steam's if that
+  is what you use — or run `tools/steam-compat/install.sh` from a checkout, which copies the tool, an
+  already-built `victory.exe` and the DLLs it needs. `tools/steam-compat/package.sh` builds that
+  tarball, and a GitHub Actions job attaches it on a tag.
+- **Only what may be redistributed is shipped.** The tarball carries Scarlight and vkd3d-proton, with
+  their licence texts. Microsoft's `d3dcompiler_47.dll` is never shipped and is optional: the tool
+  runs on Wine's built-in compiler, and a copy you are licensed to use is picked up from
+  `scarlight.conf` or from your prefix. DXC's `dxil.dll` and `dxcompiler.dll` are opt-in for a
+  packager (`package.sh --include-dxc`), because Microsoft's terms for those binaries limit them to
+  use on Windows; a release leaves them to you, in one documented step (`docs/steam.md`).
+- **The same runtime as Proton.** The tool's `toolmanifest.vdf` asks Steam for the Steam Linux Runtime
+  GE-Proton declares (`require_tool_appid`, `use_sessions`), so the tool runs in the same container as
+  Proton and sees `compatibilitytools.d` there, on any distribution; the two lines can be dropped
+  where a distro's container gets in the way.
 - **It rides on a Proton you already have.** The tool finds your installed GE-Proton or Valve Proton
   and uses that Wine for the operating-system side. We do not ship or fork Proton; the Proton version
-  is one line in `scarlight.conf`.
+  is one line in `scarlight.conf` (kept across upgrades: `install.sh` never overwrites an existing
+  conf, and a tarball ships `scarlight.conf.example`, which the tool copies into place only when there
+  is no `scarlight.conf` yet).
 - **It does the wiring itself.** Per-game prefix, per-game Mesa shader cache with room for the title,
   the title profile the loader needs, the DLL overrides, and the launch verbs Steam expects
   (`waitforexitandrun`, `getcompatpath`, `waitforexit`).
@@ -46,7 +60,8 @@ as a reference for how the numbers in this README were taken.
 
 - If you already run the title by hand (`victory.exe run <exe> --execute`), **nothing breaks**. The
   tool is a wrapper around that same binary, so the manual route keeps working.
-- If you only want the plain binary, the releases keep providing it; the tool is an addition.
+- If you only want the plain binary, the Windows build in the releases stays as it is; the Steam tool
+  is an addition, not a replacement for it.
 - What it does **not** do is make the title faster by itself. The status table in the [README](README.md)
   is unchanged by this announcement: same picture, same loading time, same frame rate. The gains come
   from the work listed in the roadmap, and each one lands as its own measured change.

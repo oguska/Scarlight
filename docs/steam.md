@@ -36,9 +36,11 @@ the host instead; nothing else changes.
    Flatpak Steam: `~/.var/app/com.valvesoftware.Steam/data/Steam/compatibilitytools.d/`.
 3. Open `Scarlight/scarlight.conf` and set `PROTON` to a Proton you have installed (the folder name
    under `compatibilitytools.d/`, or a full path). That is the only setting you must touch.
-4. **If Scarlight is already installed**, extracting a new release also replaces `scarlight.conf`
-   with the one from the archive. Keep a copy of your `PROTON=`/`D3DCOMPILER=` lines and put them
-   back, or install with `tools/steam-compat/install.sh`, which never overwrites an existing conf.
+4. **If Scarlight is already installed**, your `scarlight.conf` is safe: a release ships
+   `scarlight.conf.example` and never a `scarlight.conf`, and the tool copies the example into place
+   only when there is no conf yet. An upgrade therefore keeps your `PROTON=`, `D3DCOMPILER=` and other
+   settings, and only `scarlight.conf.example` is refreshed — diff it to see new options.
+   `tools/steam-compat/install.sh` behaves the same way.
 5. Restart Steam.
 
 A ProtonUp-Qt-style installer that extracts a tarball into `compatibilitytools.d/` produces the same

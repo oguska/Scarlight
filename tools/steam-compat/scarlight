@@ -20,6 +20,11 @@ PROFILE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/victory/titles"
 MESA_CACHE_MAX_SIZE=16G
 VKD3D_CONFIG=ignore_shared_fence
 EXTRA_ENV=
+# A release ships scarlight.conf.example and never overwrites your conf: the
+# first launch copies the example into place, an upgrade leaves the conf alone.
+if [ ! -f "$HERE/scarlight.conf" ] && [ -f "$HERE/scarlight.conf.example" ]; then
+  cp "$HERE/scarlight.conf.example" "$HERE/scarlight.conf" 2>/dev/null || true
+fi
 if [ -f "$HERE/scarlight.conf" ]; then . "$HERE/scarlight.conf"; fi
 # Empty settings mean "the default" (the installed conf ships them empty).
 [ -n "${PROTON:-}" ] || PROTON=GE-Proton11-14-x86_64
@@ -125,34 +130,32 @@ for f in dxgi.dll d3d11.dll d3d10core.dll; do
 done
 
 # Microsoft's d3dcompiler_47 is optional: it is not redistributable, so it is
-# never shipped. If you have one and are licensed to use it, point D3DCOMPILER
-# at it (or install it in the prefix with winetricks) and it is used; without
-# it Wine's built-in compiler is used instead and most titles still start.
+# never shipped. Two sources are honoured, an explicit D3DCOMPILER from the conf
+# first and a copy sitting in files/ (install.sh --d3dcompiler, or one it found in
+# a prefix) second; with neither, Wine's built-in compiler is used and most titles
+# still start.
 #
-# A copy this script put there is marked, so clearing D3DCOMPILER actually goes
-# back to Wine's built-in compiler instead of leaving the old file behind. A
-# copy you put there yourself is not ours to delete and stays.
-# Order: what install.sh put in files/ first, then an explicit D3DCOMPILER from
-# the conf wins over it, then clearing the setting falls back to the files/ copy
-# (or to Wine's built-in compiler when there is none).
+# Any copy this script stages is marked, so taking the source away (clearing the
+# setting, deleting files/d3dcompiler_47.dll) actually goes back to Wine's built-in
+# compiler on the next launch instead of leaving the old file behind. A copy that
+# was already in the prefix when we got there is not ours to delete and stays.
 MARK="$RUN/.d3dcompiler_47.by-scarlight"
 FILES_DC="$HERE/files/d3dcompiler_47.dll"
-if [ -f "$FILES_DC" ]; then stage "$FILES_DC" "$RUN/d3dcompiler_47.dll"; fi
+DC_SRC=""
 if [ -n "$D3DCOMPILER" ]; then
   if [ -f "$D3DCOMPILER" ]; then
-    stage "$D3DCOMPILER" "$RUN/d3dcompiler_47.dll"
-    : > "$MARK"
+    DC_SRC="$D3DCOMPILER"
   else
-    log "D3DCOMPILER is set but there is no file at $D3DCOMPILER; using Wine's built-in compiler"
+    log "D3DCOMPILER is set but there is no file at $D3DCOMPILER; ignoring it"
   fi
+fi
+if [ -z "$DC_SRC" ] && [ -f "$FILES_DC" ]; then DC_SRC="$FILES_DC"; fi
+if [ -n "$DC_SRC" ]; then
+  stage "$DC_SRC" "$RUN/d3dcompiler_47.dll"
+  : > "$MARK"
 elif [ -f "$MARK" ]; then
   rm -f -- "$RUN/d3dcompiler_47.dll" "$MARK"
-  if [ -f "$FILES_DC" ]; then
-    stage "$FILES_DC" "$RUN/d3dcompiler_47.dll"
-    log "D3DCOMPILER cleared: back to the copy in files/"
-  else
-    log "D3DCOMPILER cleared: using Wine's built-in d3dcompiler"
-  fi
+  log "no d3dcompiler source left: using Wine's built-in d3dcompiler"
 fi
 
 # Title profiles live outside the repo; Wine's HOME is the prefix, so reach the

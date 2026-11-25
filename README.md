@@ -55,9 +55,12 @@ Three steps. Full detail — every option, logs, uninstall, troubleshooting — 
 **[docs/steam.md](docs/steam.md)**.
 
 1. **Put Scarlight in Steam's compatibility tools folder.** Download `Scarlight-<version>.tar.gz`
-   from [Releases](https://github.com/pablogonz12/Scarlight/releases) and extract it there:
+   from [Releases](https://github.com/pablogonz12/Scarlight/releases), then run this in the folder you
+   downloaded it to (or give `tar` the archive's full path, e.g.
+   `~/Downloads/Scarlight-0.1.0.tar.gz`):
 
    ```bash
+   cd ~/Downloads
    mkdir -p ~/.local/share/Steam/compatibilitytools.d/
    tar -xzf Scarlight-*.tar.gz -C ~/.local/share/Steam/compatibilitytools.d/
    ```
@@ -65,7 +68,9 @@ Three steps. Full detail — every option, logs, uninstall, troubleshooting — 
    Flatpak Steam uses `~/.var/app/com.valvesoftware.Steam/data/Steam/compatibilitytools.d/`.
    From a source checkout instead, `tools/steam-compat/install.sh` does the same.
 2. **Restart Steam.**
-3. **Choose it for the game.** *Library → right-click the game → Properties → Compatibility →* tick
+3. **Choose it for the game.** If the game is not in your library yet, add it first: *Steam → Games →
+   Add a Non-Steam Game to My Library → Browse…* and pick its `.exe`. Then *Library → right-click the
+   game → Properties → Compatibility →* tick
    **Force the use of a specific Steam Play compatibility tool** and pick **Scarlight (Xbox Series)**.
    Press Play.
 
