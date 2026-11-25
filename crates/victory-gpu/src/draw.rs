@@ -137,8 +137,9 @@ pub(crate) struct State {
     /// `(host_heap_ptr, generation, forgotten_epoch)` last refreshed for
     /// bindless heap reads in this list.
     heap_refreshed: Option<(usize, u64, u64)>,
-    /// Non-title-written SRV resources in the bound view heap that may be
-    /// transitioned between draws and need `SHADER_RESOURCE` checks.
+    /// SRV resources in the bound view heap that may be transitioned between
+    /// draws (a copy leaves its destination in `COPY_DEST`) and need
+    /// `SHADER_RESOURCE` checks on every draw, not only on the sweep.
     mutable_heap_srvs: Vec<usize>,
 }
 
@@ -1047,9 +1048,13 @@ impl State {
                         const SHADER_RESOURCE: u32 = 0x40 | 0x80;
                         crate::texture::upload(list, *resource as This, t);
                         crate::list::ensure_state(list, *resource as This, SHADER_RESOURCE);
-                    } else {
-                        self.mutable_heap_srvs.push(*resource);
                     }
+                    // Title-written or not, a copy leaves its destination in
+                    // `COPY_DEST` (`list::copy_resource`) without restoring
+                    // the state, and the sweep is cached by heap generation,
+                    // which a copy does not change. Check the state on every
+                    // draw so a bindless read does not see `COPY_DEST`.
+                    self.mutable_heap_srvs.push(*resource);
                 }
             }
             self.mutable_heap_srvs.sort_unstable();
