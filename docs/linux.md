@@ -30,8 +30,8 @@ Never commit any of these, or any game file.
 
 ## 4. Play script
 
-Save as `play.sh` **outside the repository** and edit the paths. Your game files must also be
-outside the repository.
+Save as `play.sh` **outside the repository**, make it executable (`chmod +x play.sh`) and edit the
+paths. Your game files must also be outside the repository.
 
 ```bash
 #!/usr/bin/env bash
@@ -78,5 +78,12 @@ A gamepad works. Otherwise the keyboard acts as a pad while the title's window h
 | `victory` reports no paths | `victory config`; paths must be outside the repository |
 | RenderDoc installed and the title crashes | `VK_LOADER_LAYERS_DISABLE='*renderdoc*'` |
 
-Crashes and GPU failures are appended to `crashes.log` in the data folder. More diagnostics:
-[AMD-LINUX.md](../AMD-LINUX.md#diagnostics).
+Crashes and GPU failures are appended to `crashes.log` in the data folder. For a diagnostics build,
+use the Windows target as for the release build and point `EXE` at its output:
+
+```bash
+cargo xwin build --profile diag -p victory --features diagnostics --target x86_64-pc-windows-msvc
+# target/x86_64-pc-windows-msvc/diag/victory.exe
+```
+
+More variables: [AMD-LINUX.md](../AMD-LINUX.md#diagnostics).
