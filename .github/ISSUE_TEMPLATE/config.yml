@@ -3,12 +3,12 @@ contact_links:
   - name: How to contribute
     url: https://github.com/pablogonz12/Scarlight/blob/main/CONTRIBUTING.md
     about: Build, test, naming and asset rules before you open a pull request.
-  - name: Integration branch and credits
-    url: https://github.com/pablogonz12/Scarlight/blob/main/INTEGRATION.md
-    about: Which upstream pull requests are merged here, and who wrote them.
-  - name: AMD RDNA4 on Linux
-    url: https://github.com/pablogonz12/Scarlight/blob/main/AMD-LINUX.md
-    about: The tested RADV/Wine/vkd3d-proton setup, and what is known to be slow or black.
+  - name: Credits
+    url: https://github.com/pablogonz12/Scarlight/blob/main/CREDITS.md
+    about: The project this is built on, and every author whose code is in the tree.
+  - name: Linux quick start
+    url: https://github.com/pablogonz12/Scarlight/blob/main/README.md#quick-start
+    about: The tested Mesa/Wine/vkd3d-proton setup, and what is known to be slow or black.
   - name: Asset policy
     url: https://github.com/pablogonz12/Scarlight/blob/main/docs/asset-policy.md
     about: What may never be committed or attached.

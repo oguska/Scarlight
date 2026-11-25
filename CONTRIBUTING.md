@@ -1,9 +1,8 @@
 # Contributing to Scarlight
 
-Thanks for helping. Scarlight is a GPL-3.0 port of [VIctory](https://github.com/Marvisak/VIctory):
-it collects tested fixes from upstream's open pull requests, from forks and from other projects,
-each merged with its author's credit, plus its own fixes. Contributions of any size are welcome,
-and a test report is as useful as a patch.
+Thanks for helping. Scarlight is a GPL-3.0 port of [VIctory](https://github.com/Marvisak/VIctory).
+Fixes arrive as merged commits that keep their authors (see [CREDITS.md](CREDITS.md)), plus our own
+work. Contributions of any size are welcome, and a test report is as useful as a patch.
 
 ## Where pull requests go
 
@@ -42,7 +41,8 @@ cargo xwin build --release -p victory --target x86_64-pc-windows-msvc
 Install your distribution's `clang` package as well (`clang` on Arch, `clang` on Debian/Ubuntu,
 `clang` via `xcode-select` on macOS); `cargo xwin` drives it as the cross linker.
 
-The Wine/Proton/vkd3d-proton setup that actually boots on RDNA4 is in [AMD-LINUX.md](AMD-LINUX.md).
+The Wine/Proton/vkd3d-proton setup that runs here is in the [quick start](README.md#quick-start) and
+[docs/linux.md](docs/linux.md).
 
 **On Windows** (MSVC):
 
@@ -89,10 +89,10 @@ We credit by **merging the real commits**, not by copying code:
 * Merge the upstream branch or pull request so its commits and author are kept (`git merge`, or a
   merge commit after resolving conflicts keeping both sides). Do not squash somebody else's work
   into ours, and do not retype their patch as an unnamed commit.
-* Add a row to [INTEGRATION.md](INTEGRATION.md): pull request link, author, a neutral title, and
-  why it matters (shader count, frame time, crash fixed).
-* Send fixes that also help Windows or NVIDIA back upstream to Marvisak/VIctory. The point is to
-  make their pull requests mergeable, not to fork forever.
+* Add the author to [CREDITS.md](CREDITS.md) if the merge brings in a name that is not listed yet
+  (the list is read from `git log main`).
+* Fixes that also help Windows or NVIDIA go upstream to VIctory. The point is to make upstream
+  patches mergeable, not to fork forever.
 * Disagreements about a merge go in the pull request, not in commit messages about people.
 
 ## Reporting without code

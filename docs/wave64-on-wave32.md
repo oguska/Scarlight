@@ -40,8 +40,8 @@ same thread group. The shader declares `WaveSize(32)`; console lane
 **Lane assignment.** The relabelling in `Lower::thread_id` assumes each
 host wave holds a wave-aligned run of flat thread ids: it takes the first
 lane's flat id, rounded down to the declared wave size, plus the host lane.
-XCL's notes report NVIDIA forming waves from non-consecutive thread indices
-in some 3-D groups. On an RTX 5070 with this relabelling, every group
+NVIDIA hardware has been reported to form waves from non-consecutive thread
+indices in some 3-D groups. On an RTX 5070 with this relabelling, every group
 `emit::split_tests` tries is exact: 32, 64 and 128 threads in 1-D, and
 4x4x4, 8x8x2, 2x4x8, 16x2x4, 8x8x4 and 4x8x8. If another driver breaks it,
 the fallback is to take console threads from a groupshared counter: one lane
@@ -253,8 +253,7 @@ takes `WaveSize(64)`, the NVIDIA reports 32-32).
 
 ## Credit
 
-The approach of pairing two 32-lane waves through groupshared memory, and
-the finding that NVIDIA forms waves from non-consecutive thread ids in some
-3-D groups, come from XCL's design notes (`docs/wave64-on-wave32.md` in
-github.com/ivall/xcl and its fork Bathyal). XCL is GPL-2.0-only. Nothing
+The approach of pairing two 32-lane waves through groupshared memory, and the report that NVIDIA
+forms waves from non-consecutive thread ids in some 3-D groups, come from the design notes of a
+related project licensed GPL-2.0-only. The source is named in [CREDITS.md](../CREDITS.md). Nothing
 here is copied from its code.

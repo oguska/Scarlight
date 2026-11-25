@@ -854,7 +854,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "fails (WrongStart) since PR #457 was rebased onto the console-flow structurizer; tracked in INTEGRATION.md"]
+    #[ignore = "fails (WrongStart) since PR #457 was rebased onto the console-flow structurizer; revisit with the structurizer work"]
     fn a_wrong_indexed_move_start_is_refused() {
         // M0 starts at 2, so the first pass writes v[2] and exports v1 while
         // it still holds the raw input: the console value is not the one the

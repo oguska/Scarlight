@@ -47,10 +47,6 @@ const EXTENSION_EXCEPTIONS: &[(&str, &str)] = &[
         "the project mark: a hand-written vector drawing of our own, text only",
     ),
     (
-        "docs/brand/status.svg",
-        "the README pipeline-status graphic: a vector drawing of our own (label glyph outlines), text only",
-    ),
-    (
         "docs/brand/divider.svg",
         "the README section divider: a hand-written vector drawing of our own, text only",
     ),
