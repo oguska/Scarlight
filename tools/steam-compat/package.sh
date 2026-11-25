@@ -66,7 +66,9 @@ for f in dxil.dll dxcompiler.dll; do
 done
 
 if [ -z "$VERSION" ]; then
-  VERSION="$(git -C "$ROOT" describe --tags --abbrev=0 2>/dev/null || echo 0.0.0)"
+  # Release tags only: an unreleased checkout packs as 0.0.0, not as some
+  # other line's tag.
+  VERSION="$(git -C "$ROOT" describe --tags --match 'v*' --abbrev=0 2>/dev/null || echo 0.0.0)"
 fi
 VERSION="${VERSION#v}"
 
