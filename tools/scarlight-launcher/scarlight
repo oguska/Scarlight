@@ -98,7 +98,7 @@ load_file() { # load_file <path>
 }
 
 LAST=$CONFIG_DIR/last.env
-ACCOUNT_DEFAULT_PROFILE=$CONFIG_DIR/default.env
+DEFAULT_PROFILE=$CONFIG_DIR/default.env
 mkdir -p "$CONFIG_DIR" "$STATE_DIR" "$CACHE_DIR"
 
 if [ -n "$WANT_PROFILE" ]; then
@@ -107,8 +107,9 @@ if [ -n "$WANT_PROFILE" ]; then
   load_file "$pf" || die "cannot read $pf"
   PROFILE_NAME=$WANT_PROFILE
 else
+  # defaults first, the last session second: what you just changed must survive a restart
+  load_file "$DEFAULT_PROFILE" || true
   load_file "$LAST" || true
-  load_file "$ACCOUNT_DEFAULT_PROFILE" || true
 fi
 
 # ---------- front end ------------------------------------------------------
@@ -149,12 +150,14 @@ ui_pick() {
       local -a args=()
       i=0
       while [ "$i" -lt ${#tags[@]} ]; do args+=("${tags[$i]}" "${labels[$i]}"); i=$((i+1)); done
-      out=$(whiptail --title "$title" --menu "$prompt" 24 100 15 "${args[@]}" 3>&1 1>&2 2>&3) || return 1 ;;
+      out=$(whiptail --title "$title" --menu "$prompt" 24 100 15 "${args[@]}" 3>&1 1>&2 2>&3) || return 1
+      printf '%s\n' "$out"; return 0 ;;
     dialog)
       local -a dargs=()
       i=0
       while [ "$i" -lt ${#tags[@]} ]; do dargs+=("${tags[$i]}" "${labels[$i]}"); i=$((i+1)); done
-      out=$(dialog --stdout --title "$title" --menu "$prompt" 24 100 15 "${dargs[@]}") || return 1 ;;
+      out=$(dialog --stdout --title "$title" --menu "$prompt" 24 100 15 "${dargs[@]}") || return 1
+      printf '%s\n' "$out"; return 0 ;;
     gum)
       out=$(printf '%s\n' "${labels[@]}" | gum choose --height 20 \
             --header "$title: $prompt" 2>/dev/null) || return 1 ;;
@@ -505,7 +508,7 @@ chk() { CHK_L+=("$1"); CHK_T+=("$2"); CHK_F+=("${3:-}"); }
 
 run_checks() {
   CHK_L=(); CHK_T=(); CHK_F=()
-  local k maj ram p d first have_d3d12=0 have_dxil=0
+  local k maj ram p d w have_d3d12=0 have_dxil=0
 
   if ! have vulkaninfo; then
     chk fail "Vulkan: vulkaninfo is missing, so the driver cannot be read" \
@@ -561,23 +564,34 @@ run_checks() {
     fi
   fi
 
-  # Proton / GE builds
-  if [ -n "$PROTON" ] && [ -x "$PROTON/files/bin/wine" ]; then
-    chk ok "Proton: ${PROTON##*/}"
-  elif [ -n "$PROTON" ]; then
-    chk fail "Proton: $PROTON has no files/bin/wine" "Quick setup: pick the Proton/GE folder again (it must contain files/bin/wine)"
-  else
-    p=$(proton_dirs | head -5)
-    if [ -n "$p" ]; then
-      first=${p%%$'\n'*}
-      chk warn "Proton: ${first##*/} found but not selected" \
-               "Quick setup: pick the build; GE-Proton is what this port is tested with"
-      p=""
-    else
-      chk fail "Proton: no Proton/GE build found" \
-              "install GE-Proton into ~/.local/share/Steam/compatibilitytools.d (or point Quick setup at a folder with files/bin/wine)"
-    fi
-  fi
+  # the Wine Play will run: WINE override, else <proton>/files/bin/wine, else PATH
+  w=$(wine_bin)
+  case "$w" in
+    */*)
+      if [ -x "$w" ]; then
+        chk ok "Wine: $w${PROTON:+ (${PROTON##*/})}"
+      elif [ -n "$PROTON" ]; then
+        chk fail "Wine: $w is not executable" "Quick setup: pick the Proton/GE folder again (it must contain files/bin/wine), or clear the WINE override"
+      else
+        chk fail "Wine: $w is not executable" "Advanced -> Proton: point it at a folder with files/bin/wine, or clear the WINE override"
+      fi ;;
+    *)
+      if have "$w"; then
+        chk ok "Wine: $w (from PATH)"
+        p=$(proton_dirs | head -1)
+        if [ -n "$p" ] && [ -z "$PROTON" ]; then
+          chk warn "Proton: ${p##*/} is installed but not selected" \
+                   "Quick setup: pick the build; GE-Proton is what this port is tested with"
+        fi
+      else
+        p=$(proton_dirs | head -1)
+        if [ -n "$p" ]; then
+          chk fail "Wine: '$w' not found" "a Proton build is installed (${p##*/}): run Quick setup and pick it"
+        else
+          chk fail "Wine: '$w' not found" "install GE-Proton into ~/.local/share/Steam/compatibilitytools.d (or point Quick setup at a folder with files/bin/wine)"
+        fi
+      fi ;;
+  esac
 
   # DLLs next to the build
   have_d3d12=0; have_dxil=0
@@ -665,6 +679,10 @@ build_env() {
   local t keys=""
   ENVVARS+=("WINEPREFIX=$PREFIX")
   ENVVARS+=("WINEDLLOVERRIDES=d3d12,d3d12core,dxgi,d3d11,d3d10core,d3dcompiler_47=n,b")
+  # a DLL folder other than the build's own is only used if Wine can see it
+  if [ -n "$DLLDIR" ] && [ "$DLLDIR" != "${PORT_EXE%/*}" ]; then
+    ENVVARS+=("WINEDLLPATH=$DLLDIR")
+  fi
   ENVVARS+=("VKD3D_CONFIG=ignore_shared_fence")
   ENVVARS+=("VICTORY_LOG=$LOG")
   [ -n "$GAME_DIR" ] && ENVVARS+=("VICTORY_GAME_DIR=$GAME_DIR")
@@ -707,9 +725,11 @@ q() { printf '%q' "$1"; }
 
 hook_cmd_str() {
   local tpl=${SCARLIGHT_LAUNCH_CMD}
-  tpl=${tpl//\{exe\}/$(q "$GAME_EXE")}
-  tpl=${tpl//\{port_exe\}/$(q "$PORT_EXE")}
-  tpl=${tpl//\{prefix\}/$(q "$PREFIX")}
+  # the replacement is quoted: with bash's patsub_replacement an unquoted & would
+  # expand to the match, and q's backslash before an &
+  tpl=${tpl//\{exe\}/"$(q "$GAME_EXE")"}
+  tpl=${tpl//\{port_exe\}/"$(q "$PORT_EXE")"}
+  tpl=${tpl//\{prefix\}/"$(q "$PREFIX")"}
   printf '%s\n' "$tpl"
 }
 
@@ -794,7 +814,8 @@ save_last() {
     printf 'MODE=%s\n' "$(q "$MODE")"
     [ -n "$TREE" ] && printf 'TREE=%s\n' "$(q "$TREE")"
     [ -n "$SAVE" ] && printf 'SAVE=%s\n' "$(q "$SAVE")"
-  } > "$f.tmp" 2>/dev/null && mv "$f.tmp" "$f"
+  } 2>/dev/null > "$f.tmp" || { rm -f "$f.tmp"; printf '%s: could not save the last choices\n' "$PROG" >&2; return 1; }
+  mv "$f.tmp" "$f" 2>/dev/null || { rm -f "$f.tmp"; printf '%s: could not replace %s\n' "$PROG" "$f" >&2; return 1; }
   return 0
 }
 
@@ -817,8 +838,8 @@ save_profile() { # save_profile <name>
     printf 'GAME_DIR=%s\n' "$(q "$GAME_DIR")"
     printf 'DLLDIR=%s\n' "$(q "$DLLDIR")"
     printf 'PREFIX=%s\n' "$(q "$PREFIX")"
-  } > "$f.tmp"
-  mv "$f.tmp" "$f" || die "cannot write $f"
+  } 2>/dev/null > "$f.tmp" || { rm -f "$f.tmp"; die "cannot write $f (the previous profile is untouched)"; }
+  mv "$f.tmp" "$f" || { rm -f "$f.tmp"; die "cannot replace $f (the previous profile is untouched)"; }
   printf 'saved profile %s\n' "$f"
 }
 
@@ -846,9 +867,12 @@ wizard() {
   detect_gpu >/dev/null 2>&1 || true
   list=$(proton_dirs)
   if [ -z "$PROTON" ] && [ -n "$list" ]; then
-    local -a items=() tags=()
+    local -a items=()
     i=1
-    while IFS= read -r p; do tags+=("$p"); items+=("$p" "proton-$(printf '%02d' "$i")" "${p##*/}"); i=$((i+1)); done <<EOF
+    while IFS= read -r p; do
+      items+=("$p" "$(printf '%02d' "$i") ${p##*/}")
+      i=$((i+1))
+    done <<EOF
 $list
 EOF
     out=$(ui_pick "Quick setup 1/3: Proton" "which Wine do you run? GE-Proton is what Scarlight is tested with" "${items[@]}") || return 1
@@ -897,7 +921,7 @@ menu_presets() {
 }
 
 menu_advanced() {
-  local c
+  local c v=""
   while :; do
     c=$(ui_pick "Advanced" "everything here is saved for next time" \
       rt "Ray tracing: $(rt_word)$(rt_supported || printf ' (not in this build)')" \
@@ -970,14 +994,15 @@ EOF
           ${pitems[@]+"${pitems[@]}"}) || continue
         case "$pv" in
           keep) : ;;
-          other) PROTON=$(ui_input "Proton" "folder with files/bin/wine" "$PROTON") || true ;;
+          other) v=$(ui_input "Proton" "folder with files/bin/wine" "$PROTON") && PROTON=$v ;;
           *) PROTON=$pv ;;
         esac ;;
-      build) PORT_EXE=$(ui_input "Scarlight build" "the victory.exe you built" "$PORT_EXE") || true ;;
-      title) GAME_EXE=$(ui_input "Game exe" "the .exe of the copy you own" "$GAME_EXE") || true
-             [ -n "$GAME_EXE" ] && GAME_DIR=${GAME_EXE%/*} ;;
-      dlls) DLLDIR=$(ui_input "DLL folder" "where dxgi/d3d12/d3d12core/dxil live (empty = next to the build)" "$DLLDIR") || true ;;
-      prefix) PREFIX=$(ui_input "Wine prefix" "WINEPREFIX for this setup" "$PREFIX") || true ;;
+      # each edit lands in a temporary first: a cancelled prompt must keep the old value
+      build) v=$(ui_input "Scarlight build" "the victory.exe you built" "$PORT_EXE") && PORT_EXE=$v ;;
+      title) v=$(ui_input "Game exe" "the .exe of the copy you own" "$GAME_EXE") && {
+               GAME_EXE=$v; [ -n "$GAME_EXE" ] && GAME_DIR=${GAME_EXE%/*}; } ;;
+      dlls) v=$(ui_input "DLL folder" "where dxgi/d3d12/d3d12core/dxil live (empty = next to the build)" "$DLLDIR") && DLLDIR=$v ;;
+      prefix) v=$(ui_input "Wine prefix" "WINEPREFIX for this setup" "$PREFIX") && PREFIX=$v ;;
     esac
   done
 }
@@ -1075,6 +1100,12 @@ if [ "$MODE_CMD" = dry ]; then
   show_checks
   show_plan
   [ -n "$WANT_SAVE" ] && save_profile "$WANT_SAVE"
+  exit 0
+fi
+
+if [ -n "$WANT_SAVE" ]; then
+  # a plain save needs no menu: it records whatever was loaded (last.env or --profile)
+  save_profile "$WANT_SAVE"
   exit 0
 fi
 
