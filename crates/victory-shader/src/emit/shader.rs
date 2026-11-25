@@ -132,6 +132,12 @@ pub(crate) struct Shader {
     pub entry: usize,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The properties of every handle annotated on this thread.
+    pub(super) static ANNOTATED: std::cell::RefCell<Vec<(u32, u32)>> = Default::default();
+}
+
 impl Shader {
     pub fn new(pixel: bool) -> Self {
         let mut m = Module::default();
@@ -490,6 +496,8 @@ impl Shader {
     }
 
     pub fn annotate(&mut self, block: usize, h: V, props0: u32, props1: u32) -> V {
+        #[cfg(test)]
+        ANNOTATED.with_borrow_mut(|a| a.push((props0, props1)));
         let p = [self.m.i32(props0), self.m.i32(props1)];
         let p = self.m.aggregate(self.t.props, &p);
         self.op(

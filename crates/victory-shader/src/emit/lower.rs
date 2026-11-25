@@ -200,7 +200,7 @@ struct Lower<'a> {
     scalar: HashMap<Site, Address>,
     exports: HashMap<Site, &'a Export>,
     interps: HashMap<Site, &'a Interp>,
-    handles: HashMap<(usize, Site, u8, bool, u32), V>,
+    handles: HashMap<(usize, Site, u8, bool, u32, u32), V>,
     /// Blocks splitting the edge from one IR block to another.
     edges: HashMap<(usize, usize), usize>,
     /// Per IR block: a `done` export is behind every lane entering it.
@@ -4865,7 +4865,10 @@ impl<'a> Lower<'a> {
         }
         match src {
             Source::Loaded { load, first } => {
-                let key = (self.cur, *load, *first, sampler, props.0);
+                // The element type is part of the key: one UAV read as float
+                // and used atomically needs two handles (an atomic on a float
+                // handle is invalid SPIR-V, and crashed the NVIDIA compiler).
+                let key = (self.cur, *load, *first, sampler, props.0, props.1);
                 if let Some(&h) = self.handles.get(&key) {
                     return Ok(h);
                 }
@@ -9998,6 +10001,48 @@ mod tests {
             mesh_stride: 0,
             view_marks: false,
         })
+    }
+
+    /// One texture UAV loaded as float and then used atomically in the same
+    /// block takes two handles: the atomic's has a 32-bit unsigned element
+    /// type.
+    #[test]
+    fn an_atomic_does_not_reuse_the_float_handle() {
+        use super::super::shader::ANNOTATED;
+        let words = [
+            0xBE85_0380, // s_mov_b32 s5, 0
+            0xF40C_0202, // s_load_dwordx8 s[8:15], s[4:5], 0
+            0xFA00_0000,
+            0x7E06_0280, // v_mov_b32 v3, 0
+            0x7E08_0280, // v_mov_b32 v4, 0
+            0x7E10_0281, // v_mov_b32 v8, 1
+            0xF000_1F08, // image_load v[10:13], v[3:4], s[8:15] 2D unorm
+            0x0002_0A03,
+            0xF068_1108, // image_atomic_or v8, v[3:4], s[8:15] 2D unorm
+            0x0002_0803,
+            S_ENDPGM,
+        ];
+        let used = UsedResource {
+            kind: ResourceType::Uav,
+            root: RootType::Table,
+            table_offset_dwords: 0,
+            lower_bound: 0,
+            stride: 0,
+            dwords: 8,
+            user_data: 4,
+            slot: 1,
+        };
+        let layout = vec![root(RootType::Constants, 0, 0), root(RootType::Table, 4, 1)];
+        ANNOTATED.take();
+        lower_with(&words, layout, vec![used]).unwrap();
+        // Unordered 2D textures (kind 2, the UAV bit).
+        let uavs: Vec<u32> = ANNOTATED
+            .take()
+            .into_iter()
+            .filter(|p| p.0 & 0x10FF == 0x1002)
+            .map(|p| p.1)
+            .collect();
+        assert_eq!(uavs, [0x409, 0x105]);
     }
 
     /// Root parameter `slot` in user SGPRs from `user_data` on.
