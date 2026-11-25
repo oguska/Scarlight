@@ -8721,6 +8721,87 @@ impl<'a> Lower<'a> {
             .ok_or("an untracked buffer")?;
         let used = self.used_kind(src);
         let (base, extra) = self.built_offset(src)?;
+        if let Source::Built {
+            address,
+            bits,
+            words: [records, word3],
+        } = *src
+            && address.param == CODE
+        {
+            if store || atomic.is_some() || typed {
+                return Err("a buffer store, atomic or typed load of a table in the code");
+            }
+            if bits >> 30 != 0 || word3 >> 23 & 1 != 0 {
+                return Err("a code table descriptor with swizzling or thread ids");
+            }
+            // OOB_SELECT (dword 3 bits 28-29): 1 checks the index, 2 only
+            // an empty buffer, 3 the offset with soffset, not the index
+            // (measured on RDNA2 by the Leonida project).
+            let oob = word3 >> 28 & 3;
+            if oob == 0 {
+                return Err("a code table descriptor checking offsets against its stride");
+            }
+            let Some(Operand::Vector { reg, .. }) = *data else {
+                return Err("a buffer result");
+            };
+            let mut at = self.s.m.i32(base);
+            at = self.s.m.bin(c, Bin::Add, at, off);
+            if let Some(x) = extra {
+                at = self.s.m.bin(c, Bin::Add, at, x);
+            }
+            if let Some(ix) = index {
+                let stride = self.s.m.i32(bits >> 16 & 0x3FFF);
+                let row = self.s.m.bin(c, Bin::Mul, ix, stride);
+                at = self.s.m.bin(c, Bin::Add, at, row);
+            }
+            let bytes = sub.map_or(4, |(width, _)| width / 8);
+            for k in 0..count {
+                // In range: a value, or a constant answer.
+                let ok: Result<V, bool> = match (oob, index) {
+                    (1, Some(ix)) => {
+                        let n = self.s.m.i32(records);
+                        Ok(self.s.m.cmp(c, pred::IULT, ix, n))
+                    }
+                    (1 | 2, _) => Err(records != 0),
+                    // Multi-dword loads are checked per dword.
+                    _ => match records.checked_sub(4 * k + bytes) {
+                        Some(last) => {
+                            let last = self.s.m.i32(last);
+                            Ok(self.s.m.cmp(c, pred::IULE, off, last))
+                        }
+                        None => Err(false),
+                    },
+                };
+                let zero = self.s.m.i32(0);
+                let x = match (ok, sub) {
+                    (Err(false), _) => zero,
+                    (_, None) => {
+                        let four = self.s.m.i32(4 * k);
+                        let byte = self.s.m.bin(c, Bin::Add, at, four);
+                        self.code_dword(byte)?
+                    }
+                    (_, Some((width, signed))) => {
+                        // shortcut: the field is taken not to cross a dword.
+                        let (not3, three) = (self.s.m.i32(!3), self.s.m.i32(3));
+                        let aligned = self.s.m.bin(c, Bin::And, at, not3);
+                        let w = self.code_dword(aligned)?;
+                        let byte = self.s.m.bin(c, Bin::And, at, three);
+                        let sh = self.s.m.bin(c, Bin::Shl, byte, three);
+                        let x = self.s.m.bin(c, Bin::LShr, w, sh);
+                        let left = self.s.m.i32(32 - width);
+                        let x = self.s.m.bin(c, Bin::Shl, x, left);
+                        let shr = if signed { Bin::AShr } else { Bin::LShr };
+                        self.s.m.bin(c, shr, x, left)
+                    }
+                };
+                let x = match ok {
+                    Ok(ok) => self.s.m.select(c, ok, x, zero),
+                    Err(_) => x,
+                };
+                self.write(inst, Reg::V(reg + k as u8), x, guard);
+            }
+            return Ok(());
+        }
         if base != 0 {
             let b = self.s.m.i32(base);
             off = self.s.m.bin(c, Bin::Add, off, b);

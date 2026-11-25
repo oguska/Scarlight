@@ -7,7 +7,8 @@
 //! and does float min/max atomics, reads through the address it takes
 //! from a buffer view's descriptor (the host's view addresses), reads
 //! pointers into memory no copy holds (zeros, marked missed) and stores and
-//! loads through a root UAV (title memory in such a program).
+//! loads through a root UAV (title memory in such a program). Also: buffer
+//! loads of a table in the program's code, zeros out of the records.
 
 use super::host::{Dispatch, Host, Root, View};
 use super::{HostShader, lower, validator};
@@ -609,6 +610,246 @@ fn writes_through_views_mark_their_pages() {
             .filter(|&b| out[3][b / 32] >> (b % 32) & 1 != 0)
             .collect();
         assert_eq!(marked, [100, 101, 200], "{label}: pages");
+        ran += 1;
+    }
+    assert!(ran > 0, "neither hardware nor WARP SM 6.6 device available");
+}
+
+const OFFEN: u32 = 1 << 12;
+const IDXEN: u32 = 1 << 13;
+
+/// MUBUF `op vdata, vaddr, s[srsrc:srsrc+3], soffset`; `low` holds the
+/// immediate offset and [`OFFEN`] or [`IDXEN`].
+const fn mubuf(op: u32, vdata: u8, vaddr: u8, srsrc: u8, soffset: u8, low: u32) -> [u32; 2] {
+    [
+        0x38 << 26 | op << 18 | low,
+        (soffset as u32) << 24 | (srsrc as u32 >> 2) << 16 | (vdata as u32) << 8 | vaddr as u32,
+    ]
+}
+
+/// The table [`code_table_program`] appends to its code.
+fn code_table() -> Vec<u32> {
+    (1..=64u32).map(|k| k.wrapping_mul(0x9E37_79B9)).collect()
+}
+
+/// Record limits of [`code_table_program`]'s two descriptors: bytes of the
+/// raw one (lane 29's dword past it, its byte 1 not), elements of the
+/// indexed one.
+const RAW_RECORDS: u32 = 4 * 29 + 2;
+const INDEXED_RECORDS: u32 = 21;
+
+/// A wave32 program of 32 lanes reading a table after its code through two
+/// descriptors built around `s_getpc_b64`: a raw one (`OOB_SELECT` 3) read
+/// per lane at `lane * 4` as a dword, its byte 1, and two dwords 4 bytes
+/// further through `soffset`; a structured one (`OOB_SELECT` 1, stride 8)
+/// read by `idxen` at the lane's element plus 4. Lane `l` stores the five
+/// dwords at `32 * l` of the UAV at heap index 0.
+fn code_table_program() -> Vec<u32> {
+    let mut w = vec![s_mov_b32(5, ZERO as u8)];
+    w.extend(s_load(2, 8, 4, 0)); // s[8:11]: the result UAV
+    // s[12:15] and s[16:19]: the table's descriptors (the literals patched
+    // below with the table's distance from each s_getpc_b64's next word).
+    let raw = w.len();
+    w.extend([0xBE8C_1F00, 0x800C_FF0C, 0, 0x820D_800D]); // s_getpc_b64 s[12:13]; s_add_u32; s_addc_u32
+    w.extend([0xBE8E_03FF, RAW_RECORDS, 0xBE8F_03FF, 0x3101_4FAC]); // s_mov_b32 s14, s15
+    let indexed = w.len();
+    w.extend([0xBE90_1F00, 0x8010_FF10, 0, 0x8211_8011]); // s_getpc_b64 s[16:17]; s_add_u32; s_addc_u32
+    w.extend([0x8811_FF11, 8 << 16]); // s_or_b32 s17, s17, stride 8
+    w.extend([0xBE92_03FF, INDEXED_RECORDS, 0xBE93_03FF, 0x1101_4FAC]); // s_mov_b32 s18, s19
+    w.push(0xBE94_0384); // s_mov_b32 s20, 4
+    w.push(0x3402_0082); // v_lshlrev_b32 v1, 2, v0
+    w.push(0x3402_0085 | 7 << 17); // v_lshlrev_b32 v7, 5, v0
+    w.extend(mubuf(0x0C, 2, 1, 12, 0x80, OFFEN));
+    w.extend(mubuf(0x08, 3, 1, 12, 0x80, OFFEN | 1));
+    w.extend(mubuf(0x0C, 4, 0, 16, 0x80, IDXEN | 4));
+    w.extend(mubuf(0x0D, 5, 1, 12, 20, OFFEN));
+    w.push(S_WAITCNT_ALL);
+    for k in 0..5u8 {
+        w.extend(mubuf(0x1C, 2 + k, 7, 8, 0x80, OFFEN | (4 * u32::from(k))));
+    }
+    w.push(S_ENDPGM);
+    let table = 4 * w.len() as u32;
+    for at in [raw, indexed] {
+        w[at + 2] = table - 4 * (at as u32 + 1);
+    }
+    w.extend(code_table());
+    w
+}
+
+/// What lane `l` of [`code_table_program`] stores: out of range, a load
+/// reads 0 (a raw load by dword, each checked as `offset + soffset +
+/// size > records`; an indexed one by `index >= records`).
+fn code_table_model(l: u32) -> [u32; 5] {
+    let t = code_table();
+    let raw = |byte: u32, size: u32, x: u32| if byte + size > RAW_RECORDS { 0 } else { x };
+    [
+        raw(4 * l, 4, t[l as usize]),
+        raw(4 * l + 1, 1, t[l as usize] >> 8 & 0xFF),
+        if l >= INDEXED_RECORDS {
+            0
+        } else {
+            t[2 * l as usize + 1]
+        },
+        raw(4 * l + 4, 4, t[l as usize + 1]),
+        raw(4 * l + 8, 4, t[l as usize + 2]),
+    ]
+}
+
+fn lower_code_table_program(words: &[u32]) -> Result<HostShader, String> {
+    let native = NativeProgram {
+        stage: HwStage::Cs,
+        wave64: false,
+        vgprs: 8,
+        layout: vec![RootParam {
+            root: RootType::Table,
+            table_offset_dwords: 0,
+            sgprs: 1,
+            base_register: 0,
+            user_data: 4,
+            slot: 1,
+        }],
+        used: vec![UsedResource {
+            kind: ResourceType::Uav,
+            root: RootType::Table,
+            table_offset_dwords: 0,
+            lower_bound: 0,
+            stride: 0,
+            dwords: 4,
+            user_data: 4,
+            slot: 1,
+        }],
+        io: StageIo::Cs(ComputeIo {
+            rsrc2: 5 << 1,
+            threads: [32, 1, 1],
+        }),
+        code: words.iter().flat_map(|w| w.to_le_bytes()).collect(),
+    };
+    let e = |e: crate::ShaderError| e.to_string();
+    let p = ir::build(&native.code, native.wave64, native.vgprs).map_err(e)?;
+    let st = structure::structure(&p).map_err(e)?;
+    let res = resource::track(&p, &native.layout, native.stage, Some(&st)).map_err(e)?;
+    let io = io::raise(&p, &native).map_err(e)?;
+    let l = lower::lower(&lower::Parts {
+        native: &native,
+        p: &p,
+        st: &st,
+        io: &io,
+        res: &res,
+        inputs: Vec::new(),
+        outputs: Vec::new(),
+        prims: Vec::new(),
+        mesh_stride: 0,
+        view_marks: false,
+    })
+    .map_err(e)?;
+    Ok(HostShader {
+        stage: HwStage::Cs,
+        dxil: l.dxil,
+        user_data: l.user_data,
+        samplers: l.samplers,
+        static_samplers: Vec::new(),
+        root_cbvs: l.root_cbvs,
+        root_srvs: l.root_srvs,
+        root_uavs: l.root_uavs,
+        memory: l.memory,
+        memory_writes: l.memory_writes,
+        view_addresses: l.view_addresses,
+        heap: l.heap,
+        heap_writes: l.heap_writes,
+        view_marks: l.view_marks,
+    })
+}
+
+/// [`code_table_program`] decodes as written and lowers.
+#[test]
+fn code_table_buffer_loads_lower() {
+    let words = code_table_program();
+    let code: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let text: Vec<String> = crate::gfx10::decode(&code)
+        .expect("the program decodes")
+        .iter()
+        .map(|i| i.text(false))
+        .collect();
+    let table = 4 * (words.len() - 64);
+    let want = [
+        "s_getpc_b64 s[12:13]".to_owned(),
+        format!("s_add_u32 s12, s12, lit({:#010x})", table - 16),
+        "s_addc_u32 s13, s13, 0".to_owned(),
+        format!("s_mov_b32 s14, lit({RAW_RECORDS:#010x})"),
+        "s_mov_b32 s15, lit(0x31014fac)".to_owned(),
+        "s_getpc_b64 s[16:17]".to_owned(),
+        format!("s_add_u32 s16, s16, lit({:#010x})", table - 48),
+        "s_addc_u32 s17, s17, 0".to_owned(),
+        "s_or_b32 s17, s17, lit(0x00080000)".to_owned(),
+        format!("s_mov_b32 s18, lit({INDEXED_RECORDS:#010x})"),
+        "s_mov_b32 s19, lit(0x11014fac)".to_owned(),
+        "s_mov_b32 s20, 4".to_owned(),
+        "v_lshlrev_b32 v1, 2, v0".to_owned(),
+        "v_lshlrev_b32 v7, 5, v0".to_owned(),
+        "buffer_load_dword v2, v1, s[12:15], 0 offen".to_owned(),
+        "buffer_load_ubyte v3, v1, s[12:15], 0 offen offset:1".to_owned(),
+        "buffer_load_dword v4, v0, s[16:19], 0 idxen offset:4".to_owned(),
+        "buffer_load_dwordx2 v[5:6], v1, s[12:15], s20 offen".to_owned(),
+    ];
+    assert_eq!(text[2..2 + want.len()], want[..]);
+    let shader = lower_code_table_program(&words).expect("lower");
+    if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
+        v.validate(&mut shader.dxil.clone())
+            .expect("DXIL validation failed");
+    }
+    // OOB_SELECT 0 (offsets checked against the stride) is refused.
+    let mut checked = words.clone();
+    let at = words
+        .iter()
+        .position(|&w| w == 0x3101_4FAC)
+        .expect("dword 3");
+    checked[at] = 0x0101_4FAC;
+    let Err(e) = lower_code_table_program(&checked) else {
+        panic!("OOB_SELECT 0 lowered");
+    };
+    assert!(e.contains("checking offsets against its stride"), "{e}");
+}
+
+/// [`code_table_program`] on the host GPU and WARP matches
+/// [`code_table_model`] in every lane.
+#[test]
+fn code_table_buffer_loads_read_zeros_out_of_range() {
+    let shader = lower_code_table_program(&code_table_program()).expect("lower");
+    let want: Vec<u32> = (0..32)
+        .flat_map(|l| {
+            let mut row = code_table_model(l).to_vec();
+            row.resize(8, 0);
+            row
+        })
+        .collect();
+    let _one = super::valu_tests::ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut ran = 0;
+    for (label, warp) in [("hardware", false), ("warp", true)] {
+        let Ok(host) = Host::new(warp) else {
+            eprintln!("no SM 6.6 {label} device; skipped");
+            continue;
+        };
+        let (root, pso) = host.compute_pipeline(&shader).expect("pipeline");
+        let mut ud = vec![0u32; shader.user_data_dwords().max(1) as usize];
+        for u in &shader.user_data {
+            assert_eq!((u.root, u.slot), (RootType::Table, 1), "user data {u:?}");
+            ud[u.index as usize] = 0;
+        }
+        let out = host
+            .dispatch(
+                &root,
+                &pso,
+                &Dispatch {
+                    roots: vec![(0, Root::Constants(ud))],
+                    views: &[View::RawUav(32 * 8)],
+                    samplers: &[],
+                    groups: [1, 1, 1],
+                },
+            )
+            .unwrap_or_else(|e| panic!("{label}: {e}"));
+        assert_eq!(out[0], want, "{label}");
         ran += 1;
     }
     assert!(ran > 0, "neither hardware nor WARP SM 6.6 device available");
