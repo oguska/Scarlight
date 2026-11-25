@@ -3010,3 +3010,151 @@ fn lds_bytes_and_halves_match_the_hardware() {
         }),
     ]));
 }
+
+const DS_INC: u32 = 0x03;
+const DS_DEC: u32 = 0x04;
+const DS_INC_RTN: u32 = 0x23;
+const DS_DEC_RTN: u32 = 0x24;
+const S_WAITCNT_ALL: u32 = 0xBF8C_0000;
+const S_BARRIER: u32 = 0xBF8A_0000;
+
+/// Each lane owns one LDS dword. Input v3 is the number of updates it runs,
+/// so one dispatch can check every prefix of the sequence, including zero.
+fn lds_wrap_sequence(op: u32, steps: u8) -> Vec<u32> {
+    let mut body = vec![vop2(0x1A, 11, int(2), 0)];
+    body.extend(ds(0x0D, 0, 11, 1, 4));
+    body.extend([S_WAITCNT_ALL, sop1(0x03, 20, EXEC_LO)]);
+    for step in 0..steps {
+        body.push(vopc(0xD1, int(step), 3)); // v_cmpx_lt_u32 step, v3
+        body.extend(ds(op, 5, 11, 2, 4));
+        body.extend([S_WAITCNT_ALL, sop1(0x03, 126, s(20))]);
+    }
+    body.extend(ds(0x36, 6, 11, 0, 4));
+    body.push(S_WAITCNT_ALL);
+    body
+}
+
+#[test]
+fn lds_wrap_atomics_update_and_return_under_exec() {
+    let mut probes = Vec::new();
+    for (op, steps, increment, returns) in [
+        (DS_INC_RTN, 5, true, true),
+        (DS_DEC_RTN, 4, false, true),
+        (DS_INC, 1, true, false),
+        (DS_DEC, 1, false, false),
+    ] {
+        let start = if increment { 0 } else { 2 };
+        let mut inputs: Vec<_> = (0..=steps)
+            .map(|steps| [start, 3, u32::from(steps), OLD])
+            .collect();
+        inputs.extend([
+            [10, 3, 1, OLD],
+            [u32::MAX, 3, 1, OLD],
+            [0, 0, 1, OLD],
+            [0x8000_0000, u32::MAX, 1, OLD],
+        ]);
+        probes.push(probe(lds_wrap_sequence(op, steps), inputs, INT, move |i| {
+            let [mut value, limit, steps, mut result] = i;
+            for _ in 0..steps {
+                if returns {
+                    result = value;
+                }
+                value = if increment {
+                    if value >= limit { 0 } else { value + 1 }
+                } else if value == 0 || value > limit {
+                    limit
+                } else {
+                    value - 1
+                };
+            }
+            vec![result, value]
+        }));
+    }
+    assert_clean(check(&probes));
+}
+
+fn lds_wrap_shared() -> Vec<u32> {
+    let mut body = vec![
+        vop1(0x01, 11, int(0)),
+        sop1(0x03, 20, EXEC_LO),
+        vopc(0xD2, int(0), 0), // Only thread 0 initializes the shared dword.
+    ];
+    body.extend(ds(0x0D, 0, 11, 1, 4));
+    body.extend([S_WAITCNT_ALL, sop1(0x03, 126, s(20)), S_BARRIER]);
+    body.push(vopc(0xD1, int(0), 3));
+    body.extend(ds(DS_INC_RTN, 5, 11, 2, 4));
+    body.extend([S_WAITCNT_ALL, sop1(0x03, 126, s(20)), S_BARRIER]);
+    body.extend(ds(0x36, 6, 11, 0, 4));
+    body.push(S_WAITCNT_ALL);
+    body
+}
+
+#[test]
+fn lds_wrap_atomics_serialize_contending_lanes() {
+    let shader = lower_program(&program(&lds_wrap_shared(), false)).expect("lower");
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let mut ran = false;
+    for (label, warp) in [("hardware", false), ("WARP", true)] {
+        let host = match Host::new(warp) {
+            Ok(host) => host,
+            Err(e) => {
+                eprintln!("{label}: {e}");
+                continue;
+            }
+        };
+        for count in [32u32, 31] {
+            // Alternate participating lanes across both wave32s. Also test a
+            // partial cycle so an incorrect wrap or dropped update is visible.
+            let inputs: Vec<_> = (0..64)
+                .map(|lane| [2, 7, u32::from(lane % 2 == 0 && lane / 2 < count), OLD])
+                .collect();
+            let output = run(&host, &shader, &inputs, false).expect(label);
+            let mut returned = Vec::new();
+            for ([old, final_value, ..], input) in output.into_iter().zip(inputs) {
+                assert_eq!(final_value, (2 + count) % 8, "{label}: final LDS value");
+                if input[2] == 0 {
+                    assert_eq!(old, OLD, "{label}: inactive lane's destination");
+                } else {
+                    returned.push(old);
+                }
+            }
+            let mut expected: Vec<_> = (0..count).map(|n| (2 + n) % 8).collect();
+            returned.sort_unstable();
+            expected.sort_unstable();
+            assert_eq!(
+                returned, expected,
+                "{label}: multiset of returned old values"
+            );
+        }
+        eprintln!("{label}: LDS contention passed");
+        ran = true;
+    }
+    assert!(ran, "no SM 6.6 device");
+}
+
+#[test]
+fn lds_wrap_atomics_validate_as_32_bit_dxil() {
+    let validator = validator::Validator::load(validator::Validator::default_path().as_deref());
+    assert!(
+        validator.is_ok() || std::env::var_os("VICTORY_DXIL").is_none(),
+        "could not load the configured DXIL validator"
+    );
+    let mut bodies: Vec<_> = [(DS_INC, 1), (DS_DEC, 1), (DS_INC_RTN, 5), (DS_DEC_RTN, 4)]
+        .into_iter()
+        .map(|(op, steps)| lds_wrap_sequence(op, steps))
+        .collect();
+    bodies.push(lds_wrap_shared());
+    let mut validator = validator.ok();
+    for body in bodies {
+        let mut shader = lower_program(&program(&body, false)).expect("lower");
+        let container = crate::Container::parse(&shader.dxil).expect("parse DXIL container");
+        let features = container
+            .part(crate::FourCC::SFI0)
+            .expect("SFI0 feature flags");
+        let features = u64::from_le_bytes(features.data.try_into().expect("64-bit feature mask"));
+        assert_eq!(features & 0x8000, 0, "LDS wrap atomics require Int64");
+        if let Some(validator) = &mut validator {
+            validator.validate(&mut shader.dxil).expect("validate DXIL");
+        }
+    }
+}

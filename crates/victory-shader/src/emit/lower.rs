@@ -3204,7 +3204,7 @@ impl<'a> Lower<'a> {
             "min_u32" => Some(Rmw::UMin),
             "max_u32" => Some(Rmw::UMax),
             "wrxchg_b32" => Some(Rmw::Xchg),
-            "cmpst_b32" => None,
+            "cmpst_b32" | "inc_u32" | "dec_u32" => None,
             _ => return Err("an LDS operation"),
         };
         let v0 = self.vgprs(inst, data.first().ok_or("an LDS atomic")?, 1)?[0];
@@ -3219,17 +3219,47 @@ impl<'a> Lower<'a> {
         };
         let p = dword(self, offset);
         let at = self.begin_guarded(guard);
-        let r = match rmw {
-            Some(op) => self.s.m.atomic(self.cur, op, p, v0),
+        let r = match (rmw, op.as_str()) {
+            (Some(op), _) => self.s.m.atomic(self.cur, op, p, v0),
             // Compare with data0, store data1.
-            None => self
+            (None, "cmpst_b32") => self
                 .s
                 .m
                 .cmpxchg(self.cur, p, v0, v1.ok_or("an LDS compare")?),
+            (None, _) => {
+                // Retry with the value observed by the failed compare-exchange.
+                let entry = self.cur;
+                let m = &mut self.s.m;
+                let initial = m.load(entry, p);
+                let retry = m.new_block();
+                let done = m.new_block();
+                m.terminate(entry, Term::Br(retry));
+                let expected = m.phi(retry, self.s.t.i32);
+                let (zero, one) = (m.i32(0), m.i32(1));
+                let next = if op == "inc_u32" {
+                    let wrap = m.cmp(retry, pred::IUGE, expected, v0);
+                    let inc = m.bin(retry, Bin::Add, expected, one);
+                    m.select(retry, wrap, zero, inc)
+                } else {
+                    let is_zero = m.cmp(retry, pred::EQ, expected, zero);
+                    let above = m.cmp(retry, pred::IUGT, expected, v0);
+                    let wrap = m.bin(retry, Bin::Or, is_zero, above);
+                    let dec = m.bin(retry, Bin::Sub, expected, one);
+                    m.select(retry, wrap, v0, dec)
+                };
+                let prev = m.cmpxchg(retry, p, expected, next);
+                let success = m.cmp(retry, pred::EQ, prev, expected);
+                m.set_phi(expected, vec![(initial, entry), (prev, retry)]);
+                m.terminate(retry, Term::CondBr(success, done, retry));
+                self.cur = done;
+                prev
+            }
         };
-        let r = self.end_guarded(at, &[(r, outside)])[0];
         if let Some(reg) = dst_reg {
+            let r = self.end_guarded(at, &[(r, outside)])[0];
             self.write(inst, Reg::V(reg), r, None);
+        } else {
+            self.end_guarded(at, &[]);
         }
         Ok(())
     }
