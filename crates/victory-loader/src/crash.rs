@@ -247,7 +247,7 @@ unsafe fn emulate_amd_only(info: *mut EXCEPTION_POINTERS) -> bool {
                     context.Rip += len as u64;
                     return true;
                 }
-                let Some(len) = sse4a(code, &mut context.Anonymous.FltSave.XmmRegisters) else {
+                let Some(len) = sse4a(code, n, &mut context.Anonymous.FltSave.XmmRegisters) else {
                     return false;
                 };
                 context.Rip += len as u64;
@@ -518,8 +518,9 @@ fn cmp_flags(a: u64, b: u64) -> u32 {
 const CMP_FLAGS: u32 = 0x8d5;
 
 /// SSE4a's `extrq`/`insertq` (register forms, the only ones there are) on
-/// the saved XMM registers; returns the instruction's length.
-unsafe fn sse4a(code: *const u8, xmm: &mut [M128A; 16]) -> Option<usize> {
+/// the saved XMM registers; returns the instruction's length. One longer than
+/// the `n` code bytes that were read is left alone.
+unsafe fn sse4a(code: *const u8, n: usize, xmm: &mut [M128A; 16]) -> Option<usize> {
     // SAFETY: the caller's code bytes are readable up to the instruction's end.
     let b = |i: usize| unsafe { code.add(i).read() };
     let prefix = b(0);
@@ -538,12 +539,16 @@ unsafe fn sse4a(code: *const u8, xmm: &mut [M128A; 16]) -> Option<usize> {
     let dst = usize::from((modrm >> 3) & 7 | (rex & 4) << 1);
     let src = usize::from(modrm & 7 | (rex & 1) << 3);
     let immediate = b(at + 1) == 0x78;
-    let (fields, len) = if immediate {
-        ((b(at + 3), b(at + 4)), at + 5)
+    let len = at + if immediate { 5 } else { 3 };
+    if len > n {
+        return None;
+    }
+    let fields = if immediate {
+        (b(at + 3), b(at + 4))
     } else {
         // extrq reads its fields from src's low half, insertq from its high.
         let f = if prefix == 0x66 { xmm[src].Low } else { xmm[src].High as u64 };
-        ((f as u8, (f >> 8) as u8), at + 3)
+        (f as u8, (f >> 8) as u8)
     };
     let (n, at_bit) = (u32::from(fields.0 & 63), u32::from(fields.1 & 63));
     let bits = if n == 0 { 64 } else { n };
@@ -1649,6 +1654,17 @@ mod tests {
         assert_eq!(emulate(&extrq, 0, &mut xmm), Some(7));
         assert_eq!(low(&xmm, 9), 0xbc);
         assert_eq!(low(&xmm, 1), 0);
+    }
+
+    #[test]
+    fn a_cut_off_sse4a_changes_no_register() {
+        let mut xmm = [reg(0, 0); 16];
+        xmm[0] = reg(0x1122_3344_5566_7788, 0);
+        // extrq xmm0, 8, 4 with only five of its six bytes readable.
+        let code = [0x66, 0x0f, 0x78, 0xc0, 0x08, 0x00];
+        // SAFETY: all six bytes are readable here; `n` says five.
+        assert_eq!(unsafe { sse4a(code.as_ptr(), 5, &mut xmm) }, None);
+        assert_eq!(low(&xmm, 0), 0x1122_3344_5566_7788);
     }
 
     #[test]
