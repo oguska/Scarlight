@@ -4,7 +4,7 @@
 
 ## Credit
 
-- Upstream PR / commit / author, if this is not new work: <!-- e.g. VIctory#704 by @r4tedx -->
+- Upstream PR / commit / author, if this is not new work: <!-- e.g. upstream PR #704 by @r4tedx -->
 - If it came from another fork or project, name it and its licence.
 
 ## How it was tested

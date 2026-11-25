@@ -16,7 +16,7 @@
 
 **It implements the console system APIs a title calls, decodes its GPU command streams and recompiles its RDNA2 shaders, and runs the result through Proton — Wine and vkd3d-proton — on Mesa's open Vulkan drivers.<br>RADV (AMD) is the reference and ANV (Intel) is next. Mesa is open source, so the driver is ours to read, tune and fix, and every part of this project is developed and measured on that stack.**
 
-<sub>[What it is](#what-it-is) · [Status](#status) · [Hardware](#hardware) · [Requirements](#requirements) · [Quick start](#quick-start) · [How it works](#how-it-works) · [Roadmap](#roadmap) · [Launcher](#launcher) · [Help us test](#help-us-test) · [Contribute](#contribute) · [Who is behind this](#who-is-behind-this) · [Credits](#credits) · [Licence](#licence)</sub>
+<sub>[What it is](#what-it-is) · [Status](#status) · [Progress](#progress) · [Hardware](#hardware) · [Requirements](#requirements) · [Quick start](#quick-start) · [How it works](#how-it-works) · [Roadmap](#roadmap) · [Launcher](#launcher) · [Help us test](#help-us-test) · [Contribute](#contribute) · [Who is behind this](#who-is-behind-this) · [Credits](#credits) · [Licence](#licence)</sub>
 
 </div>
 
@@ -46,9 +46,9 @@ tried.
 | Area | State |
 |---|---|
 | Boot, menus, audio, gamepad | Work; menus at 30 fps |
-| World, fixed test scene | Lit and textured. **3.0 fps** on tag `keep/best-fx-578d459c` (one run, Microsoft's `d3dcompiler_47` beside the exe); **1.45-1.6 fps** on six builds of the current base (one run each) |
+| World, fixed test scene | Lit and textured. **3.0 fps** on tag `keep/best-fx-578d459c` (one run, Microsoft's `d3dcompiler_47` beside the exe); **1.45-1.7 fps** on nine builds of the current base (one run each) |
 | Time to the world | 133-218 s (three builds) |
-| Shader translation | **751 / 751** world programs of the test title translate offline |
+| Shaders | **751 / 751** world programs of the test title translate, and **749 / 751** build a real RADV pipeline |
 | Faces | **Some characters' faces still fail to render** (regressed again on 25 Nov, under investigation) |
 | Picture | Close-up character detail and walls missing in some builds; shadowed areas dark |
 | Stability | Some builds hang at boot or at world entry; async write-back is experimental |
@@ -57,14 +57,46 @@ tried.
 The frame rate is the median at one fixed scene, the only figure compared between builds; the method
 is in [docs/testing.md](docs/testing.md).
 
+## Progress
+
+Each row is a share of a set that was **counted on this machine** — an import table, a shader archive,
+a frame of recorded work — so the bars are measurements, not estimates. 100 % in every row is the
+target, not a promise: correctness is checked by runs. The System APIs row is the one to read twice:
+every import resolves, but only 15 % of them are code this project wrote — the rest is Wine (Proton)
+doing its job, and the title's own libraries. Per-row sources, the ISA and pipeline detail, and what
+each number means: [docs/PROGRESS.md](docs/PROGRESS.md).
+
+| Area | Progress | Detail | Where |
+|---|---|---|---|
+| System APIs (HLE) | ████████████ 100 % resolved (0 missing) | ██░░░░░░░░░░ 15 % own HLE | [detail](docs/PROGRESS.md#system-apis-hle) |
+| Shaders | ███████████░ 99 % | ███████████░ 99 % real RADV pipeline | [detail](docs/PROGRESS.md#shaders) |
+| GPU command stream | ███████████░ 92 % | ███████████░ 92 % verified | [detail](docs/PROGRESS.md#gpu-command-stream) |
+| Pipelines | ████████░░░░ 69 % | ███████████░ 99 % built offline | [detail](docs/PROGRESS.md#pipelines) |
+| Features | status words | 2 of 10 shown | [detail](docs/PROGRESS.md#features) |
+| Mesa reach (compiled offline, not run) | ██████████░░ 80 % | compiled only, not run | [detail](docs/PROGRESS.md#mesa-reach) |
+| Performance | █░░░░░░░░░░░ 5 % | █░░░░░░░░░░░ 5 % of 30 fps | [detail](docs/PROGRESS.md#performance) |
+
+Measured on 25 Nov 2026, build 5fca579b, RX 9070 XT (RDNA4) / Mesa 26.3.1 RADV. The gaps are the
+honest ones: 88 of 587 imports are our own HLE, the whole-archive shaders have translation but no
+validated pipeline column yet, and speed is a twentieth of the console's 30 fps. The world set does
+more than translate, though: **749 of 751** build a real RADV pipeline, and through Mesa's noop
+drm-shims the same set compiles for every AMD generation up to ours (Vega 669/751, no mesh shaders)
+and on Intel ANV for Arc B **751/751**, Arc A 750/751 and Xe-LPG 750/751; the single Intel miss is
+the stub's own query gap, not a compiler error. Only RDNA4 has actually been run. Per-family table:
+[docs/hardware.md](docs/hardware.md#compile-check-per-family). Regenerate with `tools/progress/collect.sh`
+and `tools/progress/render.py`.
+
 ## Hardware
 
 | **Tested** | **Expected** | **Unknown** |
 |---|---|---|
-| **RX 9070 XT (RDNA4) · RADV**<br>Every number on this page comes from this one card | **RDNA1-3 (RX 5000-7000), Vega · RADV**<br>**Arc A/B-series, Xe2 · ANV**<br>Not yet checked | **Older Intel, Polaris and older, AMD APUs**<br>Any Mesa older than ours<br>Not yet checked |
+| **RX 9070 XT (RDNA4) · RADV**<br>Every number on this page comes from this one card | **RDNA1-3 (RX 5000-7000), Vega · RADV**<br>World pipelines compile offline for all four (Vega 669/751, no mesh); not yet run<br><br>**Arc A/B-series, Xe2 · ANV**<br>Not yet checked | **Older Intel, Polaris and older, AMD APUs**<br>Any Mesa older than ours<br>Not yet checked |
 
-Full table, what "Expected" means and how a card moves: [docs/hardware.md](docs/hardware.md). Native
-Windows and NVIDIA's proprietary driver are unsupported; NVK is a roadmap item, not a target yet.
+Full table, what "Expected" means and how a card moves: [docs/hardware.md](docs/hardware.md). The
+world set also compiles for every family in the two right-hand columns through Mesa's noop drm-shim,
+RADV and ANV alike; that result, per family, is the
+[compile check](docs/hardware.md#compile-check-per-family). Native Windows and NVIDIA's proprietary
+driver are unsupported; NVK is a roadmap item, not a target yet.
 
 ## Requirements
 
@@ -189,7 +221,11 @@ that is our bug, and if the fault is in the driver we take it to Mesa.
 ## Contribute
 
 Pull requests target `main` and go in after CI and review. [CONTRIBUTING.md](CONTRIBUTING.md) has the
-build, test, naming and asset rules. Docs, commits and PRs never name the title or its developer; no
+build, test, naming and asset rules, and says which checks to run; [good first
+issues](https://github.com/pablogonz12/Scarlight/labels/good%20first%20issue) are written so a
+newcomer can finish one without guessing. Questions go to
+[Discussions](https://github.com/pablogonz12/Scarlight/discussions), and everyone here follows the
+[code of conduct](CODE_OF_CONDUCT.md). Docs, commits and PRs never name the title or its developer; no
 game files, screenshots or dumps are ever committed ([asset policy](docs/asset-policy.md)). Parts of
 the project, this page included, are written with AI coding tools. If you want a Linux-first project
 to keep moving, star the repository and tell us what your card does.
@@ -208,8 +244,8 @@ Open an issue, send a test report, or take a roadmap item.
 
 ## Credits
 
-Built on **VIctory** (GPL-3.0) and work from its community — every contributor is named in
-[CREDITS.md](CREDITS.md).
+Built on the project named in [CREDITS.md](CREDITS.md) (GPL-3.0), whose history and authorship this
+tree keeps, plus work from its community — every contributor is named there.
 
 ## Licence
 
