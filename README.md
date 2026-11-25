@@ -1,217 +1,143 @@
-# VIctory
+<div align="center">
 
-Runs the title (Xbox Series X|S) natively on Windows, from files
-the user supplies.
+<img src="docs/brand/banner.svg" alt="Scarlight: console titles on PC, AMD + Linux first" width="100%">
 
-The title's x86-64 code runs unchanged inside our process; VIctory supplies
-the platform underneath it and converts the title's data, ahead of time where
-it can (shaders and pipelines too, see Getting started) and on first use
-otherwise. See [docs/architecture.md](docs/architecture.md).
+<br>
 
-## Status (2026-11-24)
+[![CI](https://img.shields.io/github/actions/workflow/status/pablogonz12/Scarlight/ci.yml?branch=main&style=flat-square&labelColor=14072c&label=CI&color=ff2e63)](https://github.com/pablogonz12/Scarlight/actions/workflows/ci.yml)
+[![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-ff7a3d?style=flat-square&labelColor=14072c)](LICENSE)
+![GPU: RDNA4 tested](https://img.shields.io/badge/GPU-RDNA4%20tested-19d8ff?style=flat-square&labelColor=14072c)
+![Linux first](https://img.shields.io/badge/Linux-first-ffb347?style=flat-square&labelColor=14072c)
+[![PRs welcome](https://img.shields.io/badge/PRs-welcome-ff2e63?style=flat-square&labelColor=14072c)](#how-we-work)
+[![Stars](https://img.shields.io/github/stars/pablogonz12/Scarlight?style=flat-square&labelColor=14072c&color=ffb347)](https://github.com/pablogonz12/Scarlight/stargazers)
 
-**Not playable yet.** The title boots, runs its menus at its own 30 fps,
-loads the world and shows it: slowly, and with rendering defects.
+**A Linux + AMD RDNA4 (RX 9000) first port. Not playable yet.**
 
-| Stage | State |
-|-------|-------|
-| Boot, first-boot screens (accessibility, language, settings, legal) | works, 30 fps |
-| Intro video with sound | works |
-| Start screen, profile and saves | works |
-| Loading into the world (about 50 s) | works |
-| The world (first mission's intro) | drawn and shown: streets, buildings, vehicles, characters, the title card and credits; 1-2 s per frame. Surfaces are unlit, a band of distant geometry is missing, characters come out broken in some shots |
+<sub>[What it is](#what-it-is) · [Target](#target) · [Status](#status) · [Requirements](#requirements) · [Build](#build) · [Run](#run) · [How we work](#how-we-work) · [Credits](#credits)</sub>
 
-Tested on one machine: Windows 11, AMD RX 6700 XT.
+</div>
 
-> **Warning.** Entering the world on a real GPU has hung it in earlier
-> builds, and Windows then resets the display driver (every monitor goes
-> black for a moment). The latest runs did not, but it is not ruled out; a
-> run can also end on a GPU fault (`crashes.log`). A diagnostics build with
-> `VICTORY_D3D12_WARP=1` renders on the software adapter instead (too slow
-> to reach the world in minutes).
+## What it is
 
-What each part does today and what it still needs:
+Scarlight is a **GPL-3.0 port of the console build** of the title to PC, running through
+**Wine/Proton + vkd3d-proton + Mesa RADV**. It runs the title's own x86-64 code from files you
+supply, answers its console-only calls, and turns its GPU commands and shaders into Direct3D 12.
+It is based on [VIctory](https://github.com/Marvisak/VIctory) and
+[fxceless's victory-fork](https://github.com/fxceless/victory-fork), with their history and
+authors kept. No game files, dumps or screenshots are in this repository.
 
-| Subsystem | Today | Needs |
-|-----------|-------|-------|
-| Loader | Runs the title's executable and its DLLs in our process; crash reports name the faulting code and are kept in `crashes.log` | – |
-| Runtime services | One signed-in offline user, licences, packages, saves that survive a kill at any step, text entry dialog | Speech is silent; the dialog and relaunch are untested live |
-| Network | Offline by design: the title cannot reach the network | – |
-| Files and streaming | Archives and streamed data read, zlib and BCPack decoded in parallel | Loading is limited by writes into title memory |
-| Input | XInput pads, keyboard, keyboard stand-in pad | Trigger rumble |
-| Audio | Menu, video and loading sound; XMA voices and Opus streams decode | Reverb is silent; Opus results unverified against the title |
-| GPU: menus | Draws, compute and presentation on host D3D12; only changed title memory is copied | Frame pacing drifts on one screen in release builds |
-| GPU: world | The scene is drawn and presented: mesh pipelines, indirect execution, views the shaders pick from the heap themselves, title memory read by address (ray-tracing structures), depth written from compute, pipelines pre-built or made by worker threads and kept on disk | Lighting (surfaces are unlit) and some missing geometry; frames take 1-2 s; draws of untranslated shaders are dropped; real queries, depth bounds, HDR and scaling are missing |
-| Shaders | Console GPU code recompiled to DXIL, ahead of time (`translate --cache`) or at first use, cached on disk. Menus: all. World: mesh 8,765 of 8,765, vertex/pixel 12,550 of 12,592, compute 2,579 of 2,637 | Merged geometry stages (195 programs) and about 100 others; fused multiply-adds follow the host GPU; some compute programs need a GPU with 64-lane waves |
-| Textures | Console tiled layouts and detiling for the modes the title uses | Render-target metadata planes |
-| Series S mode | Runs through the menus to the loading screen | The world, as above |
-
-## Getting started
-
-Requirements: Windows 10/11 x64, a CPU with AVX2, a Direct3D 12 GPU with
-shader model 6.6 (and mesh shaders for the world), Rust (pinned in
-`rust-toolchain.toml`).
-
-To install Rust, use rustup (`winget install --id Rustlang.Rustup -e`, or
-the installer from https://rustup.rs). The first `cargo` command in this
-repository then fetches the pinned toolchain. Building needs the MSVC C++
-build tools: Visual Studio or its Build Tools with the "Desktop development
-with C++" workload.
-
-The title also needs several GiB of available Windows commit at startup.
-Check **Committed** under **Task Manager → Performance → Memory**. If
-`crashes.log` reports Windows error 1455, close other applications or increase
-the Windows paging file size, then retry.
-
-```powershell
-cargo xtask install-hooks                # asset-policy check on every commit
-copy victory.example.toml victory.toml   # then set your paths (outside the repo)
-cargo test --workspace                   # needs no game data
-cargo run -p victory -- config           # check your paths
+```mermaid
+flowchart LR
+    A["Title's x86-64 code<br/>(your files)"] --> B["victory-loader<br/>+ victory-hle"]
+    B --> C["victory-gpu<br/>+ victory-shader"]
+    C --> D["Direct3D 12"] --> E["vkd3d-proton<br/>in Wine/Proton"] --> F["Mesa RADV<br/>RDNA4"]
 ```
 
-Run the title:
+Crates: [docs/architecture.md](docs/architecture.md).
 
-```powershell
-cargo build --release -p victory
-target\release\victory.exe translate --cache --pipelines <game dir>\shaders.rpf <game dir>\<the title's exe> <game dir>\XboxBvhBuilder.dll <game dir>\amd_fidelityfx_upscaler_xbox.dll
-target\release\victory.exe run <game dir>\<the title's exe> --execute
+## Target
+
+| | |
+|---|---|
+| **First** | Arch-family Linux with an AMD RX 9000 (RDNA4) card |
+| **Tested** | RX 9070 XT on CachyOS |
+| **May work** | Other RDNA cards and other Linux distributions (not tested here) |
+| **Not supported here** | NVIDIA GPUs and native Windows |
+
+For NVIDIA or Windows, use [JMAN730/project-flamingo](https://github.com/JMAN730/project-flamingo)
+or [fxceless/victory-fork](https://github.com/fxceless/victory-fork).
+
+## Status
+
+Measured on one machine (RX 9070 XT, Linux), 25 Nov 2026.
+
+> [!IMPORTANT]
+> The lit picture comes from the candidate build, tag
+> [`keep/scar-candidate-20261125`](https://github.com/pablogonz12/Scarlight/tree/keep/scar-candidate-20261125)
+> (on the fxceless base). **It is not merged into `main` yet.** On `main` the world is still mostly
+> black, at under 1 fps ([AMD-LINUX.md](AMD-LINUX.md)).
+
+| Area (candidate build) | State |
+|---|---|
+| Boot, menus, audio, pad | Works |
+| World in the prologue | Renders lit, about **2-3 fps** at best; many runs are slower (1-2 fps) and it varies by scene and switches |
+| Interiors and shadowed areas | **Known issue:** dark |
+| Intro | **Known issue:** frames can show out of order |
+| Stability | **Known issue:** occasional freezes with experimental switches; `VICTORY_ASYNC_WRITEBACK=1` has hung the title |
+| Playable | **No** |
+
+## Requirements
+
+| | |
+|---|---|
+| OS / GPU | Arch-family Linux, RX 9070 XT (tested) |
+| Wine | **GE-Proton11-14** (tested), running its `wine` binary directly, not the `proton` script |
+| Direct3D 12 | **vkd3d-proton master** (or the DLLs shipped in GE-Proton11-14). Stock vkd3d-proton 3.1 crashes at world entry |
+| Driver | **Mesa 26.3.1** RADV (tested) |
+| RAM | **32 GB or more recommended** (tests ran with about 30 GB usable and little to spare) |
+| Build tools | Rust (pinned in `rust-toolchain.toml`) and `cargo-xwin` |
+| Game files | **Your own legally obtained copy.** None is included, linked or shared |
+
+The candidate build also needs `dxcompiler.dll` and `dxil.dll`
+([DirectXShaderCompiler](https://github.com/microsoft/DirectXShaderCompiler/releases)) and, as a
+stop-gap, Microsoft's `d3dcompiler_47.dll` next to the exe. You supply these too.
+
+## Build
+
+```bash
+git clone https://github.com/pablogonz12/Scarlight && cd Scarlight
+git checkout keep/scar-candidate-20261125   # lit-world candidate; stay on main to contribute
+rustup target add x86_64-pc-windows-msvc
+cargo install cargo-xwin                    # once
+cargo xwin build --release -p victory --target x86_64-pc-windows-msvc
 ```
 
-The `translate --cache` step (minutes; again after a change of the shader
-translator) translates every shader the title can ask for into the cache
-(about 1.3 GB), so a run does not translate them while it plays; without it
-they are translated at first use, and their draws wait. With `--pipelines`
-it then makes every pipeline in the title's shader pack (inside
-`shaders.rpf`) into the host pipeline library (about 27,000 pipelines, 4 MB;
-some 20 minutes on 16 threads, most of it the 2,700 compute ones), so a run
-compiles none of those either; the library belongs to the GPU and driver it
-was made on. Run again, it skips what is there in seconds; stopped
-early, it keeps what it made.
+The output is a Windows binary that runs under Wine. Add `--features diagnostics` for per-frame
+statistics.
 
-Upscaling (Series S mode): the title upscales with AMD FidelityFX. To run
-it with the PC build on your GPU instead of the console build, get the
-[FidelityFX SDK](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK)
-and point `VICTORY_FIDELITYFX_DIR` (or `[paths].fidelityfx_dir`) at its
-`Kits/FidelityFX/signedbin` folder, which holds
-`amd_fidelityfx_upscaler_dx12.dll`. Without it, or if that DLL offers no
-upscaler for your GPU (the log says so), the title's own DLLs run.
+## Run
 
-The window caption shows the framerate. Saves, settings and `crashes.log`
-are kept under the data folder (default `%LOCALAPPDATA%\victory\data`), derived
-data under the cache folder.
+Full setup and a copy-paste play script: **[docs/linux.md](docs/linux.md)**.
 
-Set `VICTORY_WINDOW_MAX=1920x1080` before launching to limit the title's
-top-level window to that bounding box. Smaller windows keep their size,
-larger windows keep their proportions, and the monitor's work area still
-limits them. This scales the displayed image; it does not change the
-console render resolution or the swap-chain buffers. With the variable
-unset, window sizing is unchanged.
+| Switch | Effect |
+|---|---|
+| `VICTORY_NO_WATCHDOG=1` | Turns off the title's watchdog (opt-in hook, one known build). Use it: slow frames can otherwise make the title quit. A real hang then stays a hang |
+| `VICTORY_PIPELINE_WAIT_MS=<ms>` | *Candidate build.* Per-frame wait for background pipeline creation, default 500. Lower (e.g. 24) stalls less, but draws are left out until their pipeline is ready |
+| `VICTORY_DEPTH_TWINS=0` / `stencil` / `nodepth` | *Candidate build.* On by default. These turn off depth/stencil twin textures entirely or limit which are made; for comparing picture problems |
+| `VICTORY_ASYNC_WRITEBACK=1` | **Experimental**, off by default. Writes GPU results back on another thread; has hung the title in our tests |
 
-Input: XInput pads. With none connected the keyboard is a pad while the
-title's window has focus:
+## How we work
 
-| Keys | Pad |
-|------|-----|
-| W A S D / I J K L | left / right stick |
-| arrows | D-pad |
-| Enter, Backspace, X, Y | A, B, X, Y |
-| Q / E, Z / C | shoulders, triggers |
-| F / H | stick clicks |
-| Esc, Tab | Menu, View |
+- We **watch the other ports** and forks, measure their fixes on RDNA4 + Linux, and take the ones
+  that help, **with credit** and the authors' commits kept ([INTEGRATION.md](INTEGRATION.md)).
+- **Every gain goes up as a PR** with its evidence (log lines, shader counts, frame timings).
+- Our gains **also go to [project-flamingo](https://github.com/JMAN730/project-flamingo) as PRs**.
+  Fixes that fit [VIctory](https://github.com/Marvisak/VIctory) should go there too.
+- PRs here target `main`; see [CONTRIBUTING.md](CONTRIBUTING.md). A test report from another RDNA
+  card is as useful as a patch.
+- Docs, commits and PRs never name the title or its developer. Never commit game files
+  ([asset policy](docs/asset-policy.md)).
 
-## Commands
+## Credits
 
-```
-victory inspect <exe|dll> [--imports] [--exports]
-victory census [paths...] [--missing] [--strict]
-victory lib-exports <import.lib> [--list]
-victory shader-info [paths...] [--verbose] [--disasm] [--effects]
-victory translate [paths...] [--validate] [--pipelines] [--list] [--jobs N]
-victory translate [paths...] --cache [--pipelines] [--jobs N]
-victory run <exe> [--execute] [--unimplemented trap|zero] [--strict]
-            [--console series-x|series-s] [-- <title arguments>]
-victory config
-```
+- [Marvisak/VIctory](https://github.com/Marvisak/VIctory): the project this is built on (Marvis and contributors).
+- [fxceless/victory-fork](https://github.com/fxceless/victory-fork) (fxceless / hyphennn): the base of the lit-world candidate.
+- [uiliannn/VItoriaBr](https://github.com/uiliannn/VItoriaBr) (uiliannn): a fork we follow and learn from.
+- **ErRusso**: runtime HLSL through DXC. **ZazaJr24**: configurable pipeline waits.
+  **ruvenesh**: the opt-in watchdog hook (VIctory #454).
 
-Logging: `VICTORY_LOG=victory_loader=trace,info` (a release build logs
-info and above).
-
-### Windows shader-test validator
-
-The shader tests use `dxil.dll` to validate Shader Model 6.6 containers.
-An older Windows SDK validator can load successfully but reject them with
-`Unknown shader model 'ps_6_6'`. If this happens, use a current x64 validator
-from [Microsoft's DirectX Shader Compiler releases](https://github.com/microsoft/DirectXShaderCompiler/releases)
-or a current Windows SDK. Set its path for the test session:
-
-```powershell
-$env:VICTORY_DXIL = 'C:\tools\dxc\bin\x64\dxil.dll'
-cargo test -p victory-shader --lib --locked -- --test-threads=1
-```
-
-Without this override, the validator loader selects the newest installed
-Windows SDK's `bin/<version>/x64/dxil.dll`, then falls back to the DLL search
-path when no SDK copy is found. This is a test/offline-validation dependency;
-the translated shaders do not require it at runtime.
-
-## Debugging
-
-A release build has no debugging aids. Build them in with
-
-```powershell
-cargo build --profile diag -p victory --features diagnostics   # target\diag\victory.exe
-```
-
-The on/off switches below (`...=1`) are off when unset or set to `0`.
-
-| Variable | Effect |
-|----------|--------|
-| `VICTORY_LOG=<target>=debug,...` | debug and trace output |
-| `VICTORY_STACKS=20,60` | every thread's stack at those seconds |
-| `VICTORY_WATCH=<rva>,...` | logs a title u32 when it changes |
-| `VICTORY_POKE=<rva>:<byte>,...` | writes a title byte twice a second (a hang watchdog's tick, say) |
-| `VICTORY_KEYS=30:Enter,35:X` | presses keys at those seconds, focus or not |
-| `VICTORY_CRASH_BREAKPOINTS=1` | appends first-chance breakpoints to `crashes.log`, including ones a handler may recover from |
-| `VICTORY_CRASH_SAVE=<rva>:<len>,...` | saves title memory to the cache folder on a crash |
-| `VICTORY_CAPTURE=<dir>` | saves presented frames (powers of two, or `VICTORY_CAPTURE_FRAMES=<list>`) |
-| `VICTORY_DUMP_TARGETS=1` | with the two above, saves every render target of those frames |
-| `VICTORY_CAPTURE_WORLD=<list>` | with `VICTORY_CAPTURE`, also saves (and with `VICTORY_DUMP_TARGETS` dumps) the frames at these offsets from the first frame that ran 500 draws (the world's first; its number depends on how fast the title loaded) |
-| `VICTORY_DUMP_WRITERS=<hash>,...` | with the two above, also the textures a pipeline containing a listed shader hash writes, the first frame it runs, and for its buffers a log line (dwords changed, dwords not zero) |
-| `VICTORY_PEEK=<hex address>[:<bytes>],...` | in listed frames, those bytes of title memory logged after each submission. Listed frames also log targets of 16 texels or fewer as values, each table view's view words and whether its host slot is null, the host copy of every buffer of 64 bytes or fewer a draw reads (at submission and after its list), and each 1D or 3D texture a dispatch writes, read back right after it |
-| `VICTORY_D3D12_DEBUG=1` | host debug layer |
-| `VICTORY_D3D12_GBV=1` | with the above, GPU-based validation (bad descriptor use reported, not faulted; slow) |
-| `VICTORY_D3D12_DRED=1` | on a GPU failure, the allocation hit and the commands in flight |
-| `VICTORY_SKIP_PIPELINES=<hash>,...` | omit draws and dispatches, including indirect ones, whose pipeline contains a listed 16-digit shader hash |
-| `VICTORY_GPU_TIMING=1` | with the above, each list of a submission run and timed on its own; slow lists logged with their slowest commands; a device removal names the list it happened in and lists all its commands |
-| `VICTORY_TRACE_SHADERS=<hash>,...` | with `VICTORY_D3D12_DRED`, every draw and dispatch of a listed shader logged with what it binds (user data, heap slots, root views and their first dwords; the first 500) |
-| `VICTORY_D3D12_WARP=1` | host device on the software adapter (slow; cannot reset the driver) |
-| `VICTORY_PIPELINE_LOG=<file>` | a line per title pipeline created (key, shaders, state), first used, and made or loaded (library name); `translate --cache --pipelines` writes the last kind too |
-| `VICTORY_PREBUILD_KEYS=<file>` | `translate --cache --pipelines` makes nothing and lists each pack record's key, shaders and state (or why it is skipped) |
-| `VICTORY_SHADER_LOOP_LIMIT=<n>` | translated shader loops stop after `n` iterations per lane instead of 2^20 (own shader cache entries); if a lower `n` makes world frames much faster, loops hitting the limit are what makes them slow |
-| `VICTORY_AUDIO_CAPTURE=<file.wav>` | records what the title plays (our process only) |
-| `VICTORY_XMA_DUMP=<dir>` | saves the first 32 XMA voices' context and input |
-
-Every build appends unhandled exceptions, panics, and host GPU failures to
-`crashes.log` in the title's data folder.
-
-For a startup breakpoint (`0x80000003`), run the diagnostics build with
-`VICTORY_CRASH_BREAKPOINTS=1`. Keep the console output along with the new
-`crashes.log` entries. A host DLL refusal includes the caller stack in the
-console output. The refusal is expected for DLLs outside the host policy,
-including `rpcrt4.dll`.
-
-On Series 1.0.2.1, a missing `appdata0.rpf` reproduced the breakpoint at
-`+0x2237178` before the first window. Restore the archive from the same
-package beside the title executable. `run --execute` checks that it can
-read the RPF9 header before starting this build.
-
-To compare hardware and software rendering, repeat with
-`VICTORY_D3D12_WARP=1` and check the console for
-`host device on the software adapter (WARP)` to confirm the WARP device was
-created. Compare the exception's module and offset, stack frames, and
-preceding messages across the two runs.
+Authors of commits carried in the candidate build:
+9hvn9yt2vk-netizen, Abdellah K., Advait Palve, AlanQiang0418, alessiodeia, Andrea Casale,
+AnoHunted, artor410, BaggyALPHA, Carlos Sant'Anna, cxchhh (cxccxc), Dathinel, Duff, EatCodeSleep2,
+Enzo Souza Duarte, errusso, Exorion, fever308, FIocker, fuzeofficial, fxceless, Henrique Bueno,
+hophaver, ifBars, ismailchaka1, itsRevela, Jeremy Goldberg, julio, KoLolX3, lameloball2813-ui,
+LaunchDoesntCode, localshotgun, lordon1a, Louis Faust, LUIS LARIOS, Luiz Neves,
+Luiz Otavio Mello de Campos, Lyrnc, Manuel Pérez, Maraco91, marquezini, Marvis, meower, Nostyxx,
+oddiums, pablogonz12 (Pablo Gonzalez), Pedro Fortunato, quaternion, r4tedx (r4.), raffclar,
+Saitken91, spacede, tedin7, TG0000, undeadhuman37, Vanthys, wrothgaril, Yaekai, ZazaJr24.
+Some commits were also authored by AI coding tools (Claude, Codex). More per-PR credit:
+[INTEGRATION.md](INTEGRATION.md). Missing or misnamed? Open an issue.
 
 ## License
 
-GPL-3.0-or-later. See [LICENSE](LICENSE).
+GPL-3.0-or-later; see [LICENSE](LICENSE).
