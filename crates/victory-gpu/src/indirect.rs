@@ -5,6 +5,8 @@
 //! host resets the display driver. So every record is clamped on the GPU,
 //! just before its execution, by a compute shader of ours (HLSL compiled by
 //! the system's compiler; a 5.1 shader with its root signature inside).
+//! Where that compiler is missing or refuses it (Wine's does), the clamp
+//! our own DXIL writer builds (`victory_shader::emit::clamp`) runs instead.
 //!
 //! Each list also has a budget (2^27 vertex instances or threads, groups
 //! counted as 64 threads, mesh groups as 128): records past it run empty,
@@ -16,6 +18,7 @@
 //! dispatches, the budget) cut legitimate work beyond them; raise them if
 //! the title needs more.
 
+use victory_shader::emit::{ROOT_CBV_SPACE, USER_DATA_SPACE, clamp};
 use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
 use windows::Win32::Graphics::Direct3D::ID3DBlob;
 use windows::Win32::Graphics::Direct3D12::*;
@@ -119,11 +122,16 @@ unsafe impl Sync for Clamp {}
 fn clamp() -> Option<&'static Clamp> {
     static CLAMP: std::sync::OnceLock<Option<Clamp>> = std::sync::OnceLock::new();
     CLAMP
-        .get_or_init(|| match make() {
-            Ok(c) => Some(c),
-            Err(e) => {
-                tracing::warn!(error = %e, "no argument clamp: indirect execution dropped");
-                None
+        .get_or_init(|| {
+            match make().or_else(|e| {
+                tracing::warn!(error = %e, "no compiled argument clamp: using our own DXIL");
+                make_own()
+            }) {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    tracing::warn!(error = %e, "no argument clamp: indirect execution dropped");
+                    None
+                }
             }
         })
         .as_ref()
@@ -174,6 +182,53 @@ fn make() -> windows::core::Result<Clamp> {
         })?;
         Ok(Clamp { root, pso })
     }
+}
+
+/// The clamp from our own DXIL writer: no shader compiler, and a root
+/// signature made from a description.
+fn make_own() -> windows::core::Result<Clamp> {
+    let device = &host().ok_or_else(windows::core::Error::empty)?.device;
+    let uav = |slot: u8| D3D12_ROOT_PARAMETER1 {
+        ParameterType: D3D12_ROOT_PARAMETER_TYPE_UAV,
+        Anonymous: D3D12_ROOT_PARAMETER1_0 {
+            Descriptor: D3D12_ROOT_DESCRIPTOR1 {
+                ShaderRegister: u32::from(slot),
+                RegisterSpace: ROOT_CBV_SPACE,
+                Flags: D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE,
+            },
+        },
+        ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
+    };
+    // Root parameters 0, 1 and 2, as `bound` sets them.
+    let params = [
+        D3D12_ROOT_PARAMETER1 {
+            ParameterType: D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS,
+            Anonymous: D3D12_ROOT_PARAMETER1_0 {
+                Constants: D3D12_ROOT_CONSTANTS {
+                    ShaderRegister: 0,
+                    RegisterSpace: USER_DATA_SPACE,
+                    Num32BitValues: 4,
+                },
+            },
+            ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
+        },
+        uav(clamp::ARGUMENTS),
+        uav(clamp::BUDGET),
+    ];
+    let (root, _) = crate::pipeline::host::root_signature(device, &params, &[], true)?;
+    let code = clamp::argument_clamp();
+    // SAFETY: the description points at live data.
+    let pso = unsafe {
+        device.CreateComputePipelineState(&D3D12_COMPUTE_PIPELINE_STATE_DESC {
+            pRootSignature: std::mem::transmute_copy(&root),
+            CS: D3D12_SHADER_BYTECODE {
+                pShaderBytecode: code.as_ptr().cast(),
+                BytecodeLength: code.len(),
+            },
+            ..Default::default()
+        })?
+    };
+    Ok(Clamp { root, pso })
 }
 
 /// Records, in `list`, the clamp of `records` records of `kind` (PC
@@ -251,6 +306,15 @@ mod tests {
             return; // no host GPU here
         }
         assert!(super::clamp().is_some());
+    }
+
+    /// The host makes a pipeline of the fallback, which needs no compiler.
+    #[test]
+    fn own_argument_clamp_builds() {
+        if super::host().is_none() {
+            return; // no host GPU here
+        }
+        super::make_own().unwrap();
     }
 
     /// Clamps `records` records of `kind`, filled by repeating `words`,

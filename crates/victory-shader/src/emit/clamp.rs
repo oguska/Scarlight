@@ -1,10 +1,17 @@
 //! The compute shader that bounds indirect arguments before the host GPU
 //! reads them (`victory-gpu`'s `indirect` says why and when it runs),
 //! built with our own writer so that no system shader compiler is needed.
+//! The fallback for hosts whose compiler refuses `indirect`'s HLSL (Wine's
+//! `d3dcompiler_47` does).
 //!
-//! One thread per record. The record's counts are clamped in place, their
-//! cost is added to the list's budget, and a record past the budget is
-//! emptied.
+//! shortcut: unlike the HLSL, the threads charge the budget with a shared
+//! add, in no set order, which can wrap after very many rejected records;
+//! port the tiled walk if that matters.
+//!
+//! The same walk as the HLSL: one group takes the records in tiles of 64,
+//! every lane clamps its own record, then the first lane charges the
+//! tile's records in order. The first record that does not fit takes what
+//! is left of the budget, so those after it run empty too.
 
 use super::bitcode::{Attr, Bin, Term, V, pred};
 use super::shader::Shader;
@@ -14,7 +21,7 @@ use super::shader::Shader;
 pub const ARGUMENTS: u8 = 1;
 /// The root parameter of the list's budget counter (`u2`, a raw buffer).
 pub const BUDGET: u8 = 2;
-/// Threads of one group; the dispatch covers the records in groups of it.
+/// Threads of the one group dispatched.
 pub const GROUP: u32 = 64;
 
 /// A draw's vertex or index count is cut to this.
@@ -28,6 +35,8 @@ const GROUPS: u32 = 1 << 20;
 /// The work of one list (vertex instances, threads): records past it run
 /// empty.
 const LIST: u32 = 1 << 27;
+/// The charge of a record past the budget (no cost reaches it).
+const PAST: u32 = u32::MAX;
 
 /// The clamp as a DXIL container. Its user data is four dwords: the kind
 /// of record (0 and 1 draws, 2 dispatches, else mesh dispatches), the
@@ -54,17 +63,61 @@ pub fn argument_clamp() -> Vec<u8> {
     let records = s.m.extract(entry, row, 2);
     let args = s.root_uav_handle(ARGUMENTS);
     let budget = s.root_uav_handle(BUDGET);
-    let id = s.op(entry, "threadId.i32", Attr::ReadNone, i32t, 93, &[zero]);
+    let lane = s.op(
+        entry,
+        "flattenedThreadIdInGroup.i32",
+        Attr::ReadNone,
+        i32t,
+        96,
+        &[],
+    );
+    let costs = s.m.array(GROUP, i32t);
+    let costs = s.m.global("costs", costs, 3);
 
-    let [body, draw, other, dispatch, mesh, join, empty, exit] =
+    let [start, head, body, clamp, draw, other, dispatch, mesh, join] =
         std::array::from_fn(|_| s.m.new_block());
-    let live = s.m.cmp(entry, pred::IULT, id, records);
-    s.m.terminate(entry, Term::CondBr(live, body, exit));
+    let [
+        charged,
+        walk,
+        walked,
+        after,
+        empty,
+        latch,
+        done,
+        spend,
+        exit,
+    ] = std::array::from_fn(|_| s.m.new_block());
 
-    let at = s.m.bin(body, Bin::Mul, id, stride);
     let one = s.m.i32(1);
-    let is_draw = s.m.cmp(body, pred::IULE, kind, one);
-    s.m.terminate(body, Term::CondBr(is_draw, draw, other));
+    let size = s.m.i32(GROUP);
+    let list = s.m.i32(LIST);
+    let past = s.m.i32(PAST);
+    let whole = s.m.bin(entry, Bin::UDiv, records, size);
+    let low = s.m.i32(GROUP - 1);
+    let rest = s.m.bin(entry, Bin::And, records, low);
+    let rest = umin(&mut s, entry, rest, 1);
+    let tiles = s.m.bin(entry, Bin::Add, whole, rest);
+    let first = s.m.cmp(entry, pred::EQ, lane, zero);
+    s.m.terminate(entry, Term::CondBr(first, start, head));
+
+    // What earlier executions of the list left (the first lane's alone).
+    let spent = load(&mut s, start, budget, zero, 0);
+    let spent = umin(&mut s, start, spent, LIST);
+    let fresh = s.m.bin(start, Bin::Sub, list, spent);
+    s.m.terminate(start, Term::Br(head));
+
+    let tile = s.m.phi(head, i32t);
+    let left = s.m.phi(head, i32t);
+    let more = s.m.cmp(head, pred::IULT, tile, tiles);
+    s.m.terminate(head, Term::CondBr(more, body, done));
+
+    let base = s.m.bin(body, Bin::Mul, tile, size);
+    let record = s.m.bin(body, Bin::Add, base, lane);
+    let at = s.m.bin(body, Bin::Mul, record, stride);
+    let live = s.m.cmp(body, pred::IULT, record, records);
+    s.m.terminate(body, Term::CondBr(live, clamp, charged));
+    let is_draw = s.m.cmp(clamp, pred::IULE, kind, one);
+    s.m.terminate(clamp, Term::CondBr(is_draw, draw, other));
 
     // Draws: vertex or index count, then instances.
     let draw_cost = {
@@ -137,29 +190,65 @@ pub fn argument_clamp() -> Vec<u8> {
             (mesh_cost, mesh),
         ],
     );
-    let undef = s.m.undef(i32t);
-    // Adds the cost and returns the budget's value before it.
-    let before = s.op(
-        join,
-        "atomicBinOp.i32",
-        Attr::NoUnwind,
-        i32t,
-        78,
-        &[budget, zero, zero, undef, undef, cost],
-    );
-    let list = s.m.i32(LIST);
-    let spent = s.m.cmp(join, pred::IUGE, before, list);
-    let after = s.m.bin(join, Bin::Add, before, cost);
-    let past = s.m.cmp(join, pred::IUGT, after, list);
-    let over = s.m.bin(join, Bin::Or, spent, past);
-    s.m.terminate(join, Term::CondBr(over, empty, exit));
+    s.m.terminate(join, Term::Br(charged));
+
+    let own = s.m.phi(charged, i32t);
+    s.m.set_phi(own, vec![(zero, body), (cost, join)]);
+    let mine = s.m.element(charged, costs, lane);
+    s.m.store(charged, mine, own);
+    group_barrier(&mut s, charged);
+    s.m.terminate(charged, Term::CondBr(first, walk, after));
+
+    // The first lane charges the tile's records in order.
+    let i = s.m.phi(walk, i32t);
+    let room = s.m.phi(walk, i32t);
+    let slot = s.m.element(walk, costs, i);
+    let c = s.m.load(walk, slot);
+    let over = s.m.cmp(walk, pred::IUGT, c, room);
+    let marked = s.m.select(walk, over, past, c);
+    s.m.store(walk, slot, marked);
+    let less = s.m.bin(walk, Bin::Sub, room, c);
+    let room_next = s.m.select(walk, over, zero, less);
+    let i_next = s.m.bin(walk, Bin::Add, i, one);
+    let again = s.m.cmp(walk, pred::IULT, i_next, size);
+    s.m.terminate(walk, Term::CondBr(again, walk, walked));
+    s.m.set_phi(i, vec![(zero, charged), (i_next, walk)]);
+    s.m.set_phi(room, vec![(left, charged), (room_next, walk)]);
+    s.m.terminate(walked, Term::Br(after));
+
+    let left_next = s.m.phi(after, i32t);
+    s.m.set_phi(left_next, vec![(left, charged), (room_next, walked)]);
+    group_barrier(&mut s, after);
+    let verdict = s.m.load(after, mine);
+    let emptied = s.m.cmp(after, pred::EQ, verdict, past);
+    s.m.terminate(after, Term::CondBr(emptied, empty, latch));
 
     // Draws keep their layout with no vertices; groups become zero.
     store(&mut s, empty, args, at, 0, zero);
-    s.m.terminate(empty, Term::Br(exit));
+    s.m.terminate(empty, Term::Br(latch));
+
+    let tile_next = s.m.bin(latch, Bin::Add, tile, one);
+    s.m.terminate(latch, Term::Br(head));
+    s.m.set_phi(tile, vec![(zero, entry), (zero, start), (tile_next, latch)]);
+    s.m.set_phi(
+        left,
+        vec![(zero, entry), (fresh, start), (left_next, latch)],
+    );
+
+    s.m.terminate(done, Term::CondBr(first, spend, exit));
+    let total = s.m.bin(spend, Bin::Sub, list, left);
+    store(&mut s, spend, budget, zero, 0, total);
+    s.m.terminate(spend, Term::Br(exit));
 
     s.m.terminate(exit, Term::Ret);
     s.finish()
+}
+
+/// `GroupMemoryBarrierWithGroupSync`.
+fn group_barrier(s: &mut Shader, block: usize) {
+    // The thread group's sync (1) and its shared memory's fence (8).
+    let (void, mode) = (s.t.void, s.m.i32(9));
+    s.op(block, "barrier", Attr::NoDuplicate, void, 80, &[mode]);
 }
 
 /// The dword `offset` bytes into the record at `at`.
@@ -230,8 +319,7 @@ mod tests {
     use windows::Win32::Graphics::Direct3D12::*;
 
     use super::{
-        ARGUMENTS, BUDGET, DIMENSION, GROUP, GROUPS, LIST, VERTEX_INSTANCES, VERTICES,
-        argument_clamp,
+        ARGUMENTS, BUDGET, DIMENSION, GROUPS, LIST, VERTEX_INSTANCES, VERTICES, argument_clamp,
     };
     use crate::emit::host::{Dispatch, Host, Root};
     use crate::emit::{ROOT_CBV_SPACE, USER_DATA_SPACE};
@@ -312,12 +400,12 @@ mod tests {
                             0,
                             Root::Constants(vec![kind, (STRIDE * 4) as u32, count, 0]),
                         ),
-                        (u32::from(ARGUMENTS), Root::Uav(data)),
-                        (u32::from(BUDGET), Root::Uav(vec![spent])),
+                        (u32::from(ARGUMENTS), Root::UavData(data)),
+                        (u32::from(BUDGET), Root::UavData(vec![spent])),
                     ],
                     views: &[],
                     samplers: &[],
-                    groups: [count.div_ceil(GROUP).max(1), 1, 1],
+                    groups: [1, 1, 1],
                 },
             )
             .unwrap();
@@ -352,8 +440,7 @@ mod tests {
             (3, &[[70000, 9, 0], [10, 5, 7], [3, 1, 1]]),
         ];
         for (kind, records) in cases {
-            // The cases stay inside the budget, so no record is emptied
-            // whatever order the threads add their costs in.
+            // The cases stay inside the budget: no record is emptied.
             let total: u32 = records.iter().map(|&r| clamped(kind, r).1).sum();
             assert!(total <= LIST, "kind {kind}: the case is past the budget");
             let (data, budget) = run(&host, kind, records, 0);
@@ -387,8 +474,9 @@ mod tests {
             let (data, budget) = run(&host, 0, &[[100, 3, 7]], spent);
             let first = if emptied { 0 } else { 100 };
             assert_eq!(data[..4], [first, 3, 7, MARK], "budget at {spent:#x}");
-            // The cost is added either way.
-            assert_eq!(budget, spent + 300, "budget at {spent:#x}");
+            // A record that does not fit takes what is left.
+            let after = if emptied { LIST } else { spent + 300 };
+            assert_eq!(budget, after, "budget at {spent:#x}");
         }
         // A dispatch past the budget loses its first dimension.
         let (data, _) = run(&host, 2, &[[4, 4, 4]], LIST);

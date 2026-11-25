@@ -243,6 +243,16 @@ impl Host {
                 });
             }
         }
+        self.root_signature_of(&params, &samplers)
+    }
+
+    /// The root signature of these parameters and static samplers, heaps
+    /// directly indexed.
+    pub fn root_signature_of(
+        &self,
+        params: &[D3D12_ROOT_PARAMETER1],
+        samplers: &[D3D12_STATIC_SAMPLER_DESC],
+    ) -> Result<ID3D12RootSignature, String> {
         let desc = D3D12_VERSIONED_ROOT_SIGNATURE_DESC {
             Version: D3D_ROOT_SIGNATURE_VERSION_1_1,
             Anonymous: D3D12_VERSIONED_ROOT_SIGNATURE_DESC_0 {
@@ -854,6 +864,8 @@ pub enum Root {
     /// A root raw UAV of this many dwords, zeroed, read back after the
     /// heap's UAVs ([`Host::dispatch`] only).
     Uav(u32),
+    /// A root UAV like [`Root::Uav`], holding these dwords at first.
+    UavData(Vec<u32>),
 }
 
 /// Bindings for [`Host::draw`]: root arguments and the heap contents.
@@ -1091,7 +1103,9 @@ impl Host {
                         at.ptr += (index * size) as u64;
                         list.SetGraphicsRootDescriptorTable(*param, at);
                     }
-                    Root::View { .. } | Root::Uav(_) => return Err("root views in a draw".into()),
+                    Root::View { .. } | Root::Uav(_) | Root::UavData(_) => {
+                        return Err("root views in a draw".into());
+                    }
                 }
             }
             list.OMSetRenderTargets(1, Some(&rtv), false, None);
@@ -1814,6 +1828,30 @@ impl Host {
                             D3D12_RESOURCE_STATE_COPY_DEST,
                         )?;
                         uavs.push((b, None, n, rb));
+                    }
+                    Root::UavData(data) => {
+                        let bytes = (data.len() * 4) as u64;
+                        let b = make(
+                            D3D12_HEAP_TYPE_DEFAULT,
+                            &buffer(bytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS),
+                            D3D12_RESOURCE_STATE_COMMON,
+                        )?;
+                        // (Promoted from the common state by the copy.)
+                        let from = upload(data)?;
+                        list.CopyBufferRegion(&b, 0, &from, 0, bytes);
+                        list.ResourceBarrier(&[transition(
+                            &b,
+                            D3D12_RESOURCE_STATE_COPY_DEST,
+                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                        )]);
+                        list.SetComputeRootUnorderedAccessView(*param, b.GetGPUVirtualAddress());
+                        let rb = make(
+                            D3D12_HEAP_TYPE_READBACK,
+                            &buffer(bytes, D3D12_RESOURCE_FLAG_NONE),
+                            D3D12_RESOURCE_STATE_COPY_DEST,
+                        )?;
+                        keep.push(from);
+                        uavs.push((b, None, data.len() as u32, rb));
                     }
                 }
             }
