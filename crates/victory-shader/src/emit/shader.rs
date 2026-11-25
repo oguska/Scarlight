@@ -13,9 +13,16 @@ pub const SAMPLER_SPACE: u32 = 0;
 /// `t<root parameter index>` in this space.
 pub const ROOT_CBV_SPACE: u32 = 1;
 /// The root SRV slot (`t255` in [`ROOT_CBV_SPACE`], past every title root
-/// parameter) of the view-stride table: dword `i` is the byte stride of
-/// the buffer view at view-heap index `i`.
+/// parameter) of the view-stride table: dword `i` holds the byte stride of
+/// the buffer view at view-heap index `i` in [`VIEW_BUFFER_STRIDE_MASK`],
+/// with [`VIEW_STRIDE_UAV`] set on unordered access buffer views (leaving
+/// bits 29-31 free for texture tags).
 pub const VIEW_STRIDES: u8 = 255;
+/// Flag bit in a [`VIEW_STRIDES`] entry when the buffer view is an unordered
+/// access view (`emit`, "Buffer views at computed heap indices").
+pub const VIEW_STRIDE_UAV: u32 = 1 << 28;
+/// Low bits of a [`VIEW_STRIDES`] entry holding a buffer view's byte stride.
+pub const VIEW_BUFFER_STRIDE_MASK: u32 = VIEW_STRIDE_UAV - 1;
 /// Where the title-memory page table is bound: `t0` (a raw root SRV) in
 /// this space (see `emit` "Title memory").
 pub const MEMORY_SPACE: u32 = 2;

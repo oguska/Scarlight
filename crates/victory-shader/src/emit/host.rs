@@ -1251,6 +1251,8 @@ pub enum View<'a> {
     NullPair,
     /// The second slot of a [`View::Memory`] or [`View::NullPair`].
     Pair,
+    /// A null R32G32_UINT 1D texture SRV (the title's null SRV at heap slot 0).
+    NullTexture1d,
     /// Last in the heap, which then has [`super::HEAP_VIEWS`] slots: the
     /// host's null raw buffer SRV at [`super::NULL_BUFFER_VIEW`] and UAV
     /// below it.
@@ -1732,6 +1734,20 @@ impl Host {
                         }
                     }
                     View::Pair => {}
+                    View::NullTexture1d => {
+                        let desc = D3D12_SHADER_RESOURCE_VIEW_DESC {
+                            Format: DXGI_FORMAT_R32G32_UINT,
+                            ViewDimension: D3D12_SRV_DIMENSION_TEXTURE1D,
+                            Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+                            Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
+                                Texture1D: D3D12_TEX1D_SRV {
+                                    MipLevels: 1,
+                                    ..Default::default()
+                                },
+                            },
+                        };
+                        dev.CreateShaderResourceView(None, Some(&desc), at);
+                    }
                     View::NullBuffers => {
                         let null = super::NULL_BUFFER_VIEW as usize;
                         let (mut srv_at, mut uav_at) = (at, at);

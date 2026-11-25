@@ -91,12 +91,12 @@
 //!   buffer read through a descriptor the shader takes from the resource
 //!   heap itself first looks up the view-stride table (root SRV
 //!   `t`[`VIEW_STRIDES`], which then covers every index below
-//!   [`HEAP_VIEWS`], dynamic slots too); where it holds 0 (no buffer view
-//!   there) the shader reads heap index [`NULL_BUFFER_VIEW`] instead (for
-//!   unordered access the index below), which the host keeps a null raw
-//!   buffer SRV (UAV). The index comes from data, and a texture descriptor
-//!   read as a buffer one is a wild address (the texture's shifted 8 bits
-//!   down: GPU faults at low addresses).
+//!   [`HEAP_VIEWS`], dynamic slots too); where it holds 0 or the other
+//!   access kind ([`VIEW_STRIDE_UAV`]) the shader reads heap index
+//!   [`NULL_BUFFER_VIEW`] instead (for unordered access the index below),
+//!   which the host keeps a null raw buffer SRV (UAV). The index comes from
+//!   data, and a texture descriptor read as a buffer one is a wild address
+//!   (the texture's shifted 8 bits down: GPU faults at low addresses).
 //! * **Heap access** ([`HostShader::heap`], [`HostShader::heap_writes`],
 //!   added 2026-11-24): whether the shader takes descriptors from the
 //!   resource heap itself, and unordered access views among them; the
@@ -220,7 +220,8 @@ use crate::{ShaderError, io, ir, resource, structure};
 pub use sampler::StaticSampler;
 pub use shader::{
     HEAP_SAMPLERS, HEAP_VIEWS, MEMORY_SPACE, NULL_BUFFER_VIEW, ROOT_CBV_SPACE, SAMPLER_SPACE,
-    USER_DATA_SPACE, VIEW_MARK_NONE, VIEW_MARKS, VIEW_STRIDES, VIEW_WRITE_BITS, VIEW_WRITES,
+    USER_DATA_SPACE, VIEW_BUFFER_STRIDE_MASK, VIEW_MARK_NONE, VIEW_MARKS, VIEW_STRIDE_UAV,
+    VIEW_STRIDES, VIEW_WRITE_BITS, VIEW_WRITES,
 };
 
 /// The loop limit without an override: 2^20.
