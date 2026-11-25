@@ -1,6 +1,6 @@
 # How we test
 
-Scarlight is a translation layer, so "it looks right" and "it is faster" are separate claims, and
+Scarlight is a compatibility layer, so "it looks right" and "it is faster" are separate claims, and
 both have to be shown. The rule is simple: nothing is published on the strength of one run, and the
 cheapest check that can answer a question runs first.
 
@@ -11,7 +11,7 @@ Each step is cheaper than the one below it, and a change stops at the first step
 **1. Unit tests and lint.** `cargo test --workspace` and clippy across the workspace, both feature
 sets, warnings as errors.
 
-**2. Offline shader translation.** The console's world shader set — **751 programs** — is translated
+**2. Offline shader translation.** The test title's world shader set — **751 programs** — is translated
 and validated without the title, in about **21 s** of CPU for the 278 that compile on this machine.
 Two numbers come out of this step: how many programs translate, and how many produce valid
 intermediate code.

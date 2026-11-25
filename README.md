@@ -12,9 +12,9 @@
 [![Vulkan 1.3](https://img.shields.io/badge/Vulkan-1.3%2B-19d8ff?style=flat-square&labelColor=14072c)](https://www.vulkan.org/)
 [![Stars](https://img.shields.io/github/stars/pablogonz12/Scarlight?style=flat-square&labelColor=14072c&color=ffb347)](https://github.com/pablogonz12/Scarlight/stargazers)
 
-# Scarlight: a Linux-first console translation layer, built and tuned for Mesa
+# Scarlight: an Xbox Series compatibility layer for Linux, built and tuned for Mesa
 
-**A translation layer for the console build. Today it runs on Linux through Proton — Wine and vkd3d-proton — on Mesa's open Vulkan drivers; RADV (AMD) is the reference and ANV (Intel) is next.<br>Mesa is open source, so the driver is ours to read, tune and fix, and every part of this project is developed and measured on that stack.**
+**It implements the console system APIs a title calls, decodes its GPU command streams and recompiles its RDNA2 shaders, and runs the result through Proton — Wine and vkd3d-proton — on Mesa's open Vulkan drivers.<br>RADV (AMD) is the reference and ANV (Intel) is next. Mesa is open source, so the driver is ours to read, tune and fix, and every part of this project is developed and measured on that stack.**
 
 <sub>[What it is](#what-it-is) · [Status](#status) · [Hardware](#hardware) · [Requirements](#requirements) · [Quick start](#quick-start) · [How it works](#how-it-works) · [Roadmap](#roadmap) · [Launcher](#launcher) · [Help us test](#help-us-test) · [Contribute](#contribute) · [Who is behind this](#who-is-behind-this) · [Credits](#credits) · [Licence](#licence)</sub>
 
@@ -22,30 +22,33 @@
 
 ## What it is
 
-Scarlight loads the title's own x86-64 code from files you supply, answers the console-only calls
-that code makes, decodes its GPU command stream and recompiles its shaders. It is written in Rust,
-GPL-3.0, and contains no game files: bringing your own copy is the only way to run it.
+Scarlight is a compatibility layer for titles built against the Xbox Series GDK. It loads a title's
+own x86-64 code from files you supply, answers the console system API calls that code makes, decodes
+its GPU command stream and recompiles its RDNA2 shaders, and rebuilds its pipelines for the host. It is
+written in Rust, GPL-3.0, and contains no game files: bringing your own legally obtained copies is
+the only way to run it.
 
 Today it runs through Proton, built and tuned for Mesa. As far as we know it is among the
-furthest-along Xbox Series translation efforts running under Proton; we have not compared every
+furthest-along Xbox Series compatibility efforts running under Proton; we have not compared every
 project, and the scope here is deliberately different — Mesa is the target platform, not one card
 or one proprietary driver.
 
-It is early: the world renders, lit and textured, at a few frames per second on one card; the work
-now is picture and speed, in that order.
+It is early. It has been built and run with one title so far, and that title's world renders lit and
+textured at a few frames per second on one card; the work now is picture and speed, in that order.
 
 ## Status
 
 Measured on one machine, 25 Nov 2026: **RX 9070 XT (RDNA4) · Mesa 26.3.1 RADV** (Vulkan 1.4) ·
-CachyOS, kernel 7.3.6 · GE-Proton11-14 · vkd3d-proton master · 30 GB RAM. Diagnostics builds. No
-other GPU has been tried.
+CachyOS, kernel 7.3.6 · GE-Proton11-14 · vkd3d-proton master · 30 GB RAM. Diagnostics builds.
+Tested so far with **one title**; reports from other content are welcome, and no other GPU has been
+tried.
 
 | Area | State |
 |---|---|
 | Boot, menus, audio, gamepad | Work; menus at 30 fps |
 | World, fixed test scene | Lit and textured; **1.45-1.6 fps** in current builds, **up to 3.0 fps** in one earlier build |
 | Time to the world | 133-218 s |
-| Shader translation | **751 / 751** world programs translate offline |
+| Shader translation | **751 / 751** world programs of the test title translate offline |
 | Faces | **Some characters' faces still fail to render** (regressed again on 25 Nov, under investigation) |
 | Picture | Close-up character detail and walls missing in some builds; shadowed areas dark |
 | Stability | Some builds hang at boot or at world entry; async write-back is experimental |
@@ -74,7 +77,7 @@ Windows and NVIDIA's proprietary driver are unsupported; NVK is a roadmap item, 
 | **Direct3D 12** | [vkd3d-proton](https://github.com/HansKristian-Work/vkd3d-proton) **master** — release 3.1 crashed at world entry | master |
 | **RAM** | 32 GB recommended | about 30 GB usable |
 
-You also supply, outside this repository: your own legally obtained copy of the title's files, 64-bit
+You also supply, outside this repository: your own legally obtained copies of a title's files, 64-bit
 `dxcompiler.dll` and `dxil.dll`
 ([DirectXShaderCompiler](https://github.com/microsoft/DirectXShaderCompiler/releases)), and — as a
 stop-gap — Microsoft's `d3dcompiler_47.dll`: Wine's built-in one rejects some runtime shaders.
@@ -163,10 +166,10 @@ It lives in `tools/scarlight-launcher/` and lands in a separate pull request; un
 ## Help us test
 
 **A run on another Mesa GPU is as useful as a patch.** AMD (RDNA1-3, Vega) and Intel (Arc, Xe) are
-both wanted; only an RX 9070 XT has been tried. Send GPU and driver, Mesa version and its source,
-kernel, distribution and session, Proton build, vkd3d-proton version, the commit you built, how far
-it got with the frame lines, what looked wrong, and the last ~50 lines of the log — text and logs
-only.
+both wanted; only an RX 9070 XT, with one title, has been tried so far. Send the GPU and driver, the
+Mesa version and where it came from, kernel, distribution and session, Proton build, vkd3d-proton
+version, the commit you built, how far it got with the frame lines, what looked wrong, and the last
+~50 lines of the log — text and logs only.
 
 Use the [test report form](https://github.com/pablogonz12/Scarlight/issues/new?template=test-report.yml)
 or the [bug report form](https://github.com/pablogonz12/Scarlight/issues/new?template=bug-report.yml);
@@ -201,3 +204,5 @@ Built on **VIctory** (GPL-3.0) and work from its community — every contributor
 ## Licence
 
 GPL-3.0-or-later; see [LICENSE](LICENSE).
+
+Not affiliated with or endorsed by Microsoft. Xbox and Xbox Series are trademarks of Microsoft.
