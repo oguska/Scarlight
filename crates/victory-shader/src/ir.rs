@@ -121,6 +121,21 @@ impl Inst {
     pub fn write(&self, reg: Reg) -> Option<Value> {
         self.writes.iter().find(|w| w.0 == reg).map(|w| w.1)
     }
+
+    /// Returns the operand naming the resource descriptor this instruction
+    /// accesses and the one naming its sampler if it has one; a BVH access
+    /// names no view this way. A buffer cache invalidation (`buffer_*_inv`)
+    /// returns its descriptor too, although it reads nothing through it.
+    pub(crate) fn descriptor_operands(&self) -> Option<(Operand, Option<Operand>)> {
+        match self.fields {
+            Fields::Image { rsrc, sampler, .. } if !self.name().starts_with("image_bvh") => {
+                Some((rsrc, sampler))
+            }
+            Fields::Buffer { rsrc, .. } => Some((rsrc, None)),
+            Fields::Smem { base, .. } if self.name().starts_with("s_buffer_") => Some((base, None)),
+            _ => None,
+        }
+    }
 }
 
 /// Decodes `code` and builds its SSA form; `vgprs` is the program's VGPR

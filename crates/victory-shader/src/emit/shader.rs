@@ -119,6 +119,9 @@ pub(crate) struct Shader {
     /// through it are marked by the index's view-mark entry).
     pub view_index: std::collections::HashMap<V, V>,
     pub flags: u64,
+    /// Heap handles made.
+    #[cfg(test)]
+    pub heap_handles: u32,
     /// Heap handles made with a non-uniform index.
     pub nonuniform_handles: u32,
     /// A compute shader with this thread-group size.
@@ -183,6 +186,8 @@ impl Shader {
             view_writes: None,
             view_index: std::collections::HashMap::new(),
             flags: 0,
+            #[cfg(test)]
+            heap_handles: 0,
             nonuniform_handles: 0,
             threads: None,
             wave_size: None,
@@ -517,6 +522,10 @@ impl Shader {
         } else {
             flags::RESOURCE_HEAP
         };
+        #[cfg(test)]
+        {
+            self.heap_handles += 1;
+        }
         self.nonuniform_handles += u32::from(nonuniform);
         // An index past the host's heap faults the device (a console shader
         // reads whatever memory follows its heap): the last slot instead.

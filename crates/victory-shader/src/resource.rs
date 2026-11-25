@@ -215,22 +215,16 @@ pub fn track(
                         });
                     }
                 }
-                Fields::Image { rsrc, sampler, .. } => {
-                    descriptor(rsrc, Role::Resource)?;
-                    if let Some(s) = sampler {
-                        descriptor(s, Role::Sampler)?;
-                    }
-                }
                 // A cache invalidation names a buffer only to scope the
                 // address range it flushes; it reads no data through the
                 // descriptor. Lowering one is a no-op on the host, so there
                 // is no descriptor to keep alive for it.
-                Fields::Buffer { rsrc, .. } if !inst.name().ends_with("_inv") => {
-                    descriptor(rsrc, Role::Resource)?
-                }
-                Fields::Buffer { .. } => {}
-                Fields::Smem { base, .. } if inst.name().starts_with("s_buffer_") => {
-                    descriptor(base, Role::Resource)?;
+                Fields::Buffer { .. } if inst.name().ends_with("_inv") => {}
+                _ if let Some((rsrc, sampler)) = inst.descriptor_operands() => {
+                    descriptor(&rsrc, Role::Resource)?;
+                    if let Some(s) = sampler {
+                        descriptor(&s, Role::Sampler)?;
+                    }
                 }
                 Fields::Smem {
                     base,

@@ -53,6 +53,9 @@ pub(crate) struct Lowered {
     pub view_marks: bool,
     pub user_data: Vec<UserData>,
     pub samplers: Vec<[u32; 4]>,
+    /// Heap handles made.
+    #[cfg(test)]
+    pub heap_handles: u32,
     /// Heap handles made with a non-uniform index.
     #[cfg(test)]
     pub nonuniform_handles: u32,
@@ -244,6 +247,11 @@ struct Lower<'a> {
     balloting: HashSet<Value>,
     /// Block writing each value.
     def_block: HashMap<Value, usize>,
+    /// The values an instruction reads as data ([`data_reads`]) or a merge
+    /// carries on. A merge counts even when it only carries a descriptor's
+    /// dword to a later access, so the set can hold a value nothing computes
+    /// with.
+    read_as_data: HashSet<Value>,
     /// IR block being lowered.
     cur_ir: usize,
     /// Whole-wave sections by block and start index.
@@ -467,6 +475,29 @@ fn smem_dwords(name: &str) -> Option<u32> {
     }
 }
 
+/// The values `inst` reads as data: every read but those of the registers
+/// that only name its descriptor, which an access takes by its [`Source`].
+fn data_reads(inst: &Inst) -> impl Iterator<Item = Value> + '_ {
+    let named = inst
+        .descriptor_operands()
+        .map_or([None, None], |(rsrc, sampler)| [Some(rsrc), sampler]);
+    // A descriptor register that is also the scalar offset is read as data;
+    // the test matters only where a register names a descriptor.
+    let offset = match inst.fields {
+        Fields::Buffer { soffset, .. } | Fields::Smem { soffset, .. } => Some(soffset),
+        _ => None,
+    };
+    let within = |op: Operand, reg: Reg| {
+        matches!((op, reg), (Operand::Scalar { code, dwords }, Reg::S(r))
+            if r.checked_sub(code).is_some_and(|k| k < dwords))
+    };
+    let names = move |reg| named.iter().flatten().any(|&op| within(op, reg));
+    inst.reads
+        .iter()
+        .filter(move |r| !names(r.0) || offset.is_some_and(|op| within(op, r.0)))
+        .map(|r| r.1)
+}
+
 impl<'a> Lower<'a> {
     fn new(x: &'a Parts<'a>, bad: &'a HashMap<Value, Why>) -> Self {
         let p = x.p;
@@ -640,6 +671,17 @@ impl<'a> Lower<'a> {
                         .iter()
                         .flat_map(move |i| i.writes.iter().map(move |w| (w.1, b)))
                         .chain(block.phis.iter().map(move |phi| (phi.value, b)))
+                })
+                .collect(),
+            read_as_data: p
+                .blocks
+                .iter()
+                .flat_map(|block| {
+                    block
+                        .phis
+                        .iter()
+                        .flat_map(|phi| phi.args.iter().copied())
+                        .chain(block.insts.iter().flat_map(data_reads))
                 })
                 .collect(),
             cur_ir: 0,
@@ -1325,6 +1367,8 @@ impl<'a> Lower<'a> {
             heap: self.heap[0],
             heap_writes: self.heap[1],
             view_marks: self.s.view_writes.is_some(),
+            #[cfg(test)]
+            heap_handles: self.s.heap_handles,
             #[cfg(test)]
             nonuniform_handles: self.s.nonuniform_handles,
             #[cfg(test)]
@@ -3991,12 +4035,23 @@ impl<'a> Lower<'a> {
     /// dword 1 bits 30-31 and dword 2 bits 0-13 width - 1, dword 2 bits
     /// 14-29 height - 1, dword 3 identity swizzle, last level at 16, type at
     /// 28, dword 4 depth or layers - 1; buffer dword 2 the record count).
+    ///
+    /// A buffer's record count is queried through a handle of its own when
+    /// an instruction reads it as data or a merge carries it on
+    /// ([`Lower::read_as_data`]). AMD's RDNA 4 driver (32.0.32029.2010 on an RX
+    /// 9070 XT) faults inside its shader compiler, ending the process at
+    /// pipeline creation, when one buffer handle from the heap feeds both a
+    /// size query whose result is used and a load (raw and structured views
+    /// alike); with a handle each it compiles. Texture handles shared this
+    /// way compile, and so does a buffer handle whose size query is unused.
     // shortcut: the base level reads 0 (the host view starts at its own
     // level 0, so sizes the code shifts by it come out right) and the other
     // dwords (addresses, formats, tiling) have no host value: reading them
     // stops the program.
     fn descriptor_data(&mut self, inst: &Inst, site: Site) -> Result<(), Why> {
         const OTHER: Why = "a descriptor's address or format read as data";
+        /// The dword of a buffer descriptor that holds its record count.
+        const RECORD_COUNT_DWORD: u8 = 2;
         let Fields::Smem {
             data: Some(Operand::Scalar { code, .. }),
             ..
@@ -4112,7 +4167,22 @@ impl<'a> Lower<'a> {
             }
             _ => return Err("a scalar memory read as data"),
         };
-        let h = self.handle(site, &src, false, props)?;
+        let own = image.is_none()
+            && code
+                .checked_add(RECORD_COUNT_DWORD)
+                .and_then(|reg| reg.checked_add(first))
+                .and_then(|reg| inst.write(Reg::S(reg)))
+                .is_some_and(|size| self.read_as_data.contains(&size));
+        let h = if own {
+            // With the kept handles set aside this one is new, and the
+            // block's loads through the descriptor do not find it (see above).
+            let kept = std::mem::take(&mut self.handles);
+            let h = self.handle(site, &src, false, props);
+            self.handles = kept;
+            h?
+        } else {
+            self.handle(site, &src, false, props)?
+        };
         let c = self.cur;
         let i32t = self.s.t.i32;
         let dims = self.s.m.named_struct("dx.types.Dimensions", vec![i32t; 4]);
@@ -4162,7 +4232,7 @@ impl<'a> Lower<'a> {
                 let d3 = self.s.m.bin(c, Bin::Or, base, last);
                 vec![(1, d1), (2, d2), (3, d3), (4, depth)]
             }
-            None => vec![(2, field(self, 0))],
+            None => vec![(u32::from(RECORD_COUNT_DWORD), field(self, 0))],
         };
         for k in 0..count {
             let rel = k.wrapping_sub(u32::from(first));
@@ -10270,6 +10340,23 @@ mod tests {
         )
     }
 
+    /// A table of buffers at s0 with records of `stride` bytes (0: raw).
+    fn buffer_table(stride: u32) -> (Vec<RootParam>, Vec<UsedResource>) {
+        (
+            vec![root(RootType::Table, 0, 0), root(RootType::Constants, 1, 1)],
+            vec![UsedResource {
+                kind: ResourceType::Srv,
+                root: RootType::Table,
+                table_offset_dwords: 0,
+                lower_bound: 0,
+                stride,
+                dwords: 4,
+                user_data: 0,
+                slot: 0,
+            }],
+        )
+    }
+
     #[test]
     fn a_descriptor_loaded_only_for_its_size_takes_the_kind_of_its_reload() {
         // The record count of the buffer at s0 (count - 1 as an index), then
@@ -10301,6 +10388,122 @@ mod tests {
             slot: 0,
         }];
         lower_with(&words, layout, used).unwrap();
+    }
+
+    #[test]
+    fn a_buffers_size_query_does_not_share_its_handle_with_the_loads() {
+        // The record count of the buffer at s0 (count - 1 as an index) and
+        // the indexed read, through one descriptor load.
+        let words = [
+            0xBE84_0300, // s_mov_b32 s4, s0
+            0xBE85_0380, // s_mov_b32 s5, 0
+            0xF408_0202,
+            0xFA00_0000, // s_load_dwordx4 s[8:11], s[4:5], null
+            0x810C_C10A, // s_add_i32 s12, s10, -1
+            0x7E04_020C, // v_mov_b32 v2, s12
+            0xE030_2000,
+            0x8002_0102, // buffer_load_dword v1, v2, s[8:11], 0 idxen
+            0xD834_0000,
+            0x0000_0100, // ds_write_b32 v0, v1
+            S_ENDPGM,
+        ];
+        let (layout, used) = buffer_table(4);
+        let l = lower_with(&words, layout, used).unwrap();
+        assert_eq!(l.heap_handles, 2);
+    }
+
+    #[test]
+    fn a_buffers_unread_size_shares_the_handle_of_the_loads() {
+        // The indexed read of the buffer at s0; nothing reads its record
+        // count (s10).
+        let words = [
+            0xBE84_0300, // s_mov_b32 s4, s0
+            0xBE85_0380, // s_mov_b32 s5, 0
+            0xF408_0202,
+            0xFA00_0000, // s_load_dwordx4 s[8:11], s[4:5], null
+            0x7E04_0280, // v_mov_b32 v2, 0
+            0xE030_2000,
+            0x8002_0102, // buffer_load_dword v1, v2, s[8:11], 0 idxen
+            0xD834_0000,
+            0x0000_0100, // ds_write_b32 v0, v1
+            S_ENDPGM,
+        ];
+        let (layout, used) = buffer_table(4);
+        let l = lower_with(&words, layout, used).unwrap();
+        assert_eq!(l.heap_handles, 1);
+    }
+
+    #[test]
+    fn a_buffers_size_read_as_its_loads_offset_has_a_handle_of_its_own() {
+        // The indexed read of the buffer at s0, offset by its record count
+        // (s10) straight from the descriptor's registers.
+        let words = [
+            0xBE84_0300, // s_mov_b32 s4, s0
+            0xBE85_0380, // s_mov_b32 s5, 0
+            0xF408_0202,
+            0xFA00_0000, // s_load_dwordx4 s[8:11], s[4:5], null
+            0x7E04_0280, // v_mov_b32 v2, 0
+            0xE030_2000,
+            0x0A02_0102, // buffer_load_dword v1, v2, s[8:11], s10 idxen
+            0xD834_0000,
+            0x0000_0100, // ds_write_b32 v0, v1
+            S_ENDPGM,
+        ];
+        let (layout, used) = buffer_table(4);
+        let l = lower_with(&words, layout, used).unwrap();
+        assert_eq!(l.heap_handles, 2);
+    }
+
+    #[test]
+    fn an_images_size_read_as_data_shares_the_handle_of_its_sample() {
+        // The texture at s0 sampled with the sampler at s1, and its width
+        // bits read as data, through one descriptor load.
+        let words = [
+            0xBE84_0300, // s_mov_b32 s4, s0
+            0xBE85_0380, // s_mov_b32 s5, 0
+            0xBE86_0301, // s_mov_b32 s6, s1
+            0xBE87_0380, // s_mov_b32 s7, 0
+            0xF408_0203,
+            0xFA00_0000, // s_load_dwordx4 s[8:11], s[6:7], null
+            0xF40C_0302,
+            0xFA00_0000, // s_load_dwordx8 s[12:19], s[4:5], null
+            0x7E04_0D00, // v_cvt_f32_u32 v2, v0
+            0x7E06_0302, // v_mov_b32 v3, v2
+            0xD54E_0008,
+            0x0278_1A0E, // v_alignbit_b32 v8, s14, s13, 30
+            0xF09C_0F08,
+            0x0043_0C02, // image_sample_lz v[12:15], v[2:3], s[12:19], s[8:11] dmask:0xf dim:2D
+            0xD834_0000,
+            0x0000_0800, // ds_write_b32 v0, v8
+            0xD834_0000,
+            0x0000_0C00, // ds_write_b32 v0, v12
+            S_ENDPGM,
+        ];
+        let (layout, used) = texture_tables();
+        let l = lower_with(&words, layout, used).unwrap();
+        // One for the texture, one for the sampler.
+        assert_eq!(l.heap_handles, 2);
+    }
+
+    #[test]
+    fn a_buffers_base_in_a_scalar_load_is_not_a_read_of_its_size() {
+        // The raw buffer at s0 read with a scalar load; nothing reads its
+        // record count (s10).
+        let words = [
+            0xBE84_0300, // s_mov_b32 s4, s0
+            0xBE85_0380, // s_mov_b32 s5, 0
+            0xF408_0202,
+            0xFA00_0000, // s_load_dwordx4 s[8:11], s[4:5], null
+            0xF420_0304,
+            0xFA00_0000, // s_buffer_load_dword s12, s[8:11], null
+            0x7E02_020C, // v_mov_b32 v1, s12
+            0xD834_0000,
+            0x0000_0100, // ds_write_b32 v0, v1
+            S_ENDPGM,
+        ];
+        let (layout, used) = buffer_table(0);
+        let l = lower_with(&words, layout, used).unwrap();
+        assert_eq!(l.heap_handles, 1);
     }
 
     #[test]
