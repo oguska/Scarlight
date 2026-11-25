@@ -17,9 +17,10 @@ const ALLOWED_EXTENSIONS: &[&str] = &[
     "rs", "toml", "md", "txt", "lock", "yml", "yaml", "json", "hlsl", "hlsli", "ps1", "cmd", "sh",
     "env",
 ];
-/// Two-part extensions, matched as a suffix of the name (`x.desktop.in` is not
-/// an `.in` file we can judge by extension alone).
-const ALLOWED_NAME_SUFFIXES: &[&str] = &["desktop.in"];
+/// Two-part extensions, matched as a suffix of the name including the dot
+/// (`x.desktop.in` is not an `.in` file we can judge by extension alone, and
+/// `notdesktop.in` must stay refused).
+const ALLOWED_NAME_SUFFIXES: &[&str] = &[".desktop.in"];
 /// Extensionless files are accepted only here, and only when they are scripts:
 /// a `#!` first line is a text file we wrote, not a blob.
 const SCRIPT_DIR_PREFIX: &str = "tools/";
@@ -286,6 +287,10 @@ mod tests {
     fn accepts_env_profiles_and_desktop_templates() {
         assert!(check("tools/x/examples/profile.env", b"PRESET='play'\n").is_empty());
         assert!(check("tools/x/scarlight.desktop.in", b"[Desktop Entry]\n").is_empty());
+        assert!(
+            !check("tools/x/notdesktop.in", b"[Desktop Entry]\n").is_empty(),
+            "the dot is part of the suffix"
+        );
         assert!(
             !check("tools/x/scarlight.desktop.in", b"MZ\x90\0").is_empty(),
             "magic still wins"

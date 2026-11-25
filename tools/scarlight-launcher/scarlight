@@ -812,8 +812,10 @@ save_last() {
     printf 'PREFIX=%s\n' "$(q "$PREFIX")"
     printf 'DURATION=%s\n' "$(q "$DURATION")"
     printf 'MODE=%s\n' "$(q "$MODE")"
-    [ -n "$TREE" ] && printf 'TREE=%s\n' "$(q "$TREE")"
-    [ -n "$SAVE" ] && printf 'SAVE=%s\n' "$(q "$SAVE")"
+    # plain ifs, not `[ ... ] && ...`: an empty TREE/SAVE must not make the last
+    # command of the group fail and look like a write error
+    if [ -n "$TREE" ]; then printf 'TREE=%s\n' "$(q "$TREE")"; fi
+    if [ -n "$SAVE" ]; then printf 'SAVE=%s\n' "$(q "$SAVE")"; fi
   } 2>/dev/null > "$f.tmp" || { rm -f "$f.tmp"; printf '%s: could not save the last choices\n' "$PROG" >&2; return 1; }
   mv "$f.tmp" "$f" 2>/dev/null || { rm -f "$f.tmp"; printf '%s: could not replace %s\n' "$PROG" "$f" >&2; return 1; }
   return 0
@@ -1001,7 +1003,8 @@ EOF
       build) v=$(ui_input "Scarlight build" "the victory.exe you built" "$PORT_EXE") && PORT_EXE=$v ;;
       title) v=$(ui_input "Game exe" "the .exe of the copy you own" "$GAME_EXE") && {
                GAME_EXE=$v; [ -n "$GAME_EXE" ] && GAME_DIR=${GAME_EXE%/*}; } ;;
-      dlls) v=$(ui_input "DLL folder" "where dxgi/d3d12/d3d12core/dxil live (empty = next to the build)" "$DLLDIR") && DLLDIR=$v ;;
+      dlls) v=$(ui_input "DLL folder" "where dxgi/d3d12/d3d12core/dxil live ('-' clears: use the build's own)" "$DLLDIR") && {
+              case "$v" in -|none|clear) DLLDIR="" ;; *) DLLDIR=$v ;; esac; } ;;
       prefix) v=$(ui_input "Wine prefix" "WINEPREFIX for this setup" "$PREFIX") && PREFIX=$v ;;
     esac
   done
