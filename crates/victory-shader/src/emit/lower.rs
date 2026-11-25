@@ -3204,7 +3204,7 @@ impl<'a> Lower<'a> {
             "min_u32" => Some(Rmw::UMin),
             "max_u32" => Some(Rmw::UMax),
             "wrxchg_b32" => Some(Rmw::Xchg),
-            "cmpst_b32" | "inc_u32" | "dec_u32" => None,
+            "cmpst_b32" | "inc_u32" | "dec_u32" | "rsub_u32" => None,
             _ => return Err("an LDS operation"),
         };
         let v0 = self.vgprs(inst, data.first().ok_or("an LDS atomic")?, 1)?[0];
@@ -3221,6 +3221,27 @@ impl<'a> Lower<'a> {
         let at = self.begin_guarded(guard);
         let r = match (rmw, op.as_str()) {
             (Some(op), _) => self.s.m.atomic(self.cur, op, p, v0),
+            (None, "rsub_u32") => {
+                let entry = self.cur;
+                let retry = self.s.m.new_block();
+                let done = self.s.m.new_block();
+                self.s.m.terminate(entry, Term::Br(retry));
+                // Start with an expected value of zero. A failed exchange
+                // supplies the observed value for the next attempt.
+                let zero = self.s.m.i32(0);
+                let expected = self.s.m.phi(retry, self.s.t.i32);
+                let new = self.s.m.bin(retry, Bin::Sub, v0, expected);
+                let old = self.s.m.cmpxchg(retry, p, expected, new);
+                self.s
+                    .m
+                    .set_phi(expected, vec![(zero, entry), (old, retry)]);
+                let success = self.s.m.cmp(retry, pred::EQ, old, expected);
+                self.s
+                    .m
+                    .terminate(retry, Term::CondBr(success, done, retry));
+                self.cur = done;
+                old
+            }
             // Compare with data0, store data1.
             (None, "cmpst_b32") => self
                 .s

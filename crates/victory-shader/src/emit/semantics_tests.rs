@@ -3158,3 +3158,110 @@ fn lds_wrap_atomics_validate_as_32_bit_dxil() {
         }
     }
 }
+
+
+fn check_lds_rsub(body: &[u32], inputs: &[[u32; 4]], check_output: impl Fn(&str, Vec<[u32; 4]>)) {
+    let mut shader = lower_program(&program(body, false)).expect("lower LDS reverse subtract");
+    let container = crate::Container::parse(&shader.dxil).unwrap();
+    let sfi0 = container.part(crate::FourCC::SFI0).unwrap();
+    let features = u64::from_le_bytes(sfi0.data.try_into().unwrap());
+    assert_eq!(features & 0x8000, 0, "unexpected Int64 shader feature");
+    validator::Validator::load(validator::Validator::default_path().as_deref())
+        .expect("load dxil.dll")
+        .validate(&mut shader.dxil)
+        .expect("validate LDS reverse subtract");
+
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let mut ran = false;
+    for (label, warp) in [("hardware", false), ("warp", true)] {
+        match Host::new(warp) {
+            Ok(host) => {
+                let output =
+                    run(&host, &shader, inputs, false).unwrap_or_else(|e| panic!("{label}: {e}"));
+                check_output(label, output);
+                ran = true;
+            }
+            Err(e) => eprintln!("{label}: {e}"),
+        }
+    }
+    assert!(ran, "no SM 6.6 device");
+}
+
+#[test]
+fn lds_rsub_respects_exec_and_returns_the_old_dword() {
+    let inputs: Vec<_> = [
+        (7, 20),
+        (20, 7),
+        (0, 0),
+        (0, u32::MAX),
+        (u32::MAX, 0),
+        (u32::MAX, u32::MAX),
+    ]
+    .into_iter()
+    .flat_map(|(old, data)| [[old, data, 1, OLD], [old, data, 0, OLD]])
+    .collect();
+
+    for (op, returns) in [(0x002, false), (0x022, true)] {
+        let mut body = vec![vop2(0x1A, 11, int(2), 0)];
+        body.extend(ds(0x0D, 0, 11, 1, 4));
+        body.extend([sop1(0x03, 20, EXEC_LO), vopc(0xD2, int(1), 3)]);
+        body.extend(ds(op, 5, 11, 2, 4));
+        body.push(sop1(0x03, 126, s(20)));
+        body.extend(ds(0x36, 6, 11, 0, 4));
+
+        check_lds_rsub(&body, &inputs, |label, output| {
+            for (&[old, data, active, sentinel], got) in inputs.iter().zip(output) {
+                let value = if active == 1 {
+                    data.wrapping_sub(old)
+                } else {
+                    old
+                };
+                let dst = if returns && active == 1 {
+                    old
+                } else {
+                    sentinel
+                };
+                assert_eq!(
+                    got,
+                    [dst, value, sentinel, sentinel],
+                    "{label} DS {op:#05x}: old={old:#x}, data={data:#x}, active={active}"
+                );
+            }
+        });
+    }
+}
+
+#[test]
+fn lds_rsub_serializes_contending_lanes() {
+    const LANES: usize = 64;
+    const INITIAL: u32 = 7;
+    const S_BARRIER: u32 = 0xBF8A_0000;
+    let mut body = vec![
+        vop1(0x01, 11, int(0)),
+        sop1(0x03, 20, EXEC_LO),
+        vopc(0xD2, int(0), 0),
+    ];
+    body.extend(ds(0x0D, 0, 11, 1, 0));
+    body.extend([sop1(0x03, 126, s(20)), S_BARRIER]);
+    body.extend(ds(0x022, 5, 11, 2, 0));
+    body.push(S_BARRIER);
+    body.extend(ds(0x36, 6, 11, 0, 0));
+
+    // Each successful update negates the shared dword. Serialized returns
+    // alternate between the two values, regardless of lane order.
+    check_lds_rsub(&body, &[[INITIAL, 0, 0, OLD]; LANES], |label, output| {
+        let mut returned = Vec::new();
+        for [old, final_value, _, _] in output {
+            assert_eq!(final_value, INITIAL, "{label}: final shared dword");
+            returned.push(old);
+        }
+        returned.sort_unstable();
+        let (positive, negative) = returned.split_at(LANES / 2);
+        assert_eq!(positive, [INITIAL; LANES / 2], "{label}: positive returns");
+        assert_eq!(
+            negative,
+            [INITIAL.wrapping_neg(); LANES / 2],
+            "{label}: negative returns"
+        );
+    });
+}
