@@ -3302,15 +3302,10 @@ impl<'a> Lower<'a> {
                 // Thread-group sync with a shared-memory fence, and a UAV
                 // fence when the program writes UAVs (the waits before an
                 // s_barrier make those writes visible on the console).
-                // Omit SYNC_THREAD_GROUP (8) when control-dependent on a
-                // per-lane branch, where a 32-lane host deadlocks if one warp
-                // skips the barrier while another waits on it.
-                let sync = if self.fence_only_barrier.contains(&b) {
-                    0
-                } else {
-                    8
-                };
-                let mode = sync | 1 | if self.writes_uavs { 2 } else { 0 };
+                // The sync is omitted when control-dependent on a per-lane
+                // branch, where a 32-lane host deadlocks if one warp skips
+                // the barrier while another waits on it.
+                let mode = barrier_mode(self.fence_only_barrier.contains(&b), self.writes_uavs);
                 let mode = self.s.m.i32(mode);
                 let void = self.s.t.void;
                 self.s
@@ -10007,6 +10002,23 @@ impl<'a> Lower<'a> {
         }
         Ok(())
     }
+}
+
+/// The DXIL `Barrier` mode of `s_barrier`: `SyncThreadGroup` is 1,
+/// `UAVFenceGlobal` 2 and `TGSMFence` 8. A fence-only barrier drops the sync
+/// and keeps the fences.
+fn barrier_mode(fence_only: bool, writes_uavs: bool) -> u32 {
+    let sync = if fence_only { 0 } else { 1 };
+    sync | 8 | if writes_uavs { 2 } else { 0 }
+}
+
+#[cfg(test)]
+#[test]
+fn a_fence_only_barrier_drops_the_sync_and_keeps_the_fences() {
+    assert_eq!(barrier_mode(false, false), 9);
+    assert_eq!(barrier_mode(false, true), 11);
+    assert_eq!(barrier_mode(true, false), 8);
+    assert_eq!(barrier_mode(true, true), 10);
 }
 
 /// IR blocks containing `s_barrier` (not already in `skip`) that are
