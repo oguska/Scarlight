@@ -98,8 +98,8 @@ Then point `EXE` in `play.sh` at `target/x86_64-pc-windows-msvc/diag/victory.exe
 | `VICTORY_NO_WATCHDOG=1` | Turns off the title's watchdog. Only the title build the hook was written for is patched: it checks the executable, and on any other build it changes nothing |
 | `VICTORY_ASYNC_WRITEBACK=1` | **Experimental**, off by default; has hung the title in our tests |
 | `VICTORY_LOG=info` | Normal per-frame log; `VICTORY_LOG=<target>=debug` for debug output from one area |
-| `VICTORY_GPU_TIMING=1` | Per-frame GPU and copy timings in the log (diagnostics builds) |
-| `VICTORY_SHOW_TARGET=1` | Draws what is bound instead of the scene, for finding a wrong texture or view (diagnostics builds) |
+| `VICTORY_GPU_TIMING=1` | Diagnostics builds only: runs and waits for each command list on its own, and logs any list over 50 ms with its slowest commands. Serialising the submission changes what you measure; the per-frame copy statistics are logged without it |
+| `VICTORY_SHOW_TARGET=<n>` / `busiest` | Diagnostics builds only: shows the nth texture the frame rendered to or wrote, in first-use order — the index a target dump uses — instead of the title's picture; `busiest` picks the displayable target the most draws wrote. A frame with fewer targets shows the title's own picture |
 
 ### Diagnostics switches
 
