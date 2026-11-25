@@ -161,11 +161,17 @@ fn try_build_valu_cs(body: &[u32]) -> Result<HostShader, crate::ShaderError> {
         view_marks: lowered.view_marks,
     };
 
-    if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
-        let mut copy = shader.dxil.clone();
-        let ours = copy[4..20].to_vec();
-        v.validate(&mut copy).expect("DXIL validation failed");
-        assert_eq!(copy[4..20], ours[..], "container hash mismatch");
+    match validator::Validator::load(validator::Validator::default_path().as_deref()) {
+        Ok(mut v) => {
+            let mut copy = shader.dxil.clone();
+            let ours = copy[4..20].to_vec();
+            v.validate(&mut copy).expect("DXIL validation failed");
+            assert_eq!(copy[4..20], ours[..], "container hash mismatch");
+        }
+        Err(e) if std::env::var_os("VICTORY_DXIL").is_some() => {
+            panic!("could not load VICTORY_DXIL: {e}")
+        }
+        Err(_) => {}
     }
 
     Ok(shader)
@@ -1686,15 +1692,26 @@ fn fspx_cs(body: &[u32]) -> HostShader {
     super::translate(&container).expect("translate")
 }
 
-/// VOP3P `v_dot4_i32_i8 vdst, src0, src1, src2`, `opsel` and `opsel_hi`
-/// one bit per source.
-const fn dot4(vdst: u8, src0: u16, src1: u16, src2: u16, opsel: u32, opsel_hi: u32) -> [u32; 2] {
+/// VOP3P dot product, with one `opsel` and `opsel_hi` bit per source.
+const fn packed_dot(
+    op: u8,
+    vdst: u8,
+    src: [u16; 3],
+    opsel: u32,
+    opsel_hi: u32,
+    clamp: bool,
+) -> [u32; 2] {
     [
-        0xCC16_0000 | (opsel_hi >> 2 & 1) << 14 | (opsel & 7) << 11 | vdst as u32,
+        0xCC00_0000
+            | (op as u32) << 16
+            | (clamp as u32) << 15
+            | (opsel_hi >> 2 & 1) << 14
+            | (opsel & 7) << 11
+            | vdst as u32,
         (opsel_hi & 3) << 27
-            | (src2 as u32 & 0x1FF) << 18
-            | (src1 as u32 & 0x1FF) << 9
-            | (src0 as u32 & 0x1FF),
+            | (src[2] as u32 & 0x1FF) << 18
+            | (src[1] as u32 & 0x1FF) << 9
+            | (src[0] as u32 & 0x1FF),
     ]
 }
 
@@ -1719,16 +1736,16 @@ fn fspx_programs_run_with_the_hardwares_dot_products() {
     }
     let cases: [(Vec<u32>, u32); 4] = [
         (
-            dot4(0, vgpr(1), vgpr(2), vgpr(3), 0, 7).to_vec(),
+            packed_dot(0x16, 0, [vgpr(1), vgpr(2), vgpr(3)], 0, 7, false).to_vec(),
             dot4_ref(a, b, acc),
         ),
         // sel_hi_lo on an inline 2.0 (0x40000000): the halves swapped.
         (
-            dot4(0, vgpr(1), 244, vgpr(3), 0b010, 0b101).to_vec(),
+            packed_dot(0x16, 0, [vgpr(1), 244, vgpr(3)], 0b010, 0b101, false).to_vec(),
             dot4_ref(a, 0x4000, acc),
         ),
         (
-            dot4(0, vgpr(1), vgpr(2), vgpr(3), 0b001, 0b110).to_vec(),
+            packed_dot(0x16, 0, [vgpr(1), vgpr(2), vgpr(3)], 0b001, 0b110, false).to_vec(),
             dot4_ref(a.rotate_left(16), b, acc),
         ),
         // v_mov_b32 v0, v3; v_dot4c_i32_i8 v0, v1, v2
@@ -1747,6 +1764,77 @@ fn fspx_programs_run_with_the_hardwares_dot_products() {
         run_cases(&shader, &[[0; 4]], |backend, _, _, got| {
             assert_eq!(got, want, "{backend}: {body:08x?}");
         });
+    }
+}
+
+fn check_unsigned_dot(op: u8, cases: &[([u32; 4], u32)]) {
+    let inputs: Vec<_> = cases.iter().map(|&(inputs, _)| inputs).collect();
+    for clamp in [false, true] {
+        let body = packed_dot(op, 0, [vgpr(1), vgpr(2), vgpr(3)], 0, 7, clamp);
+        let shader = build_valu_cs(&body);
+        let container = crate::Container::parse(&shader.dxil).unwrap();
+        let sfi0 = container.part(crate::FourCC::SFI0).unwrap().data;
+        let features = u64::from_le_bytes(sfi0.try_into().unwrap());
+        assert_eq!(features & 0x8000, 0, "unexpected Int64 feature");
+
+        run_cases(&shader, &inputs, |backend, i, inputs, got| {
+            let dot = cases[i].1;
+            let acc = inputs[2];
+            let want = if clamp {
+                acc.saturating_add(dot)
+            } else {
+                acc.wrapping_add(dot)
+            };
+            assert_eq!(got, want, "{backend}: clamp={clamp}, inputs={inputs:08x?}");
+        });
+    }
+}
+
+#[test]
+fn unsigned_byte_dot_products_wrap_or_saturate() {
+    check_unsigned_dot(
+        0x17,
+        &[
+            ([0x0403_0201, 0x0807_0605, 9, 0], 70),
+            ([0xFF00_0000, 0xFF00_0000, 0, 0], 65_025),
+            ([0xFF00_0000, 0xFF00_0000, u32::MAX - 1, 0], 65_025),
+            ([1, 1, u32::MAX - 1, 0], 1),
+            ([0, u32::MAX, u32::MAX, 0], 0),
+        ],
+    );
+}
+
+#[test]
+fn unsigned_nibble_dot_products_wrap_or_saturate() {
+    let mut cases: Vec<_> = (0..8)
+        .map(|k| ([3 << (4 * k), 14 << (4 * k), 5, 0], 42))
+        .collect();
+    cases.extend([
+        ([u32::MAX, u32::MAX, 0, 0], 1800),
+        ([u32::MAX, u32::MAX, u32::MAX - 2, 0], 1800),
+        ([1, 1, u32::MAX - 2, 0], 1),
+        ([1, 1, u32::MAX - 1, 0], 1),
+    ]);
+    check_unsigned_dot(0x19, &cases);
+}
+
+#[test]
+fn unsigned_packed_dot_products_use_operand_half_selectors() {
+    for op in [0x17, 0x19] {
+        // Swap src0's halves, duplicate src1's low half, and read src2 whole.
+        let body = packed_dot(op, 0, [vgpr(1), vgpr(2), vgpr(3)], 0b101, 0, false);
+        let shader = build_valu_cs(&body);
+        run_cases(
+            &shader,
+            &[[0x0003_0002, 0x0007_0005, 0x1234_5678, 0]],
+            |backend, _, _, got| {
+                assert_eq!(
+                    got,
+                    0x1234_5678 + 3 * 5 + 2 * 5,
+                    "{backend}: opcode {op:#x}"
+                );
+            },
+        );
     }
 }
 

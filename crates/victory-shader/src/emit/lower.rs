@@ -5632,11 +5632,12 @@ impl<'a> Lower<'a> {
                 );
                 int(self, r)
             }
-            "v_dot4_i32_i8" => {
+            "v_dot4_i32_i8" | "v_dot4_u32_u8" | "v_dot8_u32_u4" => {
                 // VOP3P: op_sel picks the half each multiplicand's low half
                 // reads, op_sel_hi its high half's; the accumulator is read
                 // whole (as AMD's compilers fold constants into it).
-                if v.clamp || v.neg_hi != 0 {
+                let signed = name == "v_dot4_i32_i8";
+                if (signed && v.clamp) || v.neg_hi != 0 {
                     return Err("a saturating or negated dot product");
                 }
                 let mut xs = Vec::new();
@@ -5657,6 +5658,36 @@ impl<'a> Lower<'a> {
                     xs.push(self.s.m.bin(c, Bin::Or, if lo { top } else { bottom }, hi));
                 }
                 let acc = s(self, 2)?;
+                if !signed {
+                    // Both unsigned dot sums fit in i32. Only adding the
+                    // accumulator can overflow.
+                    let width = if name == "v_dot4_u32_u8" { 8 } else { 4 };
+                    let m = &mut self.s.m;
+                    let mask = m.i32((1 << width) - 1);
+                    let mut dot = m.i32(0);
+                    for offset in (0..32).step_by(width) {
+                        let shift = m.i32(offset);
+                        let a = m.bin(c, Bin::LShr, xs[0], shift);
+                        let b = m.bin(c, Bin::LShr, xs[1], shift);
+                        let a = m.bin(c, Bin::And, a, mask);
+                        let b = m.bin(c, Bin::And, b, mask);
+                        let product = m.bin(c, Bin::Mul, a, b);
+                        dot = m.bin(c, Bin::Add, dot, product);
+                    }
+                    let sum = m.bin(c, Bin::Add, acc, dot);
+                    let r = if v.clamp {
+                        let overflow = m.cmp(c, pred::IULT, sum, acc);
+                        let max = m.i32(u32::MAX);
+                        m.select(c, overflow, max, sum)
+                    } else {
+                        sum
+                    };
+                    let Some(Operand::Vector { reg, .. }) = v.dst else {
+                        return Err("a result without a register");
+                    };
+                    self.write(inst, Reg::V(reg), r, guard);
+                    return Ok(());
+                }
                 let i32_ty = self.s.t.i32;
                 let r = self.s.op(
                     c,
