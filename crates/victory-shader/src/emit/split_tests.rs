@@ -1073,18 +1073,21 @@ fn lane_reads_in_branches_beside_a_whole_wave_section() {
 /// lane's bit of the result is its bit of the operands, so this lowers
 /// (through the ballot when the count reads it); it used to stop at the
 /// first `s_mov_b64 s[10:11], exec` with "a lane mask read as data".
+/// The pair and the count stay off s[0:7]: those hold the table in user
+/// SGPR 0 and the descriptor the prologue loads, and writing them would
+/// change a loaded descriptor.
 #[test]
 fn a_mask_built_in_sgprs_is_counted() {
     let body = [
         0x7D88_0094, // v_cmp_gt_u32 vcc, 20, v0
         0xBE8A_047E, // s_mov_b64 s[10:11], exec
         0x878C_6A7E, // s_and_b64 s[12:13], exec, vcc
-        0x8880_6A0C, // s_or_b64 s[0:1], vcc, s[12:13]
-        0x8F07_8C00, // s_bcnt1_i32_b64 s7, s[0:1]
+        0x888E_6A0C, // s_or_b64 s[14:15], vcc, s[12:13]
+        0x8F10_8C00, // s_bcnt1_i32_b64 s16, s[12:13]
         0xBF86_0001, // s_cbranch_scc0 +1
         0x7E04_0209, // v_mov_b32 v2, s9
         0x7E04_0281, // v_mov_b32 v2, 1
-        0xBE80_040A, // s_mov_b64 s[0:1], s[10:11]
+        0xBE8E_040A, // s_mov_b64 s[14:15], s[10:11]
     ];
     for (lanes_min, lanes_max) in [(32, 64), (32, 32)] {
         let target = super::Target {
