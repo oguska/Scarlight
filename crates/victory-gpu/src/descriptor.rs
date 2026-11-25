@@ -798,9 +798,15 @@ mod tests {
         );
         assert_eq!(slot::<extern "system" fn(This) -> u64>(h, 0x48)(h), address);
         assert_eq!(slot::<extern "system" fn(This) -> u64>(h, 0x50)(h), address);
+        // The heap must go before its memory: while it lives, writes to that
+        // range count as its descriptors, even once another test's heap has
+        // been allocated there.
+        let release = |h| slot::<extern "system" fn(This) -> u32>(h, 0x10)(h);
+        assert_eq!(release(h), 0);
         // A size that does not match the count is not a placement.
         assert_eq!(create(desc, Placement { address, size: 7 }, &mut h), S_OK);
         assert_ne!(slot::<extern "system" fn(This) -> u64>(h, 0x48)(h), address);
+        assert_eq!(release(h), 0);
     }
 
     #[cfg(windows)]
