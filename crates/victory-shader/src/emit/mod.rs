@@ -183,6 +183,7 @@
 //!   console never exports them).
 
 mod bitcode;
+pub mod clamp;
 #[cfg(all(test, windows))]
 mod bvh_tests;
 mod container;
