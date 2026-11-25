@@ -189,7 +189,11 @@ that is our bug, and if the fault is in the driver we take it to Mesa.
 ## Contribute
 
 Pull requests target `main` and go in after CI and review. [CONTRIBUTING.md](CONTRIBUTING.md) has the
-build, test, naming and asset rules. Docs, commits and PRs never name the title or its developer; no
+build, test, naming and asset rules, and says which checks to run; [good first
+issues](https://github.com/pablogonz12/Scarlight/labels/good%20first%20issue) are written so a
+newcomer can finish one without guessing. Questions go to
+[Discussions](https://github.com/pablogonz12/Scarlight/discussions), and everyone here follows the
+[code of conduct](CODE_OF_CONDUCT.md). Docs, commits and PRs never name the title or its developer; no
 game files, screenshots or dumps are ever committed ([asset policy](docs/asset-policy.md)). Parts of
 the project, this page included, are written with AI coding tools. If you want a Linux-first project
 to keep moving, star the repository and tell us what your card does.
