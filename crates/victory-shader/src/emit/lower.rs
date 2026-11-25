@@ -11478,6 +11478,8 @@ mod select_tests {
         let st = crate::structure::structure(&p).unwrap();
         let io = crate::io::raise(&p, &native).unwrap();
         let res = crate::resource::track(&p, &native.layout, native.stage, Some(&st)).unwrap();
+        // `shader` is only re-borrowed mutably where the validator exists.
+        #[cfg_attr(not(windows), allow(unused_mut))]
         let mut shader = emit(&c, &native, &p, &st, &io, &res, Target::ANY).unwrap();
         assert!(!shader.dxil.is_empty());
         #[cfg(windows)]

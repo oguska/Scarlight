@@ -91,6 +91,8 @@ mod lane_read_loop_tests;
 mod lower;
 mod sampler;
 mod shader;
+#[cfg(test)]
+mod spirv_tests;
 pub mod spirv;
 #[cfg(all(test, windows))]
 mod split_tests;
