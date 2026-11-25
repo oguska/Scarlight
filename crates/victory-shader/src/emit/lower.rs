@@ -5431,6 +5431,9 @@ impl<'a> Lower<'a> {
             return self.packed16(inst, op, guard);
         }
         match name {
+            "v_qsad_pk_u16_u8" | "v_mqsad_pk_u16_u8" | "v_mqsad_u32_u8" => {
+                self.quad_sad(inst, guard)
+            }
             "v_lshlrev_b64" | "v_lshrrev_b64" | "v_ashrrev_i64" => {
                 let n = s(self, 0)?;
                 let x = self.src64(inst, 1)?;
@@ -6179,6 +6182,101 @@ impl<'a> Lower<'a> {
                 int(self, r)
             }
         }
+    }
+
+    fn quad_sad(&mut self, inst: &Inst, guard: Option<V>) -> Result<(), Why> {
+        let Fields::Valu(v) = &inst.fields else {
+            unreachable!()
+        };
+        if v.abs != 0 || v.neg != 0 || v.omod != 0 || v.opsel != 0 {
+            return Err("modifiers on an integer quad SAD operation");
+        }
+        let Some(Operand::Vector { reg, dwords }) = v.dst else {
+            return Err("a quad SAD result outside a VGPR");
+        };
+        let c = self.cur;
+        let read = |l: &mut Self, reg| l.i32_of(inst.read(reg).ok_or("an unread operand")?);
+        let pair = |l: &mut Self, op: &Operand| -> Result<[V; 2], Why> {
+            let lo = l.operand(inst, op)?;
+            let hi = match *op {
+                Operand::Vector { reg, .. } => read(l, Reg::V(reg + 1))?,
+                Operand::Scalar { code, .. } if code != NULL => read(l, Reg::S(code + 1))?,
+                Operand::Const(193..=208) => l.s.m.i32(u32::MAX),
+                _ => l.s.m.i32(0),
+            };
+            Ok([lo, hi])
+        };
+        let data = pair(self, &v.src[0])?;
+        let reference = self.src(inst, 1)?;
+        let zero = self.s.m.i32(0);
+        let extract = |l: &mut Self, word, shift, mask| {
+            let (shift, mask) = (l.s.m.i32(shift), l.s.m.i32(mask));
+            let x = l.s.m.bin(c, Bin::LShr, word, shift);
+            l.s.m.bin(c, Bin::And, x, mask)
+        };
+        let bytes: [_; 7] =
+            std::array::from_fn(|i| extract(self, data[i / 4], (i % 4) as u32 * 8, 0xFF));
+        let refs: [_; 4] = std::array::from_fn(|i| extract(self, reference, i as u32 * 8, 0xFF));
+        let masked = inst.name() != "v_qsad_pk_u16_u8";
+        let sads: [_; 4] = std::array::from_fn(|w| {
+            let mut sum = zero;
+            for (&x, y) in bytes[w..w + 4].iter().zip(refs) {
+                let mut diff = self.unsigned_abs_diff(x, y);
+                if masked {
+                    let enabled = self.s.m.cmp(c, pred::NE, y, zero);
+                    diff = self.s.m.select(c, enabled, diff, zero);
+                }
+                sum = self.s.m.bin(c, Bin::Add, sum, diff);
+            }
+            sum
+        });
+
+        if dwords == 2 {
+            let acc = pair(self, &v.src[2])?;
+            let max = self.s.m.i32(0xFFFF);
+            let shift = self.s.m.i32(16);
+            for (i, word) in acc.into_iter().enumerate() {
+                let mut halves = [zero; 2];
+                for (half, result) in halves.iter_mut().enumerate() {
+                    let acc = extract(self, word, half as u32 * 16, 0xFFFF);
+                    let sum = self.s.m.bin(c, Bin::Add, acc, sads[i * 2 + half]);
+                    *result = if v.clamp {
+                        let overflow = self.s.m.cmp(c, pred::IUGT, sum, max);
+                        self.s.m.select(c, overflow, max, sum)
+                    } else {
+                        self.s.m.bin(c, Bin::And, sum, max)
+                    };
+                }
+                let hi = self.s.m.bin(c, Bin::Shl, halves[1], shift);
+                let packed = self.s.m.bin(c, Bin::Or, halves[0], hi);
+                self.write(inst, Reg::V(reg + i as u8), packed, guard);
+            }
+        } else {
+            let Operand::Vector { reg: src, .. } = v.src[2] else {
+                return Err("a quad SAD accumulator outside a VGPR");
+            };
+            let max = self.s.m.i32(u32::MAX);
+            for (i, sad) in sads.into_iter().enumerate() {
+                let acc = read(self, Reg::V(src + i as u8))?;
+                let sum = self.s.m.bin(c, Bin::Add, acc, sad);
+                let result = if v.clamp {
+                    let overflow = self.s.m.cmp(c, pred::IULT, sum, acc);
+                    self.s.m.select(c, overflow, max, sum)
+                } else {
+                    sum
+                };
+                self.write(inst, Reg::V(reg + i as u8), result, guard);
+            }
+        }
+        Ok(())
+    }
+
+    fn unsigned_abs_diff(&mut self, x: V, y: V) -> V {
+        let c = self.cur;
+        let above = self.s.m.cmp(c, pred::IUGT, x, y);
+        let hi = self.s.m.select(c, above, x, y);
+        let lo = self.s.m.select(c, above, y, x);
+        self.s.m.bin(c, Bin::Sub, hi, lo)
     }
 
     /// A 64-bit source (a register pair; inline constants sign-extend).
@@ -7097,10 +7195,7 @@ impl<'a> Lower<'a> {
                         y = self.s.m.bin(c, Bin::LShr, y, sh);
                         y = self.s.m.bin(c, Bin::And, y, mask);
                     }
-                    let above = self.s.m.cmp(c, pred::IUGT, x, y);
-                    let hi = self.s.m.select(c, above, x, y);
-                    let lo = self.s.m.select(c, above, y, x);
-                    let mut diff = self.s.m.bin(c, Bin::Sub, hi, lo);
+                    let mut diff = self.unsigned_abs_diff(x, y);
                     if name == "v_msad_u8" {
                         let masked = self.s.m.cmp(c, pred::NE, y, zero);
                         diff = self.s.m.select(c, masked, diff, zero);

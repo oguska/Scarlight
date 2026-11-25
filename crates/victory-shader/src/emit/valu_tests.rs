@@ -418,6 +418,103 @@ fn v_add_sub_nc_i16_wrap_and_saturate_with_op_sel() {
 }
 
 #[test]
+fn quad_sad_vop3_tracks_register_dwords_and_rejects_modifiers() {
+    for (op, dwords) in [(0x172, 2), (0x173, 2), (0x175, 4)] {
+        let [lo, hi] = vop3(op, 8, vgpr(1), vgpr(3), vgpr(4));
+        let code: Vec<_> = [lo, hi, S_ENDPGM]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        let program = ir::build(&code, false, 16).unwrap();
+        let inst = &program.blocks[0].insts[0];
+        for reg in 1..4 + dwords {
+            assert!(inst.read(ir::Reg::V(reg)).is_some(), "{op:#x}: v{reg}");
+        }
+        for reg in 8..8 + dwords {
+            assert!(inst.write(ir::Reg::V(reg)).is_some(), "{op:#x}: v{reg}");
+        }
+        assert!(inst.write(ir::Reg::V(8 + dwords)).is_none());
+
+        // ABS on src0, NEG on src2, OMOD, and OP_SEL, respectively.
+        for (lo_bits, hi_bits) in [(1 << 8, 0), (0, 1 << 31), (0, 1 << 27), (1 << 11, 0)] {
+            let refused = try_build_valu_cs(&[lo | lo_bits, hi | hi_bits, vop1(1, 0, vgpr(8))]);
+            assert!(
+                matches!(
+                    refused,
+                    Err(crate::ShaderError::Unsupported {
+                        what: "modifiers on an integer quad SAD operation",
+                        ..
+                    })
+                ),
+                "{op:#x}: {:?}",
+                refused.err()
+            );
+        }
+    }
+}
+
+#[test]
+fn quad_sad_vop3_wraps_or_saturates_every_window() {
+    let data = [
+        u32::from_le_bytes([7, 200, 19, 88]),
+        u32::from_le_bytes([251, 0, 47, 222]),
+    ];
+    let reference = u32::from_le_bytes([0, 100, 240, 0]);
+    // These reference bytes yield SADs [416, 684, 42, 526] unmasked and
+    // [321, 233, 23, 391] masked, traversing both source dwords.
+    let variants: [(_, &[_], &[_], &[_]); 3] = [
+        (
+            0x172,
+            &[0x000C_FFFA, 0xFF14_FFFE],
+            &[0x02B8_019A, 0x0122_0028],
+            &[0x02B8_FFFF, 0xFFFF_FFFF],
+        ),
+        (
+            0x173,
+            &[0x000C_FFFA, 0xFF14_FFFE],
+            &[0x00F5_013B, 0x009B_0015],
+            &[0x00F5_FFFF, 0xFFFF_FFFF],
+        ),
+        (
+            0x175,
+            &[0xFFFF_FFF0, 42, 0xFFFF_FFFE, 0x7FFF_FFA0],
+            &[0x131, 0x113, 0x15, 0x8000_0127],
+            &[u32::MAX, 0x113, u32::MAX, 0x8000_0127],
+        ),
+    ];
+    for (op, acc, wrapped, saturated) in variants {
+        let dwords = acc.len() as u8;
+        for (clamp, expected) in [(false, wrapped), (true, saturated)] {
+            // v4 already holds the first accumulator dword from user data.
+            let mut body = Vec::new();
+            for (i, &word) in acc.iter().enumerate().skip(1) {
+                body.extend([vop1(1, 4 + i as u8, 255), word]);
+            }
+            // Alias the destination and accumulator to exercise SSA reads
+            // of the original dwords. The harness stores v0 at offset 0.
+            let [lo, hi] = vop3(op, 4, vgpr(1), vgpr(3), vgpr(4));
+            body.extend([lo | u32::from(clamp) << 15, hi, vop1(1, 0, vgpr(4))]);
+            for i in 1..dwords {
+                body.extend(buffer_store_dword(4 + i, 8, u16::from(i) * 4));
+            }
+            let shader = build_valu_cs(&body);
+            let container = crate::Container::parse(&shader.dxil).unwrap();
+            let features = container.part(crate::FourCC::SFI0).unwrap();
+            let features = u64::from_le_bytes(features.data.try_into().unwrap());
+            assert_eq!(features & 0x8000, 0, "{op:#x}: Int64Ops required");
+
+            let cases = [
+                [data[0], data[1], reference, acc[0]],
+                [data[0], data[1] ^ 0xFF00_0000, reference, acc[0]],
+            ];
+            run_cases_with_output(&shader, &cases, u32::from(dwords), |backend, i, _, got| {
+                assert_eq!(got, expected, "{backend}: {op:#x}, clamp={clamp}, case {i}");
+            });
+        }
+    }
+}
+
+#[test]
 fn scalar_quad_masks_pack_nibbles_and_set_scc() {
     let pack_words = |opcode: u32| {
         [
