@@ -1634,6 +1634,7 @@ mod tests {
         assert_eq!(dstorage_worker_count(64), 16);
     }
 
+    #[test]
     fn zlib_inflate_handles_short_exact_empty_and_bad_streams() {
         let plain = pattern(65_537);
         let packed = compress_zlib(&plain);
