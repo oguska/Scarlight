@@ -448,7 +448,8 @@ impl HostHeap {
             }
         }
         self.keep(index, buffer.map(|b| (b.clone(), None)));
-        self.write_stride(index, 4);
+        let flag = if uav { victory_shader::emit::VIEW_STRIDE_UAV } else { 0 };
+        self.write_stride(index, 4 | flag);
         self.set_mark(index, None);
     }
 
@@ -467,10 +468,11 @@ impl HostHeap {
         }
     }
 
-    /// Enters the byte stride of `view` (0 for none or not a buffer view)
-    /// for slot `index` in the view-stride table.
+    /// Enters the byte stride of `view` (0 for none or not a buffer view,
+    /// `VIEW_STRIDE_UAV` set on unordered ones) for slot `index` in the
+    /// view-stride table.
     fn set_stride(&self, index: u32, view: Option<&View>) {
-        self.write_stride(index, view.map_or(0, view_stride));
+        self.write_stride(index, view.map_or(0, table_stride));
     }
 
     fn write_stride(&self, index: u32, stride: u32) {
@@ -606,7 +608,7 @@ impl HostHeap {
         self.keep(index, buffer.map(|b| (b.clone(), None)));
         self.keep(index + 1, buffer.map(|b| (b.clone(), None)));
         self.write_stride(index, 4);
-        self.write_stride(index + 1, 4);
+        self.write_stride(index + 1, 4 | victory_shader::emit::VIEW_STRIDE_UAV);
         // Writes through these are title memory's, marked in its page table.
         self.set_mark(index, None);
         self.set_mark(index + 1, None);
@@ -786,6 +788,18 @@ fn view_stride(view: &View) -> u32 {
     // Nonzero: shaders taking views at computed indices read the null buffer
     // view where the table holds 0 (`victory_shader::emit`).
     element.max(1) as u32
+}
+
+/// The `VIEW_STRIDES` entry for `view`: its byte stride with
+/// [`victory_shader::emit::VIEW_STRIDE_UAV`] set on unordered buffer views,
+/// or 0 when `view` is not a buffer view.
+fn table_stride(view: &View) -> u32 {
+    let stride = view_stride(view);
+    if stride != 0 && matches!(view, View::Unordered(..) | View::Placed(true, ..)) {
+        stride | victory_shader::emit::VIEW_STRIDE_UAV
+    } else {
+        stride
+    }
 }
 
 /// A buffer view of title memory at `address` on its host copy: the first
@@ -1562,5 +1576,61 @@ mod tests {
         let last = first + heap.dynamic - 1;
         heap.release(last, 1);
         assert_eq!(heap.dynamic(2), None);
+    }
+
+    #[test]
+    fn table_stride_separates_shader_and_unordered_buffers() {
+        let uav_bit = victory_shader::emit::VIEW_STRIDE_UAV;
+        let stride_mask = victory_shader::emit::VIEW_BUFFER_STRIDE_MASK;
+        assert_eq!(uav_bit, 1 << 28);
+        assert_eq!(uav_bit & 0xE000_0000, 0, "bits 29-31 stay free for texture tags");
+        // A 1D texture SRV (such as the title's null SRV at heap slot 0) has
+        // view dimension 2, so its buffer stride is 0.
+        let null_tex1d = View::Shader(0, Some([42, 2, 5768, 0, 1, 0, 0, 0, 0, 0]));
+        assert_eq!(table_stride(&null_tex1d), 0);
+        assert_eq!(table_stride(&View::Constant(0x1000, 64)), 4);
+
+        let srv_buf = D3D12_SHADER_RESOURCE_VIEW_DESC {
+            Format: DXGI_FORMAT_UNKNOWN,
+            ViewDimension: D3D12_SRV_DIMENSION_BUFFER,
+            Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+            Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
+                Buffer: D3D12_BUFFER_SRV {
+                    NumElements: 8,
+                    StructureByteStride: 12,
+                    ..Default::default()
+                },
+            },
+        };
+        // SAFETY: `D3D12_SHADER_RESOURCE_VIEW_DESC` is 40 bytes (10 dwords).
+        let srv_words: [u32; 10] = unsafe { std::mem::transmute(srv_buf) };
+        assert_eq!(table_stride(&View::Shader(1, Some(srv_words))), 12);
+
+        let uav_buf = D3D12_UNORDERED_ACCESS_VIEW_DESC {
+            Format: DXGI_FORMAT_UNKNOWN,
+            ViewDimension: D3D12_UAV_DIMENSION_BUFFER,
+            Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
+                Buffer: D3D12_BUFFER_UAV {
+                    NumElements: 8,
+                    StructureByteStride: 12,
+                    ..Default::default()
+                },
+            },
+        };
+        // SAFETY: `D3D12_UNORDERED_ACCESS_VIEW_DESC` is 40 bytes (10 dwords).
+        let uav_words: [u32; 10] = unsafe { std::mem::transmute(uav_buf) };
+        let uav_view = View::Unordered(1, 0, Some(uav_words));
+        assert_eq!(view_stride(&uav_view), 12);
+        assert_eq!(table_stride(&uav_view), 12 | uav_bit);
+        assert_eq!(table_stride(&uav_view) & stride_mask, 12);
+
+        let mut res = [0u32; 14];
+        res[0] = 1; // buffer resource dimension
+        let mut placed_srv = [0u32; 16];
+        placed_srv[..10].copy_from_slice(&srv_words);
+        let mut placed_uav = [0u32; 16];
+        placed_uav[..10].copy_from_slice(&uav_words);
+        assert_eq!(table_stride(&View::Placed(false, res, placed_srv)), 12);
+        assert_eq!(table_stride(&View::Placed(true, res, placed_uav)), 12 | uav_bit);
     }
 }

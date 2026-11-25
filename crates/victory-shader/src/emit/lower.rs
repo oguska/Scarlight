@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use super::UserData;
 use super::bitcode::{Attr, Bin, Cast, Term, V, pred};
 use super::container::SigElement;
-use super::shader::{Shader, VIEW_STRIDES, flags};
+use super::shader::{Shader, VIEW_BUFFER_STRIDE_MASK, VIEW_STRIDE_UAV, VIEW_STRIDES, flags};
 use crate::ShaderError;
 use crate::gfx10::{Dpp, Fields, NULL, Operand};
 use crate::io::{Barycentric, Elsewhere, Export, Input, Interp, Io, Target};
@@ -3997,10 +3997,11 @@ impl<'a> Lower<'a> {
             }
             return Ok(());
         }
-        // Constant data through the resource heap itself is a raw buffer: the
-        // host's constant buffer views need 256-byte alignment, the title's
-        // 16 (module notes, "Constant buffers in the heap").
-        let heap_constants = kind.is_none() && self.is_heap_direct(src);
+        // Constant data through the view heap (the heap itself, or a table
+        // slot with no used-resource entry) is a raw buffer: the host's view
+        // heap holds raw SRVs for constant buffers and null SRVs for empty
+        // slots, never CBVs (module notes, "Constant buffers in the heap").
+        let heap_constants = kind.is_none() && !matches!(src, Source::Built { .. });
         // So is constant data in a table: the title's slot holds a raw view
         // of it, so tables need no copies of their own per draw.
         let table_constants =
@@ -4545,7 +4546,9 @@ impl<'a> Lower<'a> {
         let four = self.s.m.i32(4);
         let at = self.s.m.bin(c, Bin::Mul, index, four);
         let table = self.s.root_srv_handle(VIEW_STRIDES);
-        self.raw_dword(table, at)
+        let raw = self.raw_dword(table, at);
+        let mask = self.s.m.i32(VIEW_BUFFER_STRIDE_MASK);
+        self.s.m.bin(self.cur, Bin::And, raw, mask)
     }
 
     /// Title memory at a raw GPU address (decision 0005: the unified-memory
@@ -5005,7 +5008,9 @@ impl<'a> Lower<'a> {
             &[table, at, iu, mask, four],
         );
         let x = self.s.m.extract(c, r, 0);
-        Ok(self.as_int(x))
+        let raw = self.as_int(x);
+        let stride_mask = self.s.m.i32(VIEW_BUFFER_STRIDE_MASK);
+        Ok(self.s.m.bin(c, Bin::And, raw, stride_mask))
     }
 
     /// The used-resource entry a descriptor loaded from a table falls in.
@@ -5062,9 +5067,13 @@ impl<'a> Lower<'a> {
         } else {
             props
         };
-        // A descriptor from the resource heap itself: the host cannot tell
-        // which slots the program reads, or writes through unordered access.
-        if !sampler && self.is_heap_direct(src) {
+        // A descriptor from the resource heap itself, or a buffer in a table
+        // slot no used-resource entry names: the host cannot tell from `used`
+        // alone which slots the program reads, or writes through unordered
+        // access.
+        let unguarded_table =
+            !sampler && (10..=12).contains(&(props.0 & 0xFF)) && self.used_kind(src).is_none();
+        if (!sampler && self.is_heap_direct(src)) || unguarded_table {
             self.heap[0] = true;
             self.heap[1] |= props.0 & 0x1000 != 0;
         }
@@ -5235,8 +5244,13 @@ impl<'a> Lower<'a> {
     /// buffer one (a wild address: the texture's address shifted 8 bits
     /// down) and faulted the device.
     fn buffer_guard(&mut self, src: &Source, index: V, sampler: bool, props: (u32, u32)) -> V {
-        // Typed, raw and structured buffers (DXIL resource kinds 10-12).
-        if sampler || !(10..=12).contains(&(props.0 & 0xFF)) || !self.is_heap_direct(src) {
+        // Typed, raw and structured buffers (DXIL resource kinds 10-12) from
+        // the resource heap itself or a table slot no used-resource entry
+        // names.
+        if sampler
+            || !(10..=12).contains(&(props.0 & 0xFF))
+            || (!self.is_heap_direct(src) && self.used_kind(src).is_some())
+        {
             return index;
         }
         let c = self.cur;
@@ -5257,10 +5271,21 @@ impl<'a> Lower<'a> {
         );
         let x = self.s.m.extract(c, r, 0);
         let stride = self.as_int(x);
+        let stride_mask = self.s.m.i32(VIEW_BUFFER_STRIDE_MASK);
+        let uav_bit = self.s.m.i32(VIEW_STRIDE_UAV);
         let zero = self.s.m.i32(0);
-        let none = self.s.m.cmp(c, pred::EQ, stride, zero);
+        let uav = props.0 & 0x1000 != 0;
+        let want_uav = self.s.m.i32(if uav { VIEW_STRIDE_UAV } else { 0 });
+        // Texture slots (including normalized-format tags in bits 29-31) hold
+        // zero in `VIEW_BUFFER_STRIDE_MASK`; buffer slots must also match
+        // `VIEW_STRIDE_UAV`.
+        let bytes = self.s.m.bin(c, Bin::And, stride, stride_mask);
+        let no_stride = self.s.m.cmp(c, pred::EQ, bytes, zero);
+        let kind = self.s.m.bin(c, Bin::And, stride, uav_bit);
+        let wrong_kind = self.s.m.cmp(c, pred::NE, kind, want_uav);
+        let none = self.s.m.bin(c, Bin::Or, no_stride, wrong_kind);
         // The null unordered access view sits just below the null SRV.
-        let null = super::NULL_BUFFER_VIEW - u32::from(props.0 & 0x1000 != 0);
+        let null = super::NULL_BUFFER_VIEW - u32::from(uav);
         let null = self.s.m.i32(null);
         self.s.m.select(c, none, null, index)
     }
