@@ -26,7 +26,7 @@ Play.
 > **25 November 2026 — Scarlight is now a Steam compatibility tool.** Until today it was a program you
 > started by hand; from today it is one install, one entry in Steam's Compatibility list, and Play.
 > The code is the same code; the development setup of the previous line is preserved on branch
-> `legacy/amd-hub`. Why, and what moved where: [ANNOUNCEMENT.md](https://github.com/pablogonz12/Scarlight/blob/docs/announcement-steam/ANNOUNCEMENT.md).
+> `legacy/amd-hub`. Why, and what moved where: [ANNOUNCEMENT.md](ANNOUNCEMENT.md).
 
 ## What it is
 
@@ -84,7 +84,7 @@ a few frames per second. One game has been tried, on one graphics card.
 |---|---|
 | Starting the game, menus, sound, controller | Works; menus at 30 fps |
 | The game's world | Shows, but only partly: lit and textured in places, much of the scene dark |
-| Speed | **1.5–3 fps** in the fixed scene we measure |
+| Speed | **0.1–3 fps**: 1.5–3 in the fixed scene we measure, down to 0.1 in busy scenes while the game's copies and textures queue up |
 | Shaders | **751 / 751** of the game's world shaders translate; 749 / 751 build a real pipeline on the driver |
 | Time to the world | 133–218 s |
 | Stability | Some builds hang at start or when the world loads |
@@ -106,7 +106,7 @@ are about fit, not quality.
 |---|---|---|
 | Target platform | Linux, through Steam | Windows 10/11 x64; no Linux target documented |
 | How a game is started | Picked in Steam's Compatibility list, then Play; Steam launches it | The project's own program on Windows; on Linux you would set up a Wine prefix by hand |
-| What you install | A release tarball into `compatibilitytools.d`, or one `install.sh`, plus a Proton you already have | Build from source with Rust and Microsoft's toolchain/SDK, then supply the D3D12 and DXC files yourself |
+| What you install | A release tarball into `compatibilitytools.d`, or one `install.sh`, plus a Proton you already have | Build from source with the project's toolchain on Windows, then supply the D3D12 and DXC files yourself |
 | Graphics driver focus | Built and tuned for Mesa's open Vulkan drivers (RADV, ANV, NVK) | Any Direct3D 12 driver with shader model 6.6 (mesh shaders for the world) |
 | Shader route | The console's RDNA2 shaders are recompiled to DXIL today, then drawn through vkd3d-proton and Vulkan; direct SPIR-V is in progress | The console's RDNA2 shaders are recompiled to DXIL and drawn through Direct3D 12 |
 | Linux test coverage | One game on one card: RX 9070 XT, Mesa 26.3.1 RADV | None documented; their READMEs require Windows |
