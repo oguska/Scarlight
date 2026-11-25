@@ -211,7 +211,7 @@ extern "system" fn estimate_download(
 
 // shortcut: accepted but nothing is removed (the package folder is the
 // user's), so the chunks stay ready; the title's one call site
-// (title+0x293b4b0, its chunk manager) would then see them still installed.
+// (its chunk manager) would then see them still installed.
 extern "system" fn uninstall_chunks(
     _: This,
     id: *const c_char,
@@ -256,7 +256,7 @@ extern "system" fn mount_result(
 
 /// Titles enumerate content packages (kind 1); there are none.
 // shortcut: the game kind (0) also lists nothing, not this installation;
-// The title enumerates only content (kind 1, title+0x2937bf0).
+// The title enumerates only content (kind 1).
 extern "system" fn enumerate(
     _: This,
     kind: u32,

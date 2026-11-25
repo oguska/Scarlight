@@ -1,6 +1,6 @@
 [package]
 name = "victory-game"
-description = "Everything specific to the title: its containers, build identities, patches."
+description = "Reading the console's title formats: shader containers and build layouts."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

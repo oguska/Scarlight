@@ -318,17 +318,47 @@ impl Shader {
     }
 }
 
+/// The shaders to skip: the environment variable if it names any, else what
+/// the title profile lists (a title's shader hash is game-derived data and
+/// never ships with VIctory).
+#[cfg(all(windows, feature = "diagnostics"))]
+fn skip_hashes(from_env: Option<&str>, profile: Option<&victory_core::Profile>) -> Vec<String> {
+    match from_env.map(str::trim).filter(|v| !v.is_empty()) {
+        Some(value) => parse_skip_hashes(value),
+        None => match profile {
+            Some(profile) => parse_skip_hashes(&profile.skip.shaders.join(",")),
+            None => Vec::new(),
+        },
+    }
+}
+
+/// The stages whose 64-lane programs to skip, by the rule of
+/// [`skip_hashes`].
+#[cfg(all(windows, feature = "diagnostics"))]
+fn skip_stages(
+    from_env: Option<&str>,
+    profile: Option<&victory_core::Profile>,
+) -> Vec<&'static str> {
+    match from_env.map(str::trim).filter(|v| !v.is_empty()) {
+        Some(value) => parse_skip_stages(value),
+        None => match profile {
+            Some(profile) => parse_skip_stages(&profile.skip.stages.join(",")),
+            None => Vec::new(),
+        },
+    }
+}
+
 #[cfg(all(windows, feature = "diagnostics"))]
 fn skipped_shader(p: &Pipeline) -> Option<&str> {
     static HASHES: OnceLock<Vec<String>> = OnceLock::new();
     static WAVE64: OnceLock<Vec<&'static str>> = OnceLock::new();
     let hashes = HASHES.get_or_init(|| {
-        let value = std::env::var("VICTORY_SKIP_PIPELINES").unwrap_or_default();
-        parse_skip_hashes(&value)
+        let value = std::env::var("VICTORY_SKIP_PIPELINES").ok();
+        skip_hashes(value.as_deref(), victory_core::profile::current())
     });
     let wave64 = WAVE64.get_or_init(|| {
-        let value = std::env::var("VICTORY_SKIP_WAVE64").unwrap_or_default();
-        parse_skip_stages(&value)
+        let value = std::env::var("VICTORY_SKIP_WAVE64").ok();
+        skip_stages(value.as_deref(), victory_core::profile::current())
     });
     if hashes.is_empty() && wave64.is_empty() {
         return None;
@@ -606,6 +636,30 @@ mod tests {
         );
         assert_eq!(super::parse_skip_stages("hull,pixel"), ["pixel"]);
         assert!(super::parse_skip_stages("").is_empty());
+    }
+
+    #[cfg(all(windows, feature = "diagnostics"))]
+    #[test]
+    fn skip_lists_come_from_the_environment_before_the_profile() {
+        let profile = victory_core::Profile {
+            skip: victory_core::profile::Skip {
+                shaders: vec!["0011223344556677".to_owned()],
+                stages: vec!["mesh".to_owned()],
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            super::skip_hashes(None, Some(&profile)),
+            ["0011223344556677"]
+        );
+        assert_eq!(super::skip_stages(None, Some(&profile)), ["mesh"]);
+        assert_eq!(
+            super::skip_hashes(Some(" 0123456789ABCDEF "), Some(&profile)),
+            ["0123456789abcdef"]
+        );
+        assert!(super::skip_stages(Some("hull"), Some(&profile)).is_empty());
+        assert!(super::skip_hashes(None, None).is_empty());
+        assert!(super::skip_hashes(Some("  "), None).is_empty());
     }
 
     #[cfg(all(windows, feature = "diagnostics"))]
