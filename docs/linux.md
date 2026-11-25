@@ -84,8 +84,12 @@ title profile: 2 hooks applied
 or, with nothing found (the normal case):
 
 ```
-title profile: none matched (image 0123456789ab) [searched %APPDATA%\victory\titles]
+title profile: none matched
 ```
+
+The launch log names no image hash, because logs get pasted into reports and hashes of game files
+do not belong there. To find the hash for a profile, run `victory title-id <exe>` locally; it also
+says whether a profile already matches.
 
 A profile to copy, with every value made up — replace it with your own build's:
 

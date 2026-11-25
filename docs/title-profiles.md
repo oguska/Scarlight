@@ -26,8 +26,12 @@ short hash of the image and the directories searched:
 ```
 title profile: Z:\home\you\.config\victory\titles\build.toml matched, 2 hooks
 title profile: 2 hooks applied
-title profile: none matched (image 0123456789ab) [searched C:\users\you\AppData\Roaming\victory\titles]
+title profile: none matched
 ```
+
+The log never carries the image hash (logs are pasted into issues, and
+`docs/asset-policy.md` keeps hashes of game files out of them); `RUST_LOG=debug` shows it, and
+`victory title-id <exe>` prints it on request together with the profile that matches.
 
 **A profile is user data, never repository data.** It may name hashes of the title's files,
 per-build offsets and shader hashes — all of which `docs/asset-policy.md` keeps out of the
@@ -51,8 +55,9 @@ shaders = ["<16 hex digits>"]       # skip a pipeline containing one of these sh
 stages  = ["mesh", "compute"]       # skip 64-lane programs of these stages
 ```
 
-Every value above is made up. The launch line prints `build unknown (<hash>)` when no profile
-matches, so the hash to paste is the one from a run without a profile.
+Every value above is made up. To get the hash for `build`, run `victory title-id <exe>`: it prints
+the BLAKE3, whether a profile already matches it, and the directories searched. Keep the hash in
+your own notes, not in an issue.
 
 A hook is only applied when `expect` matches exactly, so a profile that names the wrong
 build changes nothing. Hooks need `VICTORY_HOOKS=1` (formerly `VICTORY_NO_WATCHDOG=1`,

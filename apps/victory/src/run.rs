@@ -28,28 +28,25 @@ pub fn run(
     let profile = cfg.title_profile(&hash);
     match &profile {
         Some(found) => {
-            let file = found.file().map_or_else(
-                || "<inline>".to_owned(),
-                |path| path.display().to_string(),
-            );
+            let file = found
+                .file()
+                .map_or_else(|| "<inline>".to_owned(), |path| path.display().to_string());
             println!("build          {} ({hash})", found.label());
-            tracing::info!(
-                "title profile: {file} matched, {} hooks",
-                found.hooks.len()
-            );
+            tracing::info!("title profile: {file} matched, {} hooks", found.hooks.len());
+            tracing::debug!("title profile: image {hash}");
         }
         None => {
             println!("build          unknown ({hash})");
+            // No image hash in the info line: users paste logs into issues,
+            // and the asset policy keeps hashes of game files out of them.
+            // `victory title-id <exe>` prints it on request.
+            tracing::info!("title profile: none matched");
             let dirs: Vec<String> = cfg
                 .profile_dirs
                 .iter()
                 .map(|dir| dir.display().to_string())
                 .collect();
-            tracing::info!(
-                "title profile: none matched (image {}) [searched {}]",
-                &hash.as_str()[..12.min(hash.len())],
-                dirs.join(", ")
-            );
+            tracing::debug!("title profile: image {hash}, searched {}", dirs.join(", "));
         }
     }
     victory_core::profile::set_current(profile);

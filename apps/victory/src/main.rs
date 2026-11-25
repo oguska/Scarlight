@@ -11,7 +11,7 @@ mod translate;
 
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
@@ -111,6 +111,12 @@ enum Command {
         #[arg(last = true)]
         title_args: Vec<String>,
     },
+    /// Print the identity the layer uses to pick a title profile (BLAKE3),
+    /// and whether a profile matches it. Prints only numbers of this build.
+    TitleId {
+        /// The title's executable.
+        exe: PathBuf,
+    },
     /// Show the resolved configuration and check it.
     Config,
 }
@@ -125,6 +131,34 @@ enum Unimplemented {
 enum Console {
     SeriesX,
     SeriesS,
+}
+
+/// `victory title-id <exe>`: the BLAKE3 a profile matches, and the profile
+/// that matches it, if any. Run locally; do not paste the hash into a report.
+fn title_id(exe: &std::path::Path) -> Result<()> {
+    let data = std::fs::read(exe).with_context(|| format!("reading {}", exe.display()))?;
+    let hash = blake3::hash(&data);
+    let cfg = victory_core::Config::load()?;
+    println!("image          {}", exe.display());
+    println!("blake3         {hash}");
+    match cfg.title_profile(&hash.to_hex()) {
+        Some(profile) => println!(
+            "profile        {} ({} hooks)",
+            profile
+                .file()
+                .map_or_else(|| "<inline>".to_owned(), |p| p.display().to_string()),
+            profile.hooks.len()
+        ),
+        None => {
+            let dirs: Vec<String> = cfg
+                .profile_dirs
+                .iter()
+                .map(|dir| dir.display().to_string())
+                .collect();
+            println!("profile        none (searched {})", dirs.join(", "));
+        }
+    }
+    Ok(())
 }
 
 fn main() -> Result<()> {
@@ -168,6 +202,7 @@ fn main() -> Result<()> {
             console,
             title_args: _,
         } => run::run(&exe, unimplemented, strict, execute, console),
+        Command::TitleId { exe } => title_id(&exe),
         Command::Config => show_config(),
     }
 }
