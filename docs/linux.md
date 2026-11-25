@@ -86,6 +86,6 @@ For more diagnostics, build on Linux with:
 cargo xwin build --profile diag -p victory --features diagnostics --target x86_64-pc-windows-msvc
 ```
 
-Then point `EXE` in `play.sh` at `target/x86_64-pc-windows-msvc/diag/victory.exe`, with the same
+Then point `EXE` in `play.sh` at the absolute path `$HOME/src/Scarlight/target/x86_64-pc-windows-msvc/diag/victory.exe`, with the same
 [files next to it](#3-files-next-to-victoryexe). The switches are listed in
 [AMD-LINUX.md](../AMD-LINUX.md#diagnostics).
