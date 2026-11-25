@@ -12,9 +12,16 @@ Each step is cheaper than the one below it, and a change stops at the first step
 sets, warnings as errors.
 
 **2. Offline shader translation.** The test title's world shader set — **751 programs** — is translated
-and validated without the title, in about **21 s** of CPU for the 278 that compile on this machine.
-Two numbers come out of this step: how many programs translate, and how many produce valid
-intermediate code.
+to DXIL and checked with the DXIL validator without the title, in about **21 s** of CPU for the 278
+that compile on this machine. Two numbers come out of this step: how many programs translate, and
+how many produce valid intermediate code.
+
+This step says nothing about a Mesa driver: it creates no pipeline on any GPU, so an ANV- or
+RADV-specific compile failure cannot appear here. That check is separate: the world set is compiled
+into pipelines on the target Mesa driver (RADV today, ANV planned) through vkd3d-proton, and the
+refused or slow ones are reported with their keys and timings. The per-family matrix is listed as
+planned work in [ROADMAP.md](ROADMAP.md); until it runs, a driver-specific failure shows up in
+step 4, as a stall or a missing draw.
 
 **3. Per-program output diff.** A change to the translator is diffed program by program against the
 previous build. The diff lists every program whose output changed; an unexplained change fails the
@@ -56,7 +63,8 @@ and fixed there, instead of being worked around forever.
 A report is numbers and text, no screenshots, game files or hashes of game data
 ([asset policy](asset-policy.md)). Send:
 
-- **GPU**, and the **Vulkan driver** (`radv` or `anv`) from `vulkaninfo --summary`;
+- **GPU**, and the device section of `vulkaninfo --summary`: `driverName` (`radv`,
+  `Intel open-source Mesa driver` for ANV, `nvk`), `driverVersion` and `apiVersion`;
 - **Mesa version** and where it came from: distribution package, `mesa-git`, a local build;
 - **kernel** (`uname -r`), **distribution** and session (Wayland or X11);
 - **Proton build** and how you call it, plus your **vkd3d-proton** version and how it is selected;

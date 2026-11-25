@@ -18,8 +18,8 @@ behaviour without a major version bump.
   fixed test scene in current builds, **up to 3.0 fps** in one earlier build.
 - Offline shader translation: **751 of 751** world programs translate.
 - Diagnostics build with per-frame statistics on copies, read-back, memory watches and pipelines.
-- Switches for the title's watchdog, the per-frame pipeline wait, depth and stencil twins, and
-  experimental async write-back.
+- Switches for the title's watchdog, logging, GPU timing and frame capture, plus experimental async
+  write-back.
 - Documentation: Linux setup, architecture, testing method, hardware status and roadmap in `docs/`.
 
 ### Known limitations
