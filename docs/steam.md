@@ -36,7 +36,10 @@ the host instead; nothing else changes.
    Flatpak Steam: `~/.var/app/com.valvesoftware.Steam/data/Steam/compatibilitytools.d/`.
 3. Open `Scarlight/scarlight.conf` and set `PROTON` to a Proton you have installed (the folder name
    under `compatibilitytools.d/`, or a full path). That is the only setting you must touch.
-4. Restart Steam.
+4. **If Scarlight is already installed**, extracting a new release also replaces `scarlight.conf`
+   with the one from the archive. Keep a copy of your `PROTON=`/`D3DCOMPILER=` lines and put them
+   back, or install with `tools/steam-compat/install.sh`, which never overwrites an existing conf.
+5. Restart Steam.
 
 A ProtonUp-Qt-style installer that extracts a tarball into `compatibilitytools.d/` produces the same
 layout, so the release works there too.
@@ -80,9 +83,20 @@ still starts. If you have a licensed copy, `install.sh --d3dcompiler PATH` picks
 in `~/.cache/winetricks/d3dcompiler_47/` and in existing game prefixes), or point `D3DCOMPILER` in
 `scarlight.conf` at it later.
 
+### DXC, which a release does not carry
+
+Scarlight loads `dxil.dll` and `dxcompiler.dll` (the shader compiler) at runtime. Microsoft's terms for
+those binaries limit them to use on Windows, so a release does not pass them on. It is one step: get
+them from [DirectXShaderCompiler's releases](https://github.com/microsoft/DirectXShaderCompiler/releases)
+(the zip's `bin/x64` folder) and put both files in `compatibilitytools.d/Scarlight/files/`. Without
+them a title that needs shaders compiled at runtime stops early, and `scarlight.log` says which file
+it could not load.
+
 ## 2. Pick it in Steam
 
-*Library → right-click the title → Properties → Compatibility →* tick **Force the use of a specific
+If the title is not in your library yet, add its executable first: *Games → Add a Non-Steam Game to My
+Library → Browse…*, and pick it. Either way, then: *Library → right-click the title → Properties →
+Compatibility →* tick **Force the use of a specific
 Steam Play compatibility tool**, then choose **Scarlight (Xbox Series)**. Press Play.
 
 Each game gets its own Wine prefix and its own Mesa shader cache, both under Steam's
@@ -102,7 +116,7 @@ then press Play again; changes apply on the next launch. An empty value means "t
 | `PROFILE_DIR` | `~/.config/victory/titles` | where the title profiles are read from (`~` is expanded) |
 | `MESA_CACHE_MAX_SIZE` | `16G` | cap for the per-game Mesa shader cache |
 | `VKD3D_CONFIG` | `ignore_shared_fence` | options handed to vkd3d-proton |
-| `EXTRA_ENV` | empty | extra environment for the run, space separated, e.g. `VICTORY_LOG=debug RUST_LOG=info` |
+| `EXTRA_ENV` | empty | extra environment for the run, space separated; keep it quoted, e.g. `EXTRA_ENV="VICTORY_LOG=debug RUST_LOG=info"` (the conf is read as shell) |
 
 Environment variables set on the Steam launch (`VAR=1 %command%` in Launch Options) also reach the
 tool and win over the conf for `VICTORY_LOG`, `WINEDEBUG` and `SCARLIGHT_DRY_RUN`.

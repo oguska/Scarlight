@@ -67,8 +67,10 @@ if [ "$UNINSTALL" = 1 ]; then
   else
     echo "Nothing to remove at $T."
   fi
-  echo "Your game's prefix (compatibilitytools.d/../compatdata/<id>/), its Mesa shader cache and"
-  echo "the scarlight.log in it were left alone: delete that game's compatdata folder to reclaim them."
+  echo "Your game's prefix (steamapps/compatdata/<id>/), its Mesa shader cache and the"
+  echo "scarlight.log in it were left alone."
+  echo "A game's saved games can live in that prefix: back them up (or check Steam Cloud)"
+  echo "before you delete compatdata/<id>/ to reclaim the space."
   echo "In Steam, the game's Compatibility setting falls back to its previous tool once Steam restarts."
   exit 0
 fi
@@ -187,7 +189,8 @@ MESA_CACHE_MAX_SIZE=16G
 # vkd3d-proton options.
 VKD3D_CONFIG=ignore_shared_fence
 
-# Extra environment for the run, space separated, e.g. VICTORY_LOG=debug
+# Extra environment for the run, space separated. Keep the quotes: the value is
+# read as one string. Example: EXTRA_ENV="VICTORY_LOG=debug RUST_LOG=info"
 EXTRA_ENV=
 CONF
 fi

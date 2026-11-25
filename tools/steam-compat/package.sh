@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 # package.sh: build the release tarball a ProtonUp-Qt-style installer can extract.
 #
-# Usage: tools/steam-compat/package.sh --vkd3d DIR --dxc DIR [options]
+# Usage: tools/steam-compat/package.sh --vkd3d DIR [options]
 #   --vkd3d DIR      folder with vkd3d-proton's d3d12.dll and d3d12core.dll (x64)
+#   --include-dxc    also pack DXC's dxil.dll and dxcompiler.dll (needs --dxc DIR).
+#                    Off by default: Microsoft's terms for those binaries limit them
+#                    to use on Windows, so a Linux release does not pass them on; the
+#                    user supplies their own copy (docs/steam.md).
 #   --dxc DIR        folder with DXC's dxil.dll and dxcompiler.dll (x64)
 #   --exe PATH       the built victory.exe
 #                    (default: target/x86_64-pc-windows-msvc/release/victory.exe)
@@ -17,30 +21,32 @@
 # Scarlight/, holding compatibilitytool.vdf, toolmanifest.vdf, scarlight,
 # scarlight.conf, files/ and the licence texts of everything redistributed in it.
 #
-# What it packs is what may be redistributed: Scarlight itself (GPL-3.0),
-# vkd3d-proton (LGPL-2.1) and DXC (Apache-2.0 with LLVM exception, MIT) are all
-# free to pass on with their notices; Microsoft's d3dcompiler_47.dll is not, so
-# it is never packed - the entry script runs without it. dxgi/d3d11/d3d10core
-# come from the user's own Proton, and Wine comes from their Proton too.
+# What it packs is what may be redistributed: Scarlight itself (GPL-3.0) and
+# vkd3d-proton (LGPL-2.1). Microsoft's d3dcompiler_47.dll and, by default, DXC's
+# two DLLs are not packed - the entry script runs without either, and the user
+# drops in their own copy where a title needs one. dxgi/d3d11/d3d10core come from
+# the user's own Proton, and Wine comes from their Proton too.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 VKD3D=""
 DXC=""
+DXC_VERSION=""
+INCLUDE_DXC=0
 EXE="$ROOT/target/x86_64-pc-windows-msvc/release/victory.exe"
 BUILDNAME="default"
 VERSION=""
 VKD3D_VERSION=""
-DXC_VERSION=""
 OUT="$ROOT/dist"
 
-usage() { sed -n '2,24p' "$0"; }
+usage() { sed -n '2,28p' "$0"; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --vkd3d) VKD3D="$2"; shift ;;
     --dxc) DXC="$2"; shift ;;
+    --include-dxc) INCLUDE_DXC=1 ;;
     --exe) EXE="$2"; shift ;;
     --build) BUILDNAME="$2"; shift ;;
     --version) VERSION="$2"; shift ;;
@@ -64,7 +70,9 @@ case "$BUILDNAME" in
     ;;
 esac
 [ -n "$VKD3D" ] || { echo "pass --vkd3d DIR (d3d12.dll, d3d12core.dll)" >&2; exit 1; }
-[ -n "$DXC" ] || { echo "pass --dxc DIR (dxil.dll, dxcompiler.dll)" >&2; exit 1; }
+if [ "$INCLUDE_DXC" = 1 ]; then
+  [ -n "$DXC" ] || { echo "--include-dxc needs --dxc DIR (dxil.dll, dxcompiler.dll)" >&2; exit 1; }
+fi
 [ -f "$EXE" ] || {
   echo "Scarlight build not found: $EXE" >&2
   echo "(cargo xwin build --release -p victory --target x86_64-pc-windows-msvc)" >&2
@@ -73,14 +81,17 @@ esac
 for f in d3d12.dll d3d12core.dll; do
   [ -f "$VKD3D/$f" ] || { echo "missing $VKD3D/$f" >&2; exit 1; }
 done
-for f in dxil.dll dxcompiler.dll; do
-  [ -f "$DXC/$f" ] || { echo "missing $DXC/$f" >&2; exit 1; }
-done
+if [ "$INCLUDE_DXC" = 1 ]; then
+  for f in dxil.dll dxcompiler.dll; do
+    [ -f "$DXC/$f" ] || { echo "missing $DXC/$f" >&2; exit 1; }
+  done
+fi
 
 if [ -z "$VERSION" ]; then
   # Release tags only: an unreleased checkout packs as 0.0.0, not as some
   # other line's tag.
-  VERSION="$(git -C "$ROOT" describe --tags --match 'v*' --abbrev=0 2>/dev/null || echo 0.0.0)"
+  # Only a tag on HEAD names a release; `--abbrev=0` would take an older one.
+  VERSION="$(git -C "$ROOT" describe --tags --match 'v*' --exact-match 2>/dev/null || echo 0.0.0)"
 fi
 VERSION="${VERSION#v}"
 
@@ -115,7 +126,10 @@ cat >"$STAGE/toolmanifest.vdf" <<'VDF'
 }
 VDF
 install -m 644 "$EXE" "$STAGE/files/victory-$BUILDNAME.exe"
-install -m 644 "$VKD3D/d3d12.dll" "$VKD3D/d3d12core.dll" "$DXC/dxil.dll" "$DXC/dxcompiler.dll" "$STAGE/files/"
+install -m 644 "$VKD3D/d3d12.dll" "$VKD3D/d3d12core.dll" "$STAGE/files/"
+if [ "$INCLUDE_DXC" = 1 ]; then
+  install -m 644 "$DXC/dxil.dll" "$DXC/dxcompiler.dll" "$STAGE/files/"
+fi
 
 # The conf a new install starts from: every option documented, Proton left for
 # the user (or the installer) to fill in.
@@ -143,7 +157,8 @@ MESA_CACHE_MAX_SIZE=16G
 # vkd3d-proton options.
 VKD3D_CONFIG=ignore_shared_fence
 
-# Extra environment for the run, space separated, e.g. VICTORY_LOG=debug
+# Extra environment for the run, space separated. Keep the quotes: the value is
+# read as one string. Example: EXTRA_ENV="VICTORY_LOG=debug RUST_LOG=info"
 EXTRA_ENV=
 CONF
 # The packaged build name, so BUILD and files/victory-<BUILD>.exe always agree.
@@ -151,10 +166,30 @@ sed -i "s/__BUILD__/$BUILDNAME/" "$STAGE/scarlight.conf"
 
 cp "$ROOT/LICENSE" "$STAGE/LICENSE"
 cp "$HERE/licenses/LGPL-2.1.txt" "$HERE/licenses/vkd3d-proton-LGPL-2.1.txt" \
-  "$HERE/licenses/DXC-LICENSE-MS.txt" "$HERE/licenses/DXC-LICENCE-MIT.txt" \
-  "$HERE/licenses/DXC-LICENSE-LLVM.txt" "$HERE/licenses/DXC-CLANG-LICENSE-Apache-2.0-LLVM.txt" \
   "$STAGE/files/licenses/"
+if [ "$INCLUDE_DXC" = 1 ]; then
+  cp "$HERE/licenses/DXC-LICENSE-MS.txt" "$HERE/licenses/DXC-LICENCE-MIT.txt" \
+    "$HERE/licenses/DXC-LICENSE-LLVM.txt" "$HERE/licenses/DXC-CLANG-LICENSE-Apache-2.0-LLVM.txt" \
+    "$STAGE/files/licenses/"
+fi
 install -m 644 "$HERE/licenses/README.md" "$STAGE/files/licenses/README.md"
+
+if [ "$INCLUDE_DXC" = 1 ]; then
+  DXC_NOTE="DXC ${DXC_VERSION:-unknown}
+  files/dxil.dll, files/dxcompiler.dll, unmodified release binaries from
+  https://github.com/microsoft/DirectXShaderCompiler/releases/tag/${DXC_VERSION:-unknown},
+  with their notices (DXC-LICENSE-MS.txt, DXC-LICENCE-MIT.txt, DXC-LICENSE-LLVM.txt,
+  DXC-CLANG-LICENSE-Apache-2.0-LLVM.txt) in this folder. Not packed by a release:
+  the packager asked for them."
+else
+  DXC_NOTE="DXC: not included.
+  Scarlight loads dxil.dll and dxcompiler.dll at runtime when a title needs them.
+  Microsoft's terms for those binaries limit them to use on Windows, so a Linux
+  release does not pass them on: take them from
+  https://github.com/microsoft/DirectXShaderCompiler/releases and put both files in
+  Scarlight/files/ (see docs/steam.md). It is the same one-step arrangement as
+  d3dcompiler_47.dll below."
+fi
 
 # Which binaries these are, where they came from, and where their source is: the
 # LGPL asks for the corresponding source and this is the written offer that goes
@@ -165,16 +200,13 @@ Scarlight $VERSION
 
 vkd3d-proton ${VKD3D_VERSION:-unknown}
   files/d3d12.dll, files/d3d12core.dll, unmodified release binaries, LGPL-2.1-or-later.
-  Source for that exact version: https://github.com/HansKristian-Work/vkd3d-proton/releases/tag/${VKD3D_VERSION:-unknown}
-  (the release of this tarball also carries the matching source archive). If it is
+  Corresponding source for that exact version: the source archive of that tag,
+  https://github.com/HansKristian-Work/vkd3d-proton/archive/refs/tags/${VKD3D_VERSION:-unknown}.tar.gz,
+  which this release also attaches as vkd3d-proton-<tag>-source.tar.gz. If it is
   missing, write to the project's issue tracker and we will send it; the offer is
   good for three years after the release date.
 
-DXC ${DXC_VERSION:-unknown}
-  files/dxil.dll, files/dxcompiler.dll, unmodified release binaries from
-  https://github.com/microsoft/DirectXShaderCompiler/releases/tag/${DXC_VERSION:-unknown}.
-  Their notices are the ones in this folder; they are optional at runtime, and you
-  may delete the two DLLs and use your own copy instead.
+${DXC_NOTE}
 
 Microsoft d3dcompiler_47.dll is not included and not required.
 VERS

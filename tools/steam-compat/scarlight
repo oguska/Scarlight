@@ -94,24 +94,55 @@ fi
 # DXC) win over anything else on the search path.
 RUN="$WINEPREFIX/drive_c/scarlight"
 mkdir -p "$RUN"
-for f in "$HERE"/files/*.dll; do
-  [ -e "$f" ] || continue
-  cmp -s "$f" "$RUN/$(basename "$f")" || cp "$f" "$RUN/"
-done
 EXE="$HERE/files/victory-$BUILD.exe"
 if [ ! -f "$EXE" ]; then
   log "no build at $EXE (set BUILD in scarlight.conf)"
   exit 1
 fi
-cmp -s "$EXE" "$RUN/victory.exe" || cp "$EXE" "$RUN/victory.exe"
+# A failed copy must not leave the previous build or a half set of DLLs behind
+# and run it as if it were the selected one.
+stage() { # stage SRC DEST
+  cmp -s "$1" "$2" && return 0
+  cp -f "$1" "$2" || {
+    log "cannot stage $(basename "$2") from $1"
+    exit 1
+  }
+}
+stage "$EXE" "$RUN/victory.exe"
+for f in "$HERE"/files/*.dll; do
+  [ -e "$f" ] || continue
+  base="$(basename "$f")"
+  # d3dcompiler_47 is handled below: it is optional, and the conf decides.
+  [ "$base" = d3dcompiler_47.dll ] && continue
+  stage "$f" "$RUN/$base"
+done
+
+# The Proton we run on has its own DXVK DXGI/D3D11 DLLs; a tarball install does
+# not carry them, so take them from there. Same files install.sh copies.
+DXVK="$PDIR/files/lib/wine/dxvk/x86_64-windows"
+for f in dxgi.dll d3d11.dll d3d10core.dll; do
+  if [ -f "$DXVK/$f" ]; then stage "$DXVK/$f" "$RUN/$f"; fi
+done
 
 # Microsoft's d3dcompiler_47 is optional: it is not redistributable, so it is
 # never shipped. If you have one and are licensed to use it, point D3DCOMPILER
 # at it (or install it in the prefix with winetricks) and it is used; without
 # it Wine's built-in compiler is used instead and most titles still start.
-if [ -n "$D3DCOMPILER" ] && [ -f "$D3DCOMPILER" ]; then
-  cmp -s "$D3DCOMPILER" "$RUN/d3dcompiler_47.dll" ||
-    cp "$D3DCOMPILER" "$RUN/d3dcompiler_47.dll"
+#
+# A copy this script put there is marked, so clearing D3DCOMPILER actually goes
+# back to Wine's built-in compiler instead of leaving the old file behind. A
+# copy you put there yourself is not ours to delete and stays.
+MARK="$RUN/.d3dcompiler_47.by-scarlight"
+if [ -n "$D3DCOMPILER" ]; then
+  if [ -f "$D3DCOMPILER" ]; then
+    stage "$D3DCOMPILER" "$RUN/d3dcompiler_47.dll"
+    : > "$MARK"
+  else
+    log "D3DCOMPILER is set but there is no file at $D3DCOMPILER; using Wine's built-in compiler"
+  fi
+elif [ -f "$MARK" ]; then
+  rm -f -- "$RUN/d3dcompiler_47.dll" "$MARK"
+  log "D3DCOMPILER cleared: using Wine's built-in d3dcompiler"
 fi
 
 # Title profiles live outside the repo; Wine's HOME is the prefix, so reach the
@@ -138,12 +169,18 @@ export MESA_SHADER_CACHE_DIR="$DATA/mesa_cache"
 export MESA_SHADER_CACHE_MAX_SIZE="$MESA_CACHE_MAX_SIZE"
 for kv in $EXTRA_ENV; do export "${kv?}"; done
 
+# victory's own options come first; the title's arguments come after `--`, as
+# its CLI declares them (`#[arg(last = true)]`). Without the separator a title
+# argument such as `-windowed` would be parsed by victory and stop the launch,
+# and one called `--execute` could start the title during a dry run.
+TITLE_ARGS=()
+[ $# -gt 0 ] && TITLE_ARGS=(-- "$@")
 if [ -n "${SCARLIGHT_DRY_RUN:-}" ]; then
   log "start (dry run): $RUN/victory.exe run $WGAME (imports only, no --execute)"
-  "$WINE" "$RUN/victory.exe" run "$WGAME" "$@" >> "$LOG" 2>&1
+  "$WINE" "$RUN/victory.exe" run "$WGAME" "${TITLE_ARGS[@]}" >> "$LOG" 2>&1
 else
   log "start: $RUN/victory.exe run $WGAME --execute"
-  "$WINE" "$RUN/victory.exe" run "$WGAME" --execute "$@" >> "$LOG" 2>&1
+  "$WINE" "$RUN/victory.exe" run "$WGAME" --execute "${TITLE_ARGS[@]}" >> "$LOG" 2>&1
 fi
 rc=$?
 log "exit $rc"
