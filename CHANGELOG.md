@@ -20,7 +20,11 @@ behaviour without a major version bump.
 - Diagnostics build with per-frame statistics on copies, read-back, memory watches and pipelines.
 - Switches for the title's watchdog, logging, GPU timing and frame capture, plus experimental async
   write-back.
-- Documentation: Linux setup, architecture, testing method, hardware status and roadmap in `docs/`.
+- Documentation: Linux setup, architecture, testing method, hardware status and roadmap in `docs/`,
+  and a progress page whose numbers are generated from counted sets by `tools/progress/`.
+- The world shader set is compiled into real pipelines, not just translated: 749 of 751 on RADV here,
+  and through Mesa's noop shims for RDNA1-3, Vega and three Intel ANV families (see
+  [docs/hardware.md](docs/hardware.md#compile-check-per-family)).
 
 ### Known limitations
 

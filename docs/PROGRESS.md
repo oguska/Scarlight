@@ -99,18 +99,20 @@ Status words, not percentages: a feature is either shown working on this machine
 
 ## Mesa reach (compiled offline, not run)
 
-Whether the world shader set compiles for a GPU family's Mesa driver, without that GPU. Mesa's noop drm-shim fakes each chip, so RADV and ANV build every pipeline with that family's ISA and limits. Every AMD generation up to ours compiles the whole set except Vega, whose mesh-shader programs abort the driver; three Intel families compile all but one or two programs each. This is a compile result: only RDNA4 has actually been run.
+Whether the world shader set compiles for a GPU family's Mesa driver, without that GPU. Mesa's noop drm-shim fakes each chip, so RADV and ANV build every pipeline with that family's ISA and limits. Every AMD generation up to ours compiles the whole set except Vega, whose mesh-shader programs abort the driver. On Intel, Arc B builds the whole set, while Arc A and Xe-LPG each miss one program on the stub's own gap. This is a compile result: only RDNA4 has actually been run.
 
 | GPU families | Implemented | Verified | Progress | What is counted |
 |---|---|---|---|---|
 | AMD families whose whole world set compiles offline | 4 / 5 | — | ██████████░░ 80 % | 4 of 5 AMD families compile the whole set through the noop shim (Mesa driver, no GPU) |
-| Intel (ANV) families measured offline | 3 / 3 | — | ████████████ 100 % | 3 Intel families measured through Mesa's Intel noop shim, 1 of them with the whole set; there is no Intel card here to run on |
+| Arc B (Xe2): world programs that build pipelines offline | 751 / 751 | — | ████████████ 100 % | 751 of 751 build a pipeline through ANV and Mesa's Intel noop shim; none is refused; median 35 ms per program |
+| Arc A (DG2): world programs that build pipelines offline | 750 / 751 | — | ███████████░ 99 % | 750 of 751 build a pipeline; the one miss is the stub's gap (Unknown drm_i915_query_item), not a compiler error; median 78 ms per program |
+| Xe-LPG: world programs that build pipelines offline | 750 / 751 | — | ███████████░ 99 % | 750 of 751 build a pipeline; the one miss is the same stub gap; median 69 ms per program |
 | Vega (gfx900): world programs that compile offline | 669 / 751 | — | ███████████░ 89 % | 82 of 751 abort the driver: every mesh-shader program, and GFX9 has no mesh shader support in RADV |
 | Families with a run, not just a compile | 1 / 8 | — | ██░░░░░░░░░░ 12 % | only our card: every other family has compiled pipelines and no run |
 
-- Sources: `family-matrix-20261125-134909-2134785.tsv` (AMD, five families + the real card as control) and `family-matrix-20261125-140636-2410746.tsv` (Intel, three shim devices, 750-751 of 751 each); the shim column for our own family matches the real-GPU column exactly, so the harness does not change the answer.
+- Sources: `family-matrix-20261125-134909-2134785.tsv` (AMD, five families + the real card as control), `family-matrix-20261125-140636-2410746.tsv` (Intel: dg2, bmg, mtl) and `family-matrix-20261125-141256-2481125.tsv` (re-check of gfx1201 and acm: 751/751 and 750/751, the same result); the shim column for our own family matches the real-GPU column exactly, so the harness does not change the answer.
 - Compiled offline is not run. On RDNA1 all 82 mesh programs create, yet RADV does not advertise `VK_EXT_mesh_shader` there, so a program that uses mesh, barycentric or ray query at draw time needs the game's own fallback path.
-- Intel: ANV needs `libvulkan_intel.so` plus Mesa's Intel noop shim from the same build; both were built for this run. The one program that fails on dg2 and mtl is the same class, and nothing Intel has been run.
+- Intel: ANV needs `libvulkan_intel.so` plus Mesa's Intel noop shim from the same build; both were built for this run. The one program that fails on dg2 and mtl is the same class, and it stops on the stub's `drm_i915_query_item` gap, not on a shader the compiler refused. Nothing Intel has been run on a card.
 
 ## Performance
 

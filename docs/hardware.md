@@ -19,6 +19,32 @@ NVIDIA's NVK driver is a roadmap item, not an expected target yet: see [ROADMAP.
 Native Windows and NVIDIA's proprietary driver are not supported. The build is a Linux project: it
 runs through Wine and vkd3d-proton on Mesa, and no path here exists for a closed driver.
 
+## Compile check per family
+
+The same 751 world programs, compiled into real pipelines on each family's Mesa driver. Families we
+do not own go through Mesa's noop drm-shim, which reports a fake device of that family; RADV and ANV
+then build a real physical device with that family's ISA and limits. **Offline (stub)** means the
+answer comes from the compiler, on a device nobody has run.
+
+| Family | Driver | Pipelines created | Median per program | Status |
+|---|---|---|---|---|
+| RDNA4 (gfx1201), this card | RADV | 751 / 751 | 38 ms | **Ran** (test machine) |
+| RDNA4 (gfx1201), stub control | RADV | 751 / 751 | 30 ms | Offline (stub) |
+| RDNA3 (gfx1100) | RADV | 751 / 751 | 33 ms | Offline (stub) |
+| RDNA2 (gfx1030) | RADV | 751 / 751 | 33 ms | Offline (stub) |
+| RDNA1 (gfx1010) | RADV | 751 / 751 | 41 ms | Offline (stub) |
+| Vega (gfx900) | RADV | 669 / 751 | 80 ms | Offline (stub); 82 mesh programs abort the driver |
+| Arc B (bmg, Xe2) | ANV | 751 / 751 | 35 ms | Offline (stub) |
+| Arc A (dg2) | ANV | 750 / 751 | 78 ms | Offline (stub); one miss, the stub's query gap |
+| Xe-LPG (mtl) | ANV | 750 / 751 | 69 ms | Offline (stub); one miss, the same gap |
+
+A pass means the driver's compiler accepted every pipeline we asked for. It does not mean the program
+draws correctly, and it does not prove a card has the features at run time: on RDNA1 all 82 mesh
+programs create, yet RADV does not advertise `VK_EXT_mesh_shader` there. The one Intel miss on Arc A
+and Xe-LPG stops on the shim's own `drm_i915_query_item` gap, not on a shader the compiler refused.
+Only RDNA4 has actually been run, and every row above changes to Tested the day a report shows a run
+on it.
+
 ## What we need from a report
 
 A report only needs numbers and text: no screenshots, game files or hashes of game data

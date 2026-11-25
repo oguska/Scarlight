@@ -48,7 +48,7 @@ tried.
 | Boot, menus, audio, gamepad | Work; menus at 30 fps |
 | World, fixed test scene | Lit and textured. **3.0 fps** on tag `keep/best-fx-578d459c` (one run, Microsoft's `d3dcompiler_47` beside the exe); **1.45-1.7 fps** on nine builds of the current base (one run each) |
 | Time to the world | 133-218 s (three builds) |
-| Shader translation | **751 / 751** world programs of the test title translate offline |
+| Shaders | **751 / 751** world programs of the test title translate, and **749 / 751** build a real RADV pipeline |
 | Faces | **Some characters' faces still fail to render** (regressed again on 25 Nov, under investigation) |
 | Picture | Close-up character detail and walls missing in some builds; shadowed areas dark |
 | Stability | Some builds hang at boot or at world entry; async write-back is experimental |
@@ -69,7 +69,7 @@ each number means: [docs/PROGRESS.md](docs/PROGRESS.md).
 | Area | Progress | Detail | Where |
 |---|---|---|---|
 | System APIs (HLE) | ████████████ 100 % resolved (0 missing) | ██░░░░░░░░░░ 15 % own HLE | [detail](docs/PROGRESS.md#system-apis-hle) |
-| Shaders | ███████████░ 99 % | no pipeline validation yet | [detail](docs/PROGRESS.md#shaders) |
+| Shaders | ███████████░ 99 % | ███████████░ 99 % real RADV pipeline | [detail](docs/PROGRESS.md#shaders) |
 | GPU command stream | ███████████░ 92 % | ███████████░ 92 % verified | [detail](docs/PROGRESS.md#gpu-command-stream) |
 | Pipelines | ████████░░░░ 69 % | ███████████░ 99 % built offline | [detail](docs/PROGRESS.md#pipelines) |
 | Features | status words | 2 of 10 shown | [detail](docs/PROGRESS.md#features) |
@@ -77,11 +77,14 @@ each number means: [docs/PROGRESS.md](docs/PROGRESS.md).
 | Performance | █░░░░░░░░░░░ 5 % | █░░░░░░░░░░░ 5 % of 30 fps | [detail](docs/PROGRESS.md#performance) |
 
 Measured on 25 Nov 2026, build 5fca579b, RX 9070 XT (RDNA4) / Mesa 26.3.1 RADV. The gaps are the
-honest ones: 88 of 587 imports are our own HLE, whole-archive shaders have no validated pipeline
-column yet, and speed is a twentieth of the console's 30 fps. The world pipelines compile offline for
-4 of 5 AMD families through Mesa's shim (RDNA4, RDNA3, RDNA2, RDNA1; Vega 669/751, no mesh shaders)
-and for three Intel families (dg2, mtl, bmg: all but one or two programs); only RDNA4 has actually
-been run. Regenerate with `tools/progress/collect.sh` and `tools/progress/render.py`.
+honest ones: 88 of 587 imports are our own HLE, the whole-archive shaders have translation but no
+validated pipeline column yet, and speed is a twentieth of the console's 30 fps. The world set does
+more than translate, though: **749 of 751** build a real RADV pipeline, and through Mesa's noop
+drm-shims the same set compiles for every AMD generation up to ours (Vega 669/751, no mesh shaders)
+and on Intel ANV for Arc B **751/751**, Arc A 750/751 and Xe-LPG 750/751; the single Intel miss is
+the stub's own query gap, not a compiler error. Only RDNA4 has actually been run. Per-family table:
+[docs/hardware.md](docs/hardware.md#compile-check-per-family). Regenerate with `tools/progress/collect.sh`
+and `tools/progress/render.py`.
 
 ## Hardware
 
@@ -89,8 +92,11 @@ been run. Regenerate with `tools/progress/collect.sh` and `tools/progress/render
 |---|---|---|
 | **RX 9070 XT (RDNA4) · RADV**<br>Every number on this page comes from this one card | **RDNA1-3 (RX 5000-7000), Vega · RADV**<br>World pipelines compile offline for all four (Vega 669/751, no mesh); not yet run<br><br>**Arc A/B-series, Xe2 · ANV**<br>Not yet checked | **Older Intel, Polaris and older, AMD APUs**<br>Any Mesa older than ours<br>Not yet checked |
 
-Full table, what "Expected" means and how a card moves: [docs/hardware.md](docs/hardware.md). Native
-Windows and NVIDIA's proprietary driver are unsupported; NVK is a roadmap item, not a target yet.
+Full table, what "Expected" means and how a card moves: [docs/hardware.md](docs/hardware.md). The
+world set also compiles for every family in the two right-hand columns through Mesa's noop drm-shim,
+RADV and ANV alike; that result, per family, is the
+[compile check](docs/hardware.md#compile-check-per-family). Native Windows and NVIDIA's proprietary
+driver are unsupported; NVK is a roadmap item, not a target yet.
 
 ## Requirements
 
