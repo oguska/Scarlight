@@ -1612,13 +1612,15 @@ pub(crate) mod tests {
         title_memory_remapped(p, 16);
         assert!(guard(p, p + 16).is_none());
         assert_eq!(queried(), at + 5);
+        // Forget the block while it is still ours: after the unmap another
+        // test can claim the address and start its own baselines there.
+        title_memory_remapped(view, 2 * BLOCK);
         // SAFETY: our view.
         unsafe {
             UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS {
                 Value: view as *mut _,
             })
         };
-        title_memory_remapped(view, 2 * BLOCK);
     }
 
     /// Blocks of a placeholder between views are reported once, then not

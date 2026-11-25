@@ -919,13 +919,15 @@ fn unmap(physical: &mut Physical, base: usize, len: usize) {
         .chain(physical.views.range(base + 1..end).map(|(at, _)| *at))
         .collect();
     for at in hit {
-        let Some((size, slice)) = physical.views.remove(&at) else {
+        let Some((size, slice)) = physical
+            .views
+            .get(&at)
+            .map(|(size, slice)| (*size, slice.clone()))
+        else {
             continue;
         };
-        victory_gpu::title_memory_remapped(at, size);
-        note_aliases(at, size, &slice, false);
         // SAFETY: a view we mapped; it becomes a placeholder again.
-        unsafe {
+        let gone = unsafe {
             UnmapViewOfFile2(
                 GetCurrentProcess(),
                 MEMORY_MAPPED_VIEW_ADDRESS {
@@ -934,6 +936,15 @@ fn unmap(physical: &mut Physical, base: usize, len: usize) {
                 MEM_PRESERVE_PLACEHOLDER,
             )
         };
+        // A failed unmap leaves the view mapped: keep it tracked, and do
+        // not split it, or its bytes would answer twice.
+        if gone == 0 {
+            tracing::warn!("xmem: unmapping {size} bytes at {at:#x} failed");
+            continue;
+        }
+        physical.views.remove(&at);
+        victory_gpu::title_memory_remapped(at, size);
+        note_aliases(at, size, &slice, false);
         if at < base {
             map(physical, at, base - at, slice.clone());
         }
