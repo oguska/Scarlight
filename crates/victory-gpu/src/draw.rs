@@ -134,6 +134,13 @@ pub(crate) struct State {
     /// Root UAVs bound as one-view tables in this list: (host heap, title
     /// address) → dynamic slot.
     root_uav_slots: std::collections::HashMap<(usize, u64, u64), u32>,
+    /// `(host_heap_ptr, generation, forgotten_epoch)` last refreshed for
+    /// bindless heap reads in this list.
+    heap_refreshed: Option<(usize, u64, u64)>,
+    /// SRV resources in the bound view heap that may be transitioned between
+    /// draws (a copy leaves its destination in `COPY_DEST`) and need
+    /// `SHADER_RESOURCE` checks on every draw, not only on the sweep.
+    mutable_heap_srvs: Vec<usize>,
 }
 
 impl Drop for State {
@@ -535,8 +542,20 @@ impl State {
         }
         #[cfg(feature = "diagnostics")]
         crate::producers::set_reader(&p.name);
+        let uses_heap = p.stages.iter().any(|s| {
+            s.translated()
+                .used
+                .iter()
+                .any(|u| u.root == RootType::ResourceHeap)
+        });
+        if uses_heap {
+            self.refresh_heap(list, compute);
+        }
         for stage in &p.stages {
             let t = stage.translated();
+            for u in t.used.iter().filter(|u| u.root == RootType::ResourceHeap) {
+                self.heap_entry(list, u);
+            }
             self.table_failed = false;
             let made = self.tables(list, &t.used, compute);
             if self.table_failed {
@@ -967,6 +986,99 @@ impl State {
         if let Some(view) = host.mirror(index, handle, true) {
             host.refresh_slot(index, list);
             readable(list, u, &view);
+        }
+    }
+
+    fn heap_entry(&self, list: &HostList, u: &UsedResource) {
+        if self.heaps[0] == 0 {
+            return;
+        }
+        let heap = crate::descriptor::heap(self.heaps[0] as This);
+        let handle = heap.start + u64::from(u.table_offset_dwords) * 4;
+        let (Some(host), Some(index)) = (heap.host(), heap.index(handle)) else {
+            return;
+        };
+        if let Some(view) = host.mirror(index, handle, true) {
+            // An unaligned structured buffer is mirrored into its own upload
+            // resource; refresh that copy at submission like `table_entry`
+            // does, or title writes between now and submit are lost.
+            host.refresh_slot(index, list);
+            readable(list, u, &view);
+        }
+    }
+
+    /// Brings resources in the bound view heap up to date for bindless
+    /// (`ResourceDescriptorHeap[]`) reads. Runs the full sweep once per
+    /// heap generation per list, and keeps mutable SRVs in `SHADER_RESOURCE`.
+    fn refresh_heap(&mut self, list: &HostList, compute: bool) {
+        if self.heaps[0] == 0 {
+            return;
+        }
+        let heap = crate::descriptor::heap(self.heaps[0] as This);
+        let Some(host) = heap.host() else {
+            return;
+        };
+        let host_ptr = host.heap.as_raw() as usize;
+        let generation = host.generation();
+        let forgotten = crate::descriptor::forgotten_epoch();
+        if self.heap_refreshed != Some((host_ptr, generation, forgotten)) {
+            self.mutable_heap_srvs.clear();
+            for index in host.live_slots() {
+                let handle = heap.start + u64::from(index) * 32;
+                let Some(view) = host.mirror(index, handle, true) else {
+                    continue;
+                };
+                // The sweep is the only refresh for slots read through
+                // `ResourceDescriptorHeap[]` with no per-entry bind, so an
+                // unaligned copy needs its submission-time fill queued here
+                // too.
+                host.refresh_slot(index, list);
+                let placed = crate::descriptor::host::placed_texture(&view);
+                let v = placed.as_ref().unwrap_or(&view);
+                // Placed buffer views carry the shadow address themselves;
+                // `buffer_range` returns `None` for placed textures, so they
+                // still produce no shadow work.
+                if !matches!(
+                    v,
+                    View::Shader(..) | View::Unordered(..) | View::Placed(..)
+                ) {
+                    continue;
+                }
+                if let Some((address, len)) = crate::descriptor::host::buffer_range(v)
+                    && len > 0
+                    && let Some(shadow) = crate::shadow::find(address, len)
+                {
+                    shadow.refresh(list, address, len);
+                }
+                if let View::Shader(resource, _) = v
+                    && let Some(t) = crate::resource::host_resource(*resource as This)
+                {
+                    if crate::texture::title_written(t) {
+                        const SHADER_RESOURCE: u32 = 0x40 | 0x80;
+                        crate::texture::upload(list, *resource as This, t);
+                        crate::list::ensure_state(list, *resource as This, SHADER_RESOURCE);
+                    }
+                    // Title-written or not, a copy leaves its destination in
+                    // `COPY_DEST` (`list::copy_resource`) without restoring
+                    // the state, and the sweep is cached by heap generation,
+                    // which a copy does not change. Check the state on every
+                    // draw so a bindless read does not see `COPY_DEST`.
+                    self.mutable_heap_srvs.push(*resource);
+                }
+            }
+            self.mutable_heap_srvs.sort_unstable();
+            self.mutable_heap_srvs.dedup();
+            // The generation captured before the sweep, not one re-read after
+            // it: a title write that registers a slot mid-sweep then leaves a
+            // key mismatch, so the next draw sweeps again instead of trusting
+            // a half-refreshed heap.
+            self.heap_refreshed = Some((host_ptr, generation, forgotten));
+        }
+        const SHADER_RESOURCE: u32 = 0x40 | 0x80;
+        for &resource in &self.mutable_heap_srvs {
+            if compute || (!self.targets.contains(&resource) && self.depth != resource) {
+                crate::list::ensure_state(list, resource as This, SHADER_RESOURCE);
+            }
         }
     }
 
