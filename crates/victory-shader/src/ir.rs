@@ -153,7 +153,18 @@ pub fn build_bounded(
     vgprs: u16,
     m0_max: &HashMap<usize, u8>,
 ) -> Result<Program, ShaderError> {
-    let list = gfx10::decode(code)?;
+    build_decoded(code, gfx10::decode(code)?, wave64, vgprs, m0_max)
+}
+
+/// [`build_bounded`] of instructions [`gfx10::decode`] already gave for
+/// `code`.
+pub fn build_decoded(
+    code: &[u8],
+    list: Vec<gfx10::Instruction>,
+    wave64: bool,
+    vgprs: u16,
+    m0_max: &HashMap<usize, u8>,
+) -> Result<Program, ShaderError> {
     let lanes = 1 + u8::from(wave64);
     let isa = |offset, reason| ShaderError::Isa { offset, reason };
 

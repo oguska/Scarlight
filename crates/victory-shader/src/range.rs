@@ -38,24 +38,41 @@ pub fn build(
     wave64: bool,
     vgprs: u16,
 ) -> Result<(Program, Result<Structured, ShaderError>), ShaderError> {
-    let p = ir::build(code, wave64, vgprs)?;
-    let st = structure::structure(&p);
-    let mut assumed: HashMap<usize, u8> = p
-        .blocks
+    let list = crate::gfx10::decode(code)?;
+    // The moves, found in the code: the program with every move at its
+    // full range (and its structure) is built only if no bound is proven,
+    // not first (with a relative move, that made this nearly three times
+    // the work of a program without one).
+    let mut assumed: HashMap<usize, u8> = list
         .iter()
-        .flat_map(|b| &b.insts)
-        .filter(|i| relative(i))
-        .map(|i| (i.machine.offset, 0))
+        .filter(|i| i.name().is_some_and(relative_name))
+        .map(|i| (i.offset, 0))
         .collect();
-    if st.is_err() {
-        assumed.clear();
+    if assumed.is_empty() {
+        let p = ir::build_decoded(code, list, wave64, vgprs, &assumed)?;
+        let st = structure::structure(&p);
+        return Ok((p, st));
     }
     // Each round grows a bound or drops a move; few programs need more than two.
-    for _ in 0..8 {
+    for round in 0..8 {
         if assumed.is_empty() {
             break;
         }
-        let q = ir::build_bounded(code, wave64, vgprs, &assumed)?;
+        let q = ir::build_decoded(code, list.clone(), wave64, vgprs, &assumed)?;
+        if round == 0 {
+            // Only the moves the program reaches (which bounds do not change).
+            let reached: HashSet<usize> = q
+                .blocks
+                .iter()
+                .flat_map(|b| &b.insts)
+                .filter(|i| relative(i))
+                .map(|i| i.machine.offset)
+                .collect();
+            assumed.retain(|o, _| reached.contains(o));
+            if assumed.is_empty() {
+                break;
+            }
+        }
         let Ok(s) = structure::structure(&q) else {
             break;
         };
@@ -68,7 +85,7 @@ pub fn build(
             if proven == assumed {
                 return Ok((q, Ok(s)));
             }
-            let q = ir::build_bounded(code, wave64, vgprs, &proven)?;
+            let q = ir::build_decoded(code, list, wave64, vgprs, &proven)?;
             let s = structure::structure(&q);
             return Ok((q, s));
         }
@@ -77,12 +94,18 @@ pub fn build(
             .filter_map(|(&o, &m)| Some((o, u8::try_from(found[&o]).ok()?.max(m))))
             .collect();
     }
+    let p = ir::build_decoded(code, list, wave64, vgprs, &HashMap::new())?;
+    let st = structure::structure(&p);
     Ok((p, st))
 }
 
 fn relative(inst: &Inst) -> bool {
+    relative_name(inst.name())
+}
+
+fn relative_name(name: &str) -> bool {
     matches!(
-        inst.name(),
+        name,
         "v_movrels_b32" | "v_movreld_b32" | "v_movrelsd_b32" | "v_movrelsd_2_b32" | "v_swaprel_b32"
     )
 }
