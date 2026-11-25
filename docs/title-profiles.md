@@ -60,10 +60,16 @@ Every value above is made up. To get the hash for `build`, run `victory title-id
 the BLAKE3, whether a profile already matches it, and the directories searched. Keep the hash in
 your own notes, not in an issue.
 
-A hook is only applied when `new` is as long as `expect`, `rva..rva+len` lies inside the mapped
-image, and `expect` matches the bytes there exactly. Anything else is logged and skipped, so a
-wrong profile changes nothing and cannot crash the process. Hooks need `VICTORY_HOOKS=1` (formerly `VICTORY_NO_WATCHDOG=1`,
-still accepted) — patches are opt-in, never automatic.
+A hook is checked before anything is written: `new` must be as long as `expect`, `rva..rva+len` must
+lie inside the mapped image, the whole range must be committed readable memory, and `expect` must
+match the bytes there. Anything else is logged and skipped, and the code never touches memory that
+fails those checks. A hook that passes them is applied as written, so the profile's own bytes are
+still your decision. Hooks need `VICTORY_HOOKS=1` (formerly `VICTORY_NO_WATCHDOG=1`, still
+accepted) — patches are opt-in, never automatic.
+
+`[skip]` is read by the GPU layer's diagnostics build (it already excludes draws and dispatches for
+other reasons there). In a plain release build the lists are ignored, and `VICTORY_SKIP_PIPELINES`
+and `VICTORY_SKIP_WAVE64` are no-ops there too.
 
 ## What a profile cannot do
 

@@ -7,7 +7,10 @@
 //! profile for the mapped image lists hooks.
 
 use windows_sys::Win32::System::Diagnostics::Debug::FlushInstructionCache;
-use windows_sys::Win32::System::Memory::{PAGE_EXECUTE_READWRITE, VirtualProtect};
+use windows_sys::Win32::System::Memory::{
+    MEM_COMMIT, MEMORY_BASIC_INFORMATION, PAGE_EXECUTE_READWRITE, PAGE_GUARD, PAGE_NOACCESS,
+    VirtualProtect, VirtualQuery,
+};
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
 /// Environment variable that turns the profile's hooks on.
@@ -73,6 +76,85 @@ fn unusable(expect: &[u8], new: &[u8], rva: u64, size: usize) -> Option<&'static
     }
 }
 
+/// One run of the hook's range and the protection it had: a range can span
+/// pages with different protections (code read-execute next to read-only
+/// data), and each must be given back what it had.
+struct Region {
+    at: usize,
+    len: usize,
+    protect: u32,
+}
+
+/// Makes `at..at+len` writable, one memory region at a time, returning what
+/// each region's protection was, or `None` if any part of it is not committed
+/// readable memory (a hook must never touch a guard page or a free range).
+///
+/// # Safety
+/// `at` must be an address a query may be asked about.
+unsafe fn writable(at: usize, len: usize) -> Option<Vec<Region>> {
+    let mut regions: Vec<Region> = Vec::new();
+    let end = at.checked_add(len)?;
+    let mut start = at;
+    while start < end {
+        // SAFETY: the buffer is a full `MEMORY_BASIC_INFORMATION`.
+        let mut info: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: as above; `VirtualQuery` writes at most one struct.
+        let asked = unsafe {
+            VirtualQuery(
+                start as *const _,
+                &mut info,
+                std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+            )
+        };
+        if asked == 0 {
+            // SAFETY: the regions taken so far are ours to give back.
+            unsafe { restore(&regions) };
+            return None;
+        }
+        let base = info.BaseAddress as usize;
+        let region_end = base.saturating_add(info.RegionSize);
+        let stop = region_end.min(end);
+        if info.State != MEM_COMMIT || !readable(info.Protect) || stop <= start {
+            // SAFETY: the regions taken so far are ours to give back.
+            unsafe { restore(&regions) };
+            return None;
+        }
+        let mut old = 0;
+        // SAFETY: the bytes belong to this image and stay mapped.
+        if unsafe { VirtualProtect(start as _, stop - start, PAGE_EXECUTE_READWRITE, &mut old) }
+            == 0
+        {
+            // SAFETY: the regions taken so far are ours to give back.
+            unsafe { restore(&regions) };
+            return None;
+        }
+        regions.push(Region {
+            at: start,
+            len: stop - start,
+            protect: old,
+        });
+        start = stop;
+    }
+    Some(regions)
+}
+
+/// Whether a protection lets us read the bytes.
+fn readable(protect: u32) -> bool {
+    protect & 0xff != PAGE_NOACCESS && protect & PAGE_GUARD == 0
+}
+
+/// Gives each region back the protection it had.
+///
+/// # Safety
+/// The ranges must still be the ones [`writable`] changed.
+unsafe fn restore(regions: &[Region]) {
+    for region in regions {
+        let mut old = 0;
+        // SAFETY: this range was made writable by `writable`.
+        unsafe { VirtualProtect(region.at as _, region.len, region.protect, &mut old) };
+    }
+}
+
 /// Writes `new` over `expect` at `base + rva` if the bytes there are the
 /// ones the profile says they are.
 ///
@@ -80,23 +162,33 @@ fn unusable(expect: &[u8], new: &[u8], rva: u64, size: usize) -> Option<&'static
 /// See [`apply_profile`].
 unsafe fn apply(base: usize, rva: usize, expect: &[u8], new: &[u8], what: &str) -> bool {
     let at = (base + rva) as *mut u8;
-    // SAFETY: the offset is inside the mapped .text of this exact build.
+    // The hook may cross a page boundary, whose other side can be freed or
+    // guarded by the time we get here: ask before reading.
+    // SAFETY: the range was checked to lie inside the image; the query only
+    // reads the page tables.
+    let Some(regions) = (unsafe { writable(at as usize, expect.len()) }) else {
+        tracing::warn!(
+            what,
+            "hook skipped: its range is not committed readable memory"
+        );
+        return false;
+    };
+    // SAFETY: the range is committed, readable and now writable for its
+    // whole length.
     let now = unsafe { std::slice::from_raw_parts(at, expect.len()) };
     if now != expect {
+        // SAFETY: the regions are the ones `writable` changed.
+        unsafe { restore(&regions) };
         tracing::warn!(what, "hook skipped: the bytes are not the expected ones");
-        return false;
-    }
-    let mut old = 0;
-    // SAFETY: changing the protection of those bytes only, restored below.
-    if unsafe { VirtualProtect(at as _, new.len(), PAGE_EXECUTE_READWRITE, &mut old) } == 0 {
         return false;
     }
     // SAFETY: writable now; the bytes are the ones checked above.
     unsafe {
         std::ptr::copy_nonoverlapping(new.as_ptr(), at, new.len());
-        VirtualProtect(at as _, new.len(), old, &mut old);
         FlushInstructionCache(GetCurrentProcess(), at as _, new.len());
     }
+    // SAFETY: the regions are the ones `writable` changed.
+    unsafe { restore(&regions) };
     tracing::info!(what, "hook applied");
     true
 }
@@ -104,6 +196,98 @@ unsafe fn apply(base: usize, rva: usize, expect: &[u8], new: &[u8], what: &str) 
 #[cfg(test)]
 mod tests {
     use super::unusable;
+    use windows_sys::Win32::System::Memory::{
+        MEM_RELEASE, MEMORY_BASIC_INFORMATION, PAGE_EXECUTE_READ, PAGE_READONLY, PAGE_READWRITE,
+        VirtualFree, VirtualProtect, VirtualQuery,
+    };
+
+    /// The protection `*at` has now, one page into its region.
+    fn protection(at: usize) -> u32 {
+        // SAFETY: a caller-chosen address in this process.
+        unsafe {
+            let mut info: MEMORY_BASIC_INFORMATION = std::mem::zeroed();
+            let asked = VirtualQuery(
+                at as *const _,
+                &mut info,
+                std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+            );
+            assert_ne!(asked, 0, "VirtualQuery failed");
+            info.Protect
+        }
+    }
+
+    /// Two committed pages, `[0..page)` read-only and `[page..2page)` executable
+    /// read, filled with 0xAA.
+    struct Pages {
+        base: usize,
+    }
+
+    impl Pages {
+        fn new() -> Self {
+            use windows_sys::Win32::System::Memory::{MEM_COMMIT, MEM_RESERVE, VirtualAlloc};
+            // SAFETY: a fresh reservation of two pages, filled by us.
+            unsafe {
+                let base = VirtualAlloc(
+                    std::ptr::null(),
+                    2 * page(),
+                    MEM_COMMIT | MEM_RESERVE,
+                    PAGE_READWRITE,
+                ) as usize;
+                assert_ne!(base, 0, "VirtualAlloc failed");
+                std::ptr::write_bytes(base as *mut u8, 0xAA, 2 * page());
+                let mut old = 0;
+                assert_ne!(
+                    VirtualProtect(base as _, page(), PAGE_READONLY, &mut old),
+                    0
+                );
+                assert_ne!(
+                    VirtualProtect((base + page()) as _, page(), PAGE_EXECUTE_READ, &mut old),
+                    0
+                );
+                Self { base }
+            }
+        }
+    }
+
+    impl Drop for Pages {
+        fn drop(&mut self) {
+            // SAFETY: the reservation made in `new`.
+            unsafe { VirtualFree(self.base as *mut _, 0, MEM_RELEASE) };
+        }
+    }
+
+    /// x86-64 Windows pages are 4 KiB, which is what these tests need to put
+    /// a hook across a boundary.
+    fn page() -> usize {
+        4096
+    }
+
+    #[test]
+    fn a_hook_across_two_pages_gives_each_page_its_own_protection_back() {
+        let pages = Pages::new();
+        // Four bytes centred on the boundary: two in each page.
+        let rva = page() - 2;
+        // SAFETY: both pages are ours, readable, and the hook lies inside them.
+        let applied = unsafe { super::apply(pages.base, rva, &[0xAA; 4], &[0xBB; 4], "test") };
+        assert!(applied);
+        // SAFETY: the four bytes were just written inside our own pages.
+        let bytes = unsafe { std::slice::from_raw_parts((pages.base + rva) as *const u8, 4) };
+        assert_eq!(bytes, [0xBB; 4]);
+        assert_eq!(protection(pages.base), PAGE_READONLY);
+        assert_eq!(protection(pages.base + page()), PAGE_EXECUTE_READ);
+    }
+
+    #[test]
+    fn a_hook_whose_range_is_not_committed_is_skipped_not_faulted() {
+        let pages = Pages::new();
+        // One byte into the second page, four bytes long: the last two are
+        // past the reservation, an unmapped range.
+        let rva = 2 * page() - 1;
+        // SAFETY: the first page is ours; the rest is not touched, only queried.
+        let applied = unsafe { super::apply(pages.base, rva, &[0xAA; 4], &[0xBB; 4], "test") };
+        assert!(!applied);
+        assert_eq!(protection(pages.base), PAGE_READONLY);
+    }
 
     /// An image of 0x1000 bytes with a five-byte hook at 0x100.
     const SIZE: usize = 0x1000;
