@@ -267,6 +267,11 @@ fn back() -> std::sync::MutexGuard<'static, BTreeMap<usize, (u32, Arc<Done>)>> {
 /// blocks only; one an earlier job still holds is left to that job.
 pub(crate) fn back_begin(done: &Arc<Done>, at: usize, len: usize) -> Vec<usize> {
     use windows_sys::Win32::System::Memory::{PAGE_NOACCESS, VirtualProtect};
+    // A title access to a block protected below must find the handler: the
+    // hold can come before any `guard()`, and `writes()` takes the kernel's
+    // answer instead of guarding when `GetWriteWatch` succeeds. `install`
+    // is a `Once`, so this costs one atomic after the first call.
+    install();
     let (first, last) = (at / BLOCK, at.saturating_add(len).div_ceil(BLOCK));
     let mut taken = Vec::new();
     let mut back = back();
@@ -325,6 +330,23 @@ pub(crate) fn back_pending(at: usize) -> Option<Arc<Done>> {
 pub(crate) fn back_open(at: usize, len: usize) {
     use windows_sys::Win32::System::Memory::{PAGE_READWRITE, VirtualProtect};
     let (first, last) = (at / BLOCK, at.saturating_add(len).div_ceil(BLOCK));
+    // A block a job still holds has not received the GPU's bytes yet: wait
+    // for the job (without the map's lock, `back_release` takes it) before
+    // the title's write opens the whole block, or a title read of another
+    // region of it returns stale data. In the worker the wait would be on
+    // its own job, whose write this is ([`Done::finish`] comes after), so it
+    // opens straight away.
+    if !crate::writeback::this_is_worker() {
+        let pending: Vec<Arc<Done>> = {
+            let back = back();
+            (first..last)
+                .filter_map(|block| back.get(&block).map(|(_, done)| done.clone()))
+                .collect()
+        };
+        for done in pending {
+            done.wait();
+        }
+    }
     let mut opened = Vec::new();
     {
         let mut back = back();
@@ -467,6 +489,13 @@ fn install() {
             return EXCEPTION_CONTINUE_EXECUTION;
         }
         if !is_write {
+            // The job released the block between the fault and the lookup:
+            // the memory is readable now, so retry instead of passing the
+            // fault on (nothing else would handle it). `writable` excludes
+            // guard and read-only pages, so a fault there is not retried.
+            if writable(at) {
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
             // A read of memory that is not ours: as before, someone else's.
             return EXCEPTION_CONTINUE_SEARCH;
         }
