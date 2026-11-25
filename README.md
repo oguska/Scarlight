@@ -7,289 +7,137 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/pablogonz12/Scarlight/ci.yml?branch=main&style=flat-square&labelColor=14072c&label=CI&color=ff2e63)](https://github.com/pablogonz12/Scarlight/actions/workflows/ci.yml)
 [![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-ff7a3d?style=flat-square&labelColor=14072c)](LICENSE)
 ![GPU: RDNA4 tested](https://img.shields.io/badge/GPU-RDNA4%20tested-19d8ff?style=flat-square&labelColor=14072c)
-![Linux · Proton](https://img.shields.io/badge/Linux-Proton-ffb347?style=flat-square&labelColor=14072c)
+![Linux first](https://img.shields.io/badge/Linux-first-ffb347?style=flat-square&labelColor=14072c)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-ff2e63?style=flat-square&labelColor=14072c)](#-contributing)
 [![Stars](https://img.shields.io/github/stars/pablogonz12/Scarlight?style=flat-square&labelColor=14072c&color=ffb347)](https://github.com/pablogonz12/Scarlight/stargazers)
 
-**Not playable yet.** Details below.
+**A Linux + AMD RDNA4 (RX 9000) first port. Not playable yet.**
 
-<sub>[What it is](#-what-it-is) · [How it fits](#-how-it-fits-together) · [Status](#-status) · [Quick start](#-quick-start) · [Windows](#-quick-start-windows) · [Linux](#-quick-start-linux-wine--ge-proton) · [Controls](#-controls) · [Contributing](#-contributing) · [Thanks](#-thanks)</sub>
+<sub>[What it is](#what-it-is) · [Target](#target) · [Status](#status) · [Requirements](#requirements) · [Build](#build) · [Run](#run) · [How we work](#how-we-work) · [Credits](#credits)</sub>
 
 </div>
 
-<p align="center"><img src="docs/brand/divider.svg" width="720" alt=""></p>
+## What it is
 
-## ✨ What it is
-
-Scarlight runs an Xbox Series X|S title's own x86-64 code on a PC, using the files you supply. It
-loads the title's executable, answers its console-only calls, and turns its GPU commands and
-shaders into Direct3D 12 for your graphics card. The focus is **AMD RDNA4 on Linux under
-Wine/Proton**; Windows works too. Scarlight is based on
-[VIctory](https://github.com/Marvisak/VIctory) by Marvis and its contributors (GPL-3.0, history
-kept). It adds tested fixes from VIctory's open
-pull requests and forks, each merged with its author's credit ([INTEGRATION.md](INTEGRATION.md)),
-plus its own. No game files, dumps or screenshots are in this repository.
-
-## 🧭 How it fits together
+Scarlight is a **GPL-3.0 port of the console build** of the title to PC, running through
+**Wine/Proton + vkd3d-proton + Mesa RADV**. It runs the title's own x86-64 code from files you
+supply, answers its console-only calls, and turns its GPU commands and shaders into Direct3D 12.
+It is based on [VIctory](https://github.com/Marvisak/VIctory) and
+[fxceless's victory-fork](https://github.com/fxceless/victory-fork), with their history and
+authors kept. No game files, dumps or screenshots are in this repository.
 
 ```mermaid
 flowchart LR
-    A["<b>Title's x86-64 code</b><br/>your own copy,<br/>outside the repo"] --> B["<b>Loader</b><br/>victory-loader<br/>map and bind imports"]
-    B --> C["<b>HLE</b><br/>victory-hle<br/>console APIs on the host"]
-    C -->|"D3D12.X calls"| D["<b>GPU translation</b><br/>victory-gpu<br/>commands and memory"]
-    D -->|"shaders, at pipeline creation"| E["<b>Shader recompiler</b><br/>victory-shader<br/>console GPU machine code to DXIL"]
-    D --> F["<b>Direct3D 12</b>"]
-    E --> F
-    F --> G["<b>vkd3d-proton</b><br/>Direct3D 12 on Vulkan<br/>(Linux, Wine/Proton)"]
-    classDef hot fill:#1a0838,stroke:#ff2e63,color:#ffd9e6,stroke-width:2px
-    classDef cool fill:#0a2a3a,stroke:#19d8ff,color:#dcfaff,stroke-width:2px
-    classDef warm fill:#2a1408,stroke:#ffb347,color:#ffe9c9,stroke-width:2px
-    class A,B,C hot
-    class D,E warm
-    class F,G cool
+    A["Title's x86-64 code<br/>(your files)"] --> B["victory-loader<br/>+ victory-hle"]
+    B --> C["victory-gpu<br/>+ victory-shader"]
+    C --> D["Direct3D 12"] --> E["vkd3d-proton<br/>in Wine/Proton"] --> F["Mesa RADV<br/>RDNA4"]
 ```
 
-Shaders are translated when the title creates a pipeline, from the bytes it passes. On Windows the
-host's own Direct3D 12 driver takes the place of vkd3d-proton. Crates and import resolution:
-[docs/architecture.md](docs/architecture.md).
+Crates: [docs/architecture.md](docs/architecture.md).
 
-<p align="center"><img src="docs/brand/divider.svg" width="720" alt=""></p>
+## Target
 
-## 🚦 Status
-
-**Not playable yet.** In short:
-
-> [!NOTE]
-> **24 Nov 2026: first lit picture on AMD + Linux.** With the [fxceless](https://github.com/fxceless) fork
-> as the base (Scarlight's move onto it is in progress) and Microsoft's `d3dcompiler_47.dll` next to the exe as a
-> stop-gap (Wine's built-in compiler rejects its runtime helper shaders), the opening scenes render lit on an
-> RX 9070 XT under GE-Proton: 4,900-7,000 draws per frame, about 1-4 fps, menus, pad and sound working. Many
-> surfaces are still untextured and shadowed areas are dark. `main` itself does not render the world yet; the
-> table below describes `main`.
-
-<p align="center"><img src="docs/brand/status.svg" alt="Pipeline status on main: Boot, Menus and World loads are done; Lit picture is in progress (PR: Scarlight on the fxceless base); Playable is not yet reached." width="100%"></p>
-
-| Works | Does not |
+| | |
 |---|---|
-| Boots to the menus | The world picture: mostly black |
-| Menus at 30 fps | World frame rate: about 0.5 fps |
-| Loads the world, with audio | Any real gameplay |
+| **First** | Arch-family Linux with an AMD RX 9000 (RDNA4) card |
+| **Tested** | RX 9070 XT on CachyOS |
+| **May work** | Other RDNA cards and other Linux distributions (not tested here) |
+| **Not supported here** | NVIDIA GPUs and native Windows |
 
-The black picture comes from shaders that Scarlight cannot translate yet, so their draws are
-skipped. The frame rate is limited by copying the title's memory. Both are being worked on
-upstream. Tested setup and measurements: [AMD-LINUX.md](AMD-LINUX.md).
+For NVIDIA or Windows, use [JMAN730/project-flamingo](https://github.com/JMAN730/project-flamingo)
+or [fxceless/victory-fork](https://github.com/fxceless/victory-fork).
 
-<!-- state:begin -->
-## Project state
+## Status
 
-<div align="center">
+Measured on one machine (RX 9070 XT, Linux), 25 Nov 2026.
 
-### At a glance
+> [!IMPORTANT]
+> The lit picture comes from the candidate build, tag
+> [`keep/scar-candidate-20261125`](https://github.com/pablogonz12/Scarlight/tree/keep/scar-candidate-20261125)
+> (on the fxceless base). **It is not merged into `main` yet.** On `main` the world is still mostly
+> black, at under 1 fps ([AMD-LINUX.md](AMD-LINUX.md)).
 
-| World shaders | Full archive | Best world fps | Furthest |
-|:---:|:---:|:---:|:---:|
-| **720 / 768** offline on RADV | **24,073 / 25,529** translated | **0.45** on Scarlight builds | World loads and plays audio; picture mostly black |
-
-*0.6 fps with HUD and minimap reached is VIctory #994 as-is with its debug pixel shader, not a Scarlight build.*
-
-</div>
-
-Last updated: 24 Nov 2026, Scarlight `main after #11`.
-
-### Milestones
-
-| | Milestone | Note |
-|---|---|---|
-| ✅ | Boots | Boots into the title's own menus |
-| ✅ | Menus | 30 fps, drawn and interactive |
-| ✅ | Loads world | World streams in and the title's audio plays |
-| 🟡 | World picture | Mostly black: 48 of 768 world programs still skip their draws |
-| ❌ | Playable | 0.45 fps and a black picture: no real gameplay |
-
-### Shader translation
-
-| Programs | Translated | Total | Progress |
-|---|---|---|---|
-| **All programs** | **24,073** | **25,529** | `█████████░ 94%` |
-| World set, translate → SPIR-V → RADV pipeline | 720 | 768 | `█████████░ 94%` |
-
-*Full archive: 25,529 programs, measured at main after #11. World set: 768 programs, each through translation, SPIR-V validation and a real RADV pipeline.*
-
-<details>
-<summary>Breakdown at 4e7e6a3 (before #11): per stage and top failure reasons</summary>
-
-| Programs | Translated | Total | Progress |
-|---|---|---|---|
-| Vertex + pixel | 13,146 | 14,234 | `█████████░ 92%` |
-| Compute | 2,404 | 2,582 | `█████████░ 93%` |
-| Mesh | 8,396 | 8,713 | `██████████ 96%` |
-| **All programs** | **23,946** | **26,084** | `█████████░ 92%` |
-
-Measured on `translate-main.txt` at 4e7e6a3 (PR #704), 24 Nov 2026; the totals above are newer and are not the sum of these rows. The 555 programs that are neither vertex/pixel, compute nor mesh were not emitted then and counted as untranslated.
-
-**Top remaining shader failures (same measurement)**
-
-| Failures | Reason |
+| Area (candidate build) | State |
 |---|---|
-| 716 | a descriptor's address or format read as data |
-| 298 | a lane mask read as data |
-| 195 | an address in an SGPR that is no root parameter |
-| 166 | a packed input half no element holds |
-| 88 | an SCC the emitter did not compute |
-| 73 | an address not from a root parameter |
-| 61 | an opaque lane mask |
-| 48 | a cross-lane operation outside compute |
+| Boot, menus, audio, pad | Works |
+| World in the prologue | Renders lit, about **2-3 fps** at best; many runs are slower (1-2 fps) and it varies by scene and switches |
+| Interiors and shadowed areas | **Known issue:** dark |
+| Intro | **Known issue:** frames can show out of order |
+| Stability | **Known issue:** occasional freezes with experimental switches; `VICTORY_ASYNC_WRITEBACK=1` has hung the title |
+| Playable | **No** |
 
-</details>
+## Requirements
 
-### Performance
-
-| Measurement | RX 9070 XT, Linux / Wine (24 Nov 2026) |
+| | |
 |---|---|
-| Menus | 30 fps |
-| World | 0.45 fps |
-| Title-memory copies | 628–864 ms/frame |
-| Write-watch checks | 459–573 ms/frame |
+| OS / GPU | Arch-family Linux, RX 9070 XT (tested) |
+| Wine | **GE-Proton11-14** (tested), running its `wine` binary directly, not the `proton` script |
+| Direct3D 12 | **vkd3d-proton master** (or the DLLs shipped in GE-Proton11-14). Stock vkd3d-proton 3.1 crashes at world entry |
+| Driver | **Mesa 26.3.1** RADV (tested) |
+| RAM | **32 GB or more recommended** (tests ran with about 30 GB usable and little to spare) |
+| Build tools | Rust (pinned in `rust-toolchain.toml`) and `cargo-xwin` |
+| Game files | **Your own legally obtained copy.** None is included, linked or shared |
 
-### Tested hardware
+The candidate build also needs `dxcompiler.dll` and `dxil.dll`
+([DirectXShaderCompiler](https://github.com/microsoft/DirectXShaderCompiler/releases)) and, as a
+stop-gap, Microsoft's `d3dcompiler_47.dll` next to the exe. You supply these too.
 
-| GPU | OS / driver | Furthest stage |
-|---|---|---|
-| RX 9070 XT (RDNA4) | CachyOS, Mesa 26.3.1 RADV; GE-Proton11-14 with vkd3d-proton master | World loads and plays audio, picture mostly black; 720 of 768 world programs build a RADV pipeline |
-
-<!-- state:end -->
-
-<p align="center"><img src="docs/brand/divider.svg" width="720" alt=""></p>
-
-## ⚡ Quick start
-
-The short version; the platform sections below have the full steps (build, runtime, environment).
+## Build
 
 ```bash
 git clone https://github.com/pablogonz12/Scarlight && cd Scarlight
-cargo xtask install-hooks                # asset-policy check on every commit
-cp victory.example.toml victory.toml     # PowerShell: copy; then set your paths (outside the repo)
-cargo test --workspace                   # no game data needed
-cargo run -p victory -- config           # check the build and your paths
+git checkout keep/scar-candidate-20261125   # lit-world candidate; stay on main to contribute
+rustup target add x86_64-pc-windows-msvc
+cargo install cargo-xwin                    # once
+cargo xwin build --release -p victory --target x86_64-pc-windows-msvc
 ```
 
-Then build and run: [Windows](#-quick-start-windows) or [Linux (Wine / GE-Proton)](#-quick-start-linux-wine--ge-proton).
+The output is a Windows binary that runs under Wine. Add `--features diagnostics` for per-frame
+statistics.
 
-## 📋 What you need
+## Run
 
-- **Your own copy of the title.** None is included, and none will be linked or shared.
-- A GPU with Direct3D 12 and shader model 6.6 (mesh shaders for the world), on Windows 10/11 x64
-  or Linux with Wine/Proton.
-- Rust (the version is pinned in `rust-toolchain.toml`) if you build from source.
+Full setup and a copy-paste play script: **[docs/linux.md](docs/linux.md)**.
 
-## 🪟 Quick start: Windows
-
-1. Install [Rust](https://rustup.rs) and the Visual Studio 2022 Build Tools with "Desktop
-   development with C++".
-2. Get the code and make your config (paths must be outside the repo):
-   ```powershell
-   git clone https://github.com/pablogonz12/Scarlight
-   cd Scarlight
-   cargo xtask install-hooks                # asset-policy check on every commit
-   copy victory.example.toml victory.toml   # then set your paths
-   ```
-3. Check the build and your paths (no game data needed for the tests):
-   ```powershell
-   cargo test --workspace
-   cargo run -p victory -- config
-   ```
-4. Build and run:
-   ```powershell
-   cargo build --release -p victory
-   target\release\victory.exe run <game dir>\<the title's exe> --execute
-   ```
-
-The title needs several GiB of free Windows commit at startup (Task Manager → Performance →
-Memory → Committed). If `crashes.log` reports Windows error 1455, close other apps or raise the
-paging file size.
-
-## 🐧 Quick start: Linux (Wine / GE-Proton)
-
-1. Install Rust, then build a Windows binary from Linux:
-   ```bash
-   rustup target add x86_64-pc-windows-msvc
-   cargo install cargo-xwin                   # once
-   cargo xwin build --release -p victory --target x86_64-pc-windows-msvc
-   ```
-   Add `--features diagnostics` for per-frame copy and watch statistics.
-2. Install a GE-Proton build (tested: GE-Proton11-14) and run its `wine` binary directly, not the
-   Proton script.
-3. Put **vkd3d-proton master**'s `d3d12.dll` and `d3d12core.dll` next to `victory.exe` (the build
-   output folder). Stock vkd3d-proton 3.1 crashes at world entry.
-4. Set the environment and run:
-   ```bash
-   export WINEDLLOVERRIDES="d3d12,d3d12core,dxgi,d3d11,d3d10core=n,b"
-   export VKD3D_CONFIG=ignore_shared_fence
-   export VICTORY_NO_WATCHDOG=1
-   export VICTORY_GAME_DIR="$HOME/victory-data/game"
-   /path/to/GE-Proton11-14/files/bin/wine \
-     target/x86_64-pc-windows-msvc/release/victory.exe \
-     run "$VICTORY_GAME_DIR/<the title's exe>" --execute
-   ```
-
-Free memory matters: anything that pins GPU memory (a local LLM server, say) pushes the world into
-swap. More platform notes: [AMD-LINUX.md](AMD-LINUX.md).
-
-## 🎮 Controls
-
-A gamepad works if one is connected. Otherwise the keyboard acts as a pad while the title's window
-has focus:
-
-| Keys | Pad |
+| Switch | Effect |
 |---|---|
-| Enter, Backspace, X, Y | A, B, X, Y |
-| Esc, Tab | Menu, View |
-| Arrows | D-pad |
-| W A S D | left stick |
-| I J K L | right stick |
-| Q / E | shoulders |
-| Z / C | triggers |
-| F / H | stick clicks |
+| `VICTORY_NO_WATCHDOG=1` | Turns off the title's watchdog (opt-in hook, one known build). Use it: slow frames can otherwise make the title quit. A real hang then stays a hang |
+| `VICTORY_PIPELINE_WAIT_MS=<ms>` | *Candidate build.* Per-frame wait for background pipeline creation, default 500. Lower (e.g. 24) stalls less, but draws are left out until their pipeline is ready |
+| `VICTORY_DEPTH_TWINS=0` / `stencil` / `nodepth` | *Candidate build.* On by default. These turn off depth/stencil twin textures entirely or limit which are made; for comparing picture problems |
+| `VICTORY_ASYNC_WRITEBACK=1` | **Experimental**, off by default. Writes GPU results back on another thread; has hung the title in our tests |
 
-<details>
-<summary><h2 style="display:inline">🛠️ Troubleshooting and logs</h2></summary>
+## How we work
 
-| Problem | Fix |
-|---|---|
-| Crash at world entry | Your `d3d12.dll`/`d3d12core.dll` are stock vkd3d-proton 3.1; use master's or GE-Proton11-14's instead |
-| Out of memory, or the world crawls | Close apps that pin GPU memory; on Windows also check committed memory (error 1455) |
-| World is black | Known, not fixed yet: shaders that do not translate have their draws skipped |
-| The title waits for the GPU, then quits or restarts | `VICTORY_NO_WATCHDOG=1`; on 32-lane hosts (NVIDIA) also try `VICTORY_SKIP_WAVE64=mesh,compute` |
-| `victory` says no paths, or exits at once | Run `victory config`: a path is unset, wrong, or inside the repo; set `VICTORY_GAME_DIR` |
+- We **watch the other ports** and forks, measure their fixes on RDNA4 + Linux, and take the ones
+  that help, **with credit** and the authors' commits kept ([INTEGRATION.md](INTEGRATION.md)).
+- **Every gain goes up as a PR** with its evidence (log lines, shader counts, frame timings).
+- Our gains **also go to [project-flamingo](https://github.com/JMAN730/project-flamingo) as PRs**.
+  Fixes that fit [VIctory](https://github.com/Marvisak/VIctory) should go there too.
+- PRs here target `main`; see [CONTRIBUTING.md](CONTRIBUTING.md). A test report from another RDNA
+  card is as useful as a patch.
+- Docs, commits and PRs never name the title or its developer. Never commit game files
+  ([asset policy](docs/asset-policy.md)).
 
-Logs: `VICTORY_LOG=victory_loader=trace,info`. Crashes and host GPU failures are appended to
-`crashes.log` in the data folder (default `%LOCALAPPDATA%\victory\data`). Diagnostics variables
-and commands: [AMD-LINUX.md](AMD-LINUX.md#diagnostics).
+## Credits
 
-</details>
+- [Marvisak/VIctory](https://github.com/Marvisak/VIctory): the project this is built on (Marvis and contributors).
+- [fxceless/victory-fork](https://github.com/fxceless/victory-fork) (fxceless / hyphennn): the base of the lit-world candidate.
+- [uiliannn/VItoriaBr](https://github.com/uiliannn/VItoriaBr) (uiliannn): a fork we follow and learn from.
+- **ErRusso**: runtime HLSL through DXC. **ZazaJr24**: configurable pipeline waits.
+  **ruvenesh**: the opt-in watchdog hook (VIctory #454).
 
-<p align="center"><img src="docs/brand/divider.svg" width="720" alt=""></p>
+Authors of commits carried in the candidate build:
+9hvn9yt2vk-netizen, Abdellah K., Advait Palve, AlanQiang0418, alessiodeia, Andrea Casale,
+AnoHunted, artor410, BaggyALPHA, Carlos Sant'Anna, cxchhh (cxccxc), Dathinel, Duff, EatCodeSleep2,
+Enzo Souza Duarte, errusso, Exorion, fever308, FIocker, fuzeofficial, fxceless, Henrique Bueno,
+hophaver, ifBars, ismailchaka1, itsRevela, Jeremy Goldberg, julio, KoLolX3, lameloball2813-ui,
+LaunchDoesntCode, localshotgun, lordon1a, Louis Faust, LUIS LARIOS, Luiz Neves,
+Luiz Otavio Mello de Campos, Lyrnc, Manuel Pérez, Maraco91, marquezini, Marvis, meower, Nostyxx,
+oddiums, pablogonz12 (Pablo Gonzalez), Pedro Fortunato, quaternion, r4tedx (r4.), raffclar,
+Saitken91, spacede, tedin7, TG0000, undeadhuman37, Vanthys, wrothgaril, Yaekai, ZazaJr24.
+Some commits were also authored by AI coding tools (Claude, Codex). More per-PR credit:
+[INTEGRATION.md](INTEGRATION.md). Missing or misnamed? Open an issue.
 
-## 🤝 Contributing
+## License
 
-Pull requests go to `main` only. CI runs clippy and the workspace tests on Windows, and CodeRabbit
-reviews each PR. If you are merging someone's upstream fix, keep their commits and their credit:
-[INTEGRATION.md](INTEGRATION.md) lists every merged pull request with its author, so it can be
-sent upstream. Code that also helps Windows or other GPUs should go to
-[Marvisak/VIctory](https://github.com/Marvisak/VIctory) too. Internal crate, binary and
-environment-variable names stay `victory*` so upstream fixes keep merging. Never commit game files;
-the asset-policy hook checks it (`docs/asset-policy.md`).
-
-## 📜 License
-
-GPL-3.0-or-later; see [LICENSE](LICENSE). Architecture overview: [docs/architecture.md](docs/architecture.md).
-
-<p align="center"><img src="docs/brand/divider.svg" width="720" alt=""></p>
-
-## 💖 Thanks
-
-Scarlight is derived from [VIctory](https://github.com/Marvisak/VIctory) by Marvis and its contributors, and keeps their commit history. Thanks to the authors listed in [INTEGRATION.md](INTEGRATION.md), [JMAN730/victory](https://github.com/JMAN730/victory), and everyone whose fixes made the world load.
-
-<p align="center">
-<a href="https://github.com/pablogonz12/Scarlight/graphs/contributors"><img src="https://contrib.rocks/image?repo=pablogonz12/Scarlight" alt="Scarlight contributors"></a>
-</p>
+GPL-3.0-or-later; see [LICENSE](LICENSE).
