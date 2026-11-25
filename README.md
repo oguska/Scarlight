@@ -16,7 +16,7 @@
 
 **It implements the console system APIs a title calls, decodes its GPU command streams and recompiles its RDNA2 shaders, and runs the result through Proton — Wine and vkd3d-proton — on Mesa's open Vulkan drivers.<br>RADV (AMD) is the reference and ANV (Intel) is next. Mesa is open source, so the driver is ours to read, tune and fix, and every part of this project is developed and measured on that stack.**
 
-<sub>[What it is](#what-it-is) · [Status](#status) · [Hardware](#hardware) · [Requirements](#requirements) · [Quick start](#quick-start) · [How it works](#how-it-works) · [Roadmap](#roadmap) · [Launcher](#launcher) · [Help us test](#help-us-test) · [Contribute](#contribute) · [Who is behind this](#who-is-behind-this) · [Credits](#credits) · [Licence](#licence)</sub>
+<sub>[What it is](#what-it-is) · [Status](#status) · [Progress](#progress) · [Hardware](#hardware) · [Requirements](#requirements) · [Quick start](#quick-start) · [How it works](#how-it-works) · [Roadmap](#roadmap) · [Launcher](#launcher) · [Help us test](#help-us-test) · [Contribute](#contribute) · [Who is behind this](#who-is-behind-this) · [Credits](#credits) · [Licence](#licence)</sub>
 
 </div>
 
@@ -56,6 +56,31 @@ tried.
 
 The frame rate is the median at one fixed scene, the only figure compared between builds; the method
 is in [docs/testing.md](docs/testing.md).
+
+## Progress
+
+Each row is a share of a set that was **counted on this machine** — an import table, a shader archive,
+a frame of recorded work — so the bars are measurements, not estimates. 100 % in every row is the
+target, not a promise: correctness is checked by runs. The System APIs row is the one to read twice:
+every import resolves, but only 15 % of them are code this project wrote — the rest is Wine (Proton)
+doing its job, and the title's own libraries. Per-row sources, the ISA and pipeline detail, and what
+each number means: [docs/PROGRESS.md](docs/PROGRESS.md).
+
+| Area | Progress | Detail | Where |
+|---|---|---|---|
+| System APIs (HLE) | ████████████ 100 % resolved (0 missing) | ██░░░░░░░░░░ 15 % own HLE | [detail](docs/PROGRESS.md#system-apis-hle) |
+| Shaders | ███████████░ 99 % | █░░░░░░░░░░░ 3 % verified | [detail](docs/PROGRESS.md#shaders) |
+| GPU command stream | ███████████░ 95 % | ███████████░ 95 % verified | [detail](docs/PROGRESS.md#gpu-command-stream) |
+| Pipelines | ██████████░░ 80 % | ████░░░░░░░░ 33 % of the keys the title asks for | [detail](docs/PROGRESS.md#pipelines) |
+| Features | status words | 2 of 10 shown | [detail](docs/PROGRESS.md#features) |
+| Mesa reach | ██░░░░░░░░░░ 17 % | ██░░░░░░░░░░ 17 % of 6 families | [detail](docs/PROGRESS.md#mesa-reach) |
+| Performance | █░░░░░░░░░░░ 6 % | █░░░░░░░░░░░ 6 % of 30 fps | [detail](docs/PROGRESS.md#performance) |
+
+Measured on 25 Nov 2026, build 5fca579b, RX 9070 XT (RDNA4) / Mesa 26.3.1 RADV. The gaps are the
+honest ones: 88 of 587 imports are our own HLE, whole-archive shaders have no validated pipeline
+column yet, five of six GPU families are unmeasured because the offline matrix cannot open Mesa's
+shim, and speed is a twentieth of the console's 30 fps. Regenerate with
+`tools/progress/collect.sh` and `tools/progress/render.py`.
 
 ## Hardware
 

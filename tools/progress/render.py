@@ -1,0 +1,184 @@
+#!/usr/bin/env python3
+"""Render docs/progress.json into docs/PROGRESS.md and a compact table.
+
+usage: python3 -I tools/progress/render.py [options]
+
+  --json PATH     input, default docs/progress.json
+  --out PATH      full page, default docs/PROGRESS.md
+  --table         print the compact README table to stdout (6-8 rows) and stop
+  --check         exit 1 if --out differs from what it would write
+
+The JSON holds counts only: what was counted, how much of it we do, and how
+much of that a run has shown working. No game data, no program names.
+"""
+
+import argparse
+import json
+import os
+import sys
+
+CELLS = 12
+FULL = "\u2588"  # █
+EMPTY = "\u2591"  # ░
+ARROW = " \u2192 "
+
+
+def bar(done, total):
+    """Text progress bar: 12 cells, so 83 % reads ██████████░░ 83 %."""
+    if total <= 0:
+        return "n/a"
+    done = max(0, min(total, done))
+    # nearest, then held below 100 %: a set that is not complete must not read
+    # 100 %, and 88/587 must not read 14 %
+    cells = int(round(done * CELLS / total))
+    if done > 0:
+        cells = max(1, cells)
+    if done >= total:
+        cells, pct = CELLS, 100
+    else:
+        cells = min(CELLS - 1, cells)
+        pct = min(99, int(round(done * 100.0 / total)))
+    return FULL * cells + EMPTY * (CELLS - cells) + " %d %%" % pct
+
+
+def cell(row, key="impl"):
+    """'done / total' for one column, or an em dash when it was not counted."""
+    pair = row.get(key)
+    if not pair or len(pair) != 2 or pair[0] is None or pair[1] is None:
+        return "\u2014"
+    return "%s / %s" % (num(pair[0]), num(pair[1]))
+
+
+def num(value):
+    if isinstance(value, int) or (isinstance(value, float) and value.is_integer()):
+        return "{:,}".format(int(value))
+    return str(value)
+
+
+def row_table(area):
+    """One markdown table per area."""
+    out = []
+    head = "| %s | Implemented | Verified | Progress | What is counted |"
+    out.append(head % area.get("column", "Area"))
+    out.append("|---|---|---|---|---|")
+    for row in area["rows"]:
+        label = row["label"]
+        if "status" in row:
+            impl = row.get("impl_text", "\u2014")
+            ver = row.get("ver_text", "\u2014")
+            prog = row["status"]
+        else:
+            impl = cell(row, "impl")
+            ver = cell(row, "verified")
+            prog = bar(row["impl"][0], row["impl"][1])
+        note = row.get("note", "")
+        out.append("| %s | %s | %s | %s | %s |" % (label, impl, ver, prog, note))
+    return "\n".join(out)
+
+
+def page(doc):
+    head = doc["header"]
+    lines = ["# Progress", ""]
+    lines.append("**" + head["meaning"] + "**")
+    lines.append("")
+    lines.append(head["where"])
+    lines.append("")
+    for line in head.get("notes", []):
+        lines.append("- " + line)
+    lines.append("")
+    lines.append(
+        "Regenerate with `tools/progress/collect.sh` (local, needs your own copy of the "
+        "title) and `tools/progress/render.py`; both are idempotent and the JSON holds "
+        "counts only."
+    )
+    lines.append("")
+    for area in doc["areas"]:
+        lines.append("## %s" % area["title"])
+        lines.append("")
+        lines.append(area["summary"])
+        lines.append("")
+        lines.append(row_table(area))
+        lines.append("")
+        if area.get("foot"):
+            for line in area["foot"]:
+                lines.append("- " + line)
+            lines.append("")
+    lines.append("## How each number is measured")
+    lines.append("")
+    for row in doc["method"]:
+        lines.append("- **%s**: %s" % (row["area"], row["how"]))
+    lines.append("")
+    lines.append(doc["footer"])
+    lines.append("")
+    return "\n".join(lines)
+
+
+def compact(doc, limit=8):
+    """The 6-8 row table the README carries."""
+    out = ["| Area | Progress | Detail | Where |", "|---|---|---|---|"]
+    for area in doc["areas"]:
+        if area.get("readme") is False:
+            continue
+        total = area.get("readme_bar")
+        if total:
+            done, whole = total
+            bar_text = bar(done, whole)
+        elif area.get("readme_text"):
+            bar_text = area["readme_text"]
+        else:
+            first = next((r for r in area["rows"] if "impl" in r), None)
+            bar_text = bar(*first["impl"]) if first else "\u2014"
+        dual = area.get("readme_dual")
+        if dual and area.get("readme_bar") and area.get("readme_verified"):
+            left = (bar(*area["readme_bar"]) + " " + dual[0]).strip()
+            right = (bar(*area["readme_verified"]) + " " + dual[1]).strip()
+            out.append("| %s | %s | %s | %s |" % (area["title"], left, right,
+                area.get("readme_where", "[detail](docs/PROGRESS.md)")))
+            if len(out) - 2 >= limit:
+                break
+            continue
+        ver = area.get("readme_verified")
+        ver_text = bar(*ver) if ver else area.get("readme_verified_text", "\u2014")
+        where = area.get("readme_where", "[detail](docs/PROGRESS.md)")
+        out.append("| %s | %s | %s | %s |" % (area["title"], bar_text, ver_text, where))
+        if len(out) - 2 >= limit:
+            break
+    return "\n".join(out)
+
+
+def main():
+    ap = argparse.ArgumentParser(add_help=True)
+    ap.add_argument("--json", default="docs/progress.json")
+    ap.add_argument("--out", default="docs/PROGRESS.md")
+    ap.add_argument("--table", action="store_true")
+    ap.add_argument("--check", action="store_true")
+    args = ap.parse_args()
+
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    jpath = args.json if os.path.isabs(args.json) else os.path.join(root, args.json)
+    with open(jpath, "r", encoding="utf-8") as f:
+        doc = json.load(f)
+
+    if args.table:
+        print(compact(doc))
+        return 0
+
+    text = page(doc)
+    opath = args.out if os.path.isabs(args.out) else os.path.join(root, args.out)
+    if args.check:
+        old = ""
+        if os.path.exists(opath):
+            with open(opath, "r", encoding="utf-8") as f:
+                old = f.read()
+        if old != text:
+            print("%s is stale: run collect.sh and render.py" % args.out, file=sys.stderr)
+            return 1
+        return 0
+    with open(opath, "w", encoding="utf-8") as f:
+        f.write(text)
+    print("wrote %s (%d bytes)" % (args.out, len(text)))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
