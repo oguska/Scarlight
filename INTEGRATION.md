@@ -29,6 +29,7 @@ Maintained by @pablogonz12. Tested on Linux (RX 9070 XT, RADV, GE-Proton / vkd3d
 | [#683](https://github.com/Marvisak/VIctory/pull/683) | @Halfect | Shaders: zero unavailable mixed-precision FMA halves | full-archive run: vertex+pixel 13,144 -> 13,152 (+8), "the first half of an interpolation" 28 -> 20; world set unchanged |
 | [#1013](https://github.com/Marvisak/VIctory/pull/1013) | @matheusfrta | Shaders: faster structurisation (memoised `implies`, forced atoms instead of repeated restricts, `ite` canonicalisation) and live pipelines compiled before pre-warmed ones | offline 751: 712 ok before and after, identical report rows (no regression); stage-1 translate 9.3 s both, total 13.6 s vs 15.3 s; B12 (48 % of producer dependencies were first-use compile latency) |
 | fork commit [61474f6](https://github.com/MartinIndra02/victory/commit/61474f6) | @Noname0202, on @MartinIndra02's branch (issue [#783](https://github.com/Marvisak/VIctory/issues/783), @rocobalt1) | GPU: `VirtualQuery` region fallback and partial-copy progress in `copy_mapped`/`write_mapped` | the copy fallback skips contiguous unmapped regions instead of failing page by page; not measured on its own |
+| [#1831](https://github.com/Marvisak/VIctory/pull/1831) | @CaravelaLabs | GPU: copy-back reaches write-watched pages under Wine (read the page back when the 4 KiB write fails) | offline RADV 751-shader check 712 -> 720 ok (40 translate / 16 spirv-val -> 48 / 0); victory-gpu Windows tests under Wine 88 pass, 0 fail; victory-shader 149 pass, clippy xwin clean |
 
 ## Our own fixes
 
