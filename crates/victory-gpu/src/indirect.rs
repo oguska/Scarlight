@@ -438,6 +438,11 @@ void main() {
 }
 "#;
 
+    /// The pattern a test fills the clamp's scratch with: the clamp writes
+    /// the whole scratch span (`required_bytes`) and no further, so a word
+    /// still holding this was never written.
+    const UNWRITTEN: u32 = 0xDEAD_BEEF;
+
     struct WarpHarness {
         device: ID3D12Device,
         queue: ID3D12CommandQueue,
@@ -572,6 +577,41 @@ void main() {
                     .unwrap();
             }
             buffer.unwrap()
+        }
+
+        /// Fills `buffer` (device-local) with `pattern`, so the words the
+        /// clamp never writes read back as the pattern rather than as
+        /// whatever the heap happened to hold: WARP hands out zeros there,
+        /// RADV an earlier test's bytes, which let a check of unwritten
+        /// scratch pass by luck. The staging buffer is returned to be kept
+        /// alive until the list is executed.
+        fn fill(
+            &self,
+            buffer: &ID3D12Resource,
+            size: u64,
+            pattern: u32,
+        ) -> (ID3D12Resource, *mut u8, u64) {
+            let staging = self.shared_buffer(size);
+            // SAFETY: `staging.1` is mapped for `size` bytes, a whole number
+            // of words; the transitions are the buffer's own.
+            unsafe {
+                let words =
+                    std::slice::from_raw_parts_mut(staging.1.cast::<u32>(), (size / 4) as usize);
+                words.fill(pattern);
+                self.list.ResourceBarrier(&[transition(
+                    buffer,
+                    D3D12_RESOURCE_STATE_COMMON,
+                    D3D12_RESOURCE_STATE_COPY_DEST,
+                )]);
+                self.list
+                    .CopyBufferRegion(buffer, 0, &staging.0, 0, size);
+                self.list.ResourceBarrier(&[transition(
+                    buffer,
+                    D3D12_RESOURCE_STATE_COPY_DEST,
+                    D3D12_RESOURCE_STATE_COMMON,
+                )]);
+            }
+            staging
         }
 
         fn signature(&self, kind: u32, stride: u32) -> ID3D12CommandSignature {
@@ -974,6 +1014,11 @@ void main() {
             let (_budget_buf, budget_ptr, budget_gpu) = warp.shared_buffer(256);
             let (readback_buf, readback_ptr, _) = warp.shared_buffer(total as u64);
             let dst_buf = warp.default_uav(total as u64);
+            // Words the clamp never writes (see the last record's assertion
+            // below) keep this pattern, so a check cannot pass on whatever
+            // the heap held.
+            let _fill = warp.fill(&dst_buf, total as u64, UNWRITTEN);
+
             // SAFETY: mapped buffers of these sizes.
             unsafe {
                 std::ptr::copy_nonoverlapping(src.as_ptr(), src_ptr, total);
@@ -1022,7 +1067,22 @@ void main() {
             if ahead {
                 for i in filled.len()..RECORDS as usize {
                     assert_eq!(out[i * 8..i * 8 + 3], [0, 0, 0], "unfilled slot {i} must come out empty");
-                    assert_eq!(out[i * 8 + 3], u32::MAX, "the words after the record are copied as they are");
+                    if i + 1 == RECORDS as usize {
+                        // The scratch span ends at the last record's argument
+                        // payload (the title's buffers are tight), so nothing
+                        // past it is written: it keeps the fill.
+                        assert_eq!(
+                            out[i * 8 + 3..i * 8 + 8],
+                            [UNWRITTEN; 5],
+                            "the last record's words after its payload are never written"
+                        );
+                    } else {
+                        assert_eq!(
+                            out[i * 8 + 3..i * 8 + 8],
+                            [u32::MAX; 5],
+                            "the words after the record are copied as they are"
+                        );
+                    }
                 }
                 assert_eq!(spent, charged_filled, "unfilled slots charge nothing");
                 assert_eq!(largest, 519, "and are not counted as asked for");
@@ -1049,6 +1109,10 @@ void main() {
         let (_budget_buf, budget_ptr, budget_gpu) = warp.shared_buffer(256);
         let (readback_buf, readback_ptr, _) = warp.shared_buffer(total_bytes as u64);
         let dst_buf = warp.default_uav(total_bytes as u64);
+        // The scratch span ends at the last record's argument payload; words
+        // past it are never written and keep the fill (see the last record
+        // below).
+        let _fill = warp.fill(&dst_buf, total_bytes as u64, UNWRITTEN);
 
         let mut initial_src = vec![0u8; total_bytes];
         for i in 0..RECORDS as usize {
@@ -1132,7 +1196,17 @@ void main() {
             assert_eq!(rec[2], 1000 + i as u32);
             assert_eq!(rec[3], (-200i32 + i as i32) as u32);
             assert_eq!(rec[4], 5000 + i as u32);
-            assert_eq!(rec[5], 0xCAFE_0000 | (i as u32));
+            if i + 1 == RECORDS as usize {
+                // The scratch span ends at the last record's argument payload
+                // (the title's buffers are tight): the stride word past it is
+                // never written and keeps the fill.
+                assert_eq!(
+                    rec[5], UNWRITTEN,
+                    "the last record's stride word after its payload is never written"
+                );
+            } else {
+                assert_eq!(rec[5], 0xCAFE_0000 | (i as u32));
+            }
         }
         assert_eq!((kept, zeroed), (2, (RECORDS as usize) - 2));
     }
