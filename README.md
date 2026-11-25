@@ -8,32 +8,41 @@
 [![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-ff7a3d?style=flat-square&labelColor=14072c)](LICENSE)
 [![Last commit](https://img.shields.io/github/last-commit/pablogonz12/Scarlight?style=flat-square&labelColor=14072c&color=19d8ff)](https://github.com/pablogonz12/Scarlight/commits/main)
 [![Stars](https://img.shields.io/github/stars/pablogonz12/Scarlight?style=flat-square&labelColor=14072c&color=ffb347)](https://github.com/pablogonz12/Scarlight/stargazers)
+[![Linux](https://img.shields.io/badge/platform-Linux-ff2e63?style=flat-square&labelColor=14072c)](docs/linux.md)
+[![Mesa: RADV tested](https://img.shields.io/badge/Mesa-RADV%20tested-ff7a3d?style=flat-square&labelColor=14072c)](https://docs.mesa3d.org/drivers/radv.html)
 
-# Scarlight: the AMD + Linux port
+# Scarlight: the Linux + Mesa port
 
-**The console build on RDNA, through Mesa RADV, Proton's Wine and vkd3d-proton.<br>Early, slow, not playable yet, and measured in the open.**
+**The console build on Linux, through open-source Mesa Vulkan drivers (RADV first, then ANV and NVK), Proton's Wine and vkd3d-proton.<br>Mesa is open source, so the driver itself is ours to tune and fix. Early, slow, not playable yet, and measured in the open.**
 
 <sub>[Status](#status) · [Quick start](#quick-start) · [What's different](#whats-different) · [Roadmap](#roadmap) · [Known problems](#known-problems) · [Contribute](#contribute) · [Credits](#credits)</sub>
 
 </div>
 
-Scarlight is a GPL-3.0 port for one target first: an **AMD RX 9000 (RDNA4) card on Linux**. It runs
-the title's own x86-64 code from files you supply, answers its console-only calls, and turns its GPU
-commands and shaders into Direct3D 12. It builds on [VIctory](https://github.com/Marvisak/VIctory)
-and [fxceless's victory-fork](https://github.com/fxceless/victory-fork). The goals, in order: the
-**picture**, then **speed**, then **stability**. No game files, dumps or screenshots are here.
+Scarlight is a GPL-3.0 port of the console build to **Linux**, running on **open-source Mesa Vulkan
+drivers**: RADV (AMD) first, then ANV (Intel) and NVK (NVIDIA). It runs the title's own x86-64 code
+from files you supply, answers its console-only calls, and turns its GPU commands and shaders into
+Direct3D 12 on top of vkd3d-proton and Wine/Proton. It builds on
+[VIctory](https://github.com/Marvisak/VIctory) and
+[fxceless's victory-fork](https://github.com/fxceless/victory-fork). The goals, in order: the
+**picture**, then **speed**, then **stability**. Because Mesa is open source, the driver is in scope
+too: its switches, statistics, pipeline cache, a local Mesa build, and fixes sent upstream. No game
+files, dumps or screenshots are here.
 
 ```mermaid
 flowchart LR
     A["Title's x86-64 code<br/>(your files)"] --> B["victory-loader<br/>+ victory-hle"]
     B --> C["victory-gpu<br/>+ victory-shader"]
-    C --> D["Direct3D 12"] --> E["vkd3d-proton<br/>in Wine"] --> F["Mesa RADV<br/>RDNA4"]
+    C --> D["Direct3D 12"] --> E["vkd3d-proton<br/>in Wine"] --> F["Mesa Vulkan driver<br/>RADV first, then ANV / NVK"]
 ```
 
 ## Status
 
-**Test machine, 25 Nov 2026:** RX 9070 XT · Mesa 26.3.1 RADV · CachyOS (Arch family), kernel 7.3.6 ·
-GE-Proton11-14 · vkd3d-proton master · 30 GB RAM + zram. All game runs use diagnostics builds.
+**Tested on one machine so far (25 Nov 2026):** RX 9070 XT (RDNA4) · Mesa 26.3.1 **RADV** · CachyOS
+(Arch family), kernel 7.3.6 · GE-Proton11-14 · vkd3d-proton master · 30 GB RAM + zram. All game runs
+use diagnostics builds. **Other Mesa GPUs are untested**: older AMD cards on RADV, Intel on ANV and
+NVIDIA on NVK are the target, so a report from any of them is worth as much as a patch
+([see Contribute](#contribute)).
 
 The builds differ, and **the fastest one measured here is not Scarlight's code yet**:
 
@@ -61,8 +70,9 @@ time. These counts are not for the quick-start tag.
 
 ## Quick start
 
-For Arch-family Linux and an RX 9070 XT. Other RDNA cards and distributions may work (not tested).
-NVIDIA and native Windows are not supported here: see
+For Arch-family Linux with Mesa. Measured only on an RX 9070 XT with RADV; other Mesa GPUs (older
+AMD cards on RADV, Intel on ANV, NVIDIA on NVK) should work and are untested. NVIDIA's proprietary
+driver and native Windows are not supported here: see
 [project-flamingo](https://github.com/JMAN730/project-flamingo) or
 [victory-fork](https://github.com/fxceless/victory-fork). 32 GB of RAM or more is recommended.
 
@@ -81,7 +91,7 @@ NVIDIA and native Windows are not supported here: see
 **Build** the tag:
 
 ```bash
-sudo pacman -S --needed mesa vulkan-radeon rustup git clang lld llvm
+sudo pacman -S --needed mesa vulkan-radeon rustup git clang lld llvm   # vulkan-intel on Intel, mesa-vulkan-drivers elsewhere
 git clone https://github.com/pablogonz12/Scarlight && cd Scarlight
 git checkout keep/good-0257-live2
 rustup toolchain install                 # version pinned in rust-toolchain.toml
@@ -117,7 +127,9 @@ controls and troubleshooting are in [docs/linux.md](docs/linux.md).
 
 | | Scarlight |
 |---|---|
-| **One target** | RADV, RDNA4 and Wine come first. No NVIDIA or Windows path has to be kept working here |
+| **Built for Linux only** | The title runs on Linux through Wine/Proton and vkd3d-proton. Nothing here keeps a native Windows path working, so every change is measured on the stack people actually run |
+| **The driver is ours to fix** | Mesa is open source, so the driver is part of the project: RADV/ACO env and driconf switches, pipeline-executable statistics, a local Mesa build loaded through `VK_ICD_FILENAMES`, and bug reports or patches to Mesa itself. Other ports stop at the Vulkan API |
+| **RADV first, then ANV and NVK** | One driver family, several GPUs. RADV is the reference; Intel's ANV and NVIDIA's NVK come next. Driver-specific work is gated by Vulkan driver and device id, so no GPU loses a working path |
 | **Picture before speed** | A speed change that costs picture quality is not taken |
 | **Many ports, one test box** | We follow the other ports and forks, try their fixes on the same card, and bring in what helps, authors credited |
 | **Tests without the game first** | Unit tests and offline shader translation, with a per-program output diff, come before a game run |
@@ -146,6 +158,10 @@ that says nothing about it on Windows.
 
 Targets are goals, not results.
 
+**Mesa track, in parallel:** driver env and driconf switches, pipeline-executable statistics, a local
+Mesa build for experiments and upstream Mesa reports, each measured like any other change. Nothing
+Scarlight ships may require RDNA4; RADV- or ANV-only paths are gated by Vulkan driver id.
+
 ## Known problems
 
 - **Not playable.** About 0.8-2 fps in the world, with multi-second stalls.
@@ -159,14 +175,15 @@ Targets are goals, not results.
 
 ## Contribute
 
-**A test report from another RDNA card is as useful as a patch:** card, Mesa version, build tag,
-fps and what looked wrong, in text and logs only (no screenshots or game data). Pull requests target
-`main`; see [CONTRIBUTING.md](CONTRIBUTING.md). CI and review come before merge. Docs, commits and
-PRs never name the title or its developer, and game files are never committed
-([asset policy](docs/asset-policy.md)). Parts of this project, this page included, are written with
-AI coding tools. Crates: [docs/architecture.md](docs/architecture.md).
+**A test report from another Mesa GPU is as useful as a patch**, and the only tested config so far is
+RX 9070 XT + RADV: AMD (other RADV generations), Intel (ANV) and NVIDIA (NVK) all welcome — card,
+driver and Mesa version, build tag, fps and what looked wrong, in text and logs only (no screenshots
+or game data). Pull requests target `main`; see [CONTRIBUTING.md](CONTRIBUTING.md). CI and review come
+before merge. Docs, commits and PRs never name the title or its developer, and game files are never
+committed ([asset policy](docs/asset-policy.md)). Parts of this project, this page included, are
+written with AI coding tools. Crates: [docs/architecture.md](docs/architecture.md).
 
-If you want an AMD + Linux port to keep moving, **star the repository**.
+If you want a **Linux + Mesa** port to keep moving, **star the repository**.
 
 ## Credits
 

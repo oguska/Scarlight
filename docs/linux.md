@@ -1,12 +1,13 @@
-# Linux setup (AMD RDNA4)
+# Linux setup (Mesa)
 
-Tested: CachyOS (Arch family), RX 9070 XT, Mesa 26.3.1 RADV, GE-Proton11-14. Read the
-[status](../README.md#status) first: this is not playable.
+Tested on one machine: CachyOS (Arch family), RX 9070 XT, Mesa 26.3.1 RADV, GE-Proton11-14. Other
+Mesa GPUs (RADV generations, ANV, NVK) are untested. Read the [status](../README.md#status) first:
+this is not playable.
 
 ## 1. Packages
 
 ```bash
-sudo pacman -S --needed mesa vulkan-radeon rustup git clang lld llvm
+sudo pacman -S --needed mesa vulkan-radeon rustup git clang lld llvm   # vulkan-intel on Intel
 ```
 
 Install **GE-Proton11-14** from [proton-ge-custom](https://github.com/GloriousEggroll/proton-ge-custom/releases),
