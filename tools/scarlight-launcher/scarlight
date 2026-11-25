@@ -548,7 +548,7 @@ profile_files() {
       [ -f "$f" ] && printf '%s\n' "$f"
     done
   done <<EOF
-$(profile_dirs | sort -u)
+$(profile_dirs | awk '!seen[$0]++')
 EOF
 }
 
@@ -567,7 +567,9 @@ check_title_profile() {
     line=$(printf '%s\n' "$out" | awk '/^profile /{ sub(/^profile +/, ""); print; exit }')
     if [ -n "$line" ]; then
       case "$line" in
-        none*) chk warn "No title profile for this build" \
+        # The build prints "none" or "none (searched ...)"; a profile path may
+        # start with "none" too, so match the sentinel exactly.
+        none|"none ("*) chk warn "No title profile for this build" \
                  "the layer runs with no title patches; a profile is optional, see docs/title-profiles.md (VICTORY_PROFILE_DIR)" ;;
         *) chk ok "Title profile: $line" ;;
       esac
