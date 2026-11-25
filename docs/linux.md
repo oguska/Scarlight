@@ -51,7 +51,7 @@ export VICTORY_LOG="${VICTORY_LOG:-info}"
 exec "$PROTON/files/bin/wine" "$EXE" run "$GAME_DIR/$GAME_EXE" --execute
 ```
 
-Pass switches in front: `VICTORY_PIPELINE_WAIT_MS=24 ./play.sh`. See [Run](../README.md#run).
+Make it executable once with `chmod +x play.sh`. Pass switches in front: `VICTORY_PIPELINE_WAIT_MS=24 ./play.sh`. See [Run](../README.md#run).
 If you use GE-Proton's own D3D12 DLLs, make sure your prefix has them installed or copy them next
 to the exe.
 
@@ -78,5 +78,14 @@ A gamepad works. Otherwise the keyboard acts as a pad while the title's window h
 | `victory` reports no paths | `victory config`; paths must be outside the repository |
 | RenderDoc installed and the title crashes | `VK_LOADER_LAYERS_DISABLE='*renderdoc*'` |
 
-Crashes and GPU failures are appended to `crashes.log` in the data folder. More diagnostics:
+Crashes and GPU failures are appended to `crashes.log` in the data folder.
+
+For more diagnostics, build on Linux with:
+
+```bash
+cargo xwin build --profile diag -p victory --features diagnostics --target x86_64-pc-windows-msvc
+```
+
+Then point `EXE` in `play.sh` at `target/x86_64-pc-windows-msvc/diag/victory.exe`, with the same
+[files next to it](#3-files-next-to-victoryexe). The switches are listed in
 [AMD-LINUX.md](../AMD-LINUX.md#diagnostics).
