@@ -24,10 +24,15 @@ pub(crate) fn enabled() -> bool {
 
 /// Applies the hooks the profile for `hash` lists. Returns how many applied.
 ///
+/// A profile is the user's file, so every hook is checked before it is
+/// touched: the bytes must decode, `new` must be as long as `expect`, and
+/// `rva..rva+expect.len()` must lie inside the mapped image. Anything else is
+/// logged and skipped; a bad profile never faults the process.
+///
 /// # Safety
-/// `base` is the mapped image whose original BLAKE3 is `hash`, and no title
-/// code is running yet.
-pub(crate) unsafe fn apply_profile(base: usize, hash: &blake3::Hash) -> usize {
+/// `base` is the mapped image whose original BLAKE3 is `hash` and whose size
+/// is `size`, and no title code is running yet.
+pub(crate) unsafe fn apply_profile(base: usize, size: usize, hash: &blake3::Hash) -> usize {
     let Some(profile) = victory_core::profile::current() else {
         tracing::debug!("no title profile: no hooks to place");
         return 0;
@@ -41,12 +46,31 @@ pub(crate) unsafe fn apply_profile(base: usize, hash: &blake3::Hash) -> usize {
             tracing::warn!(what = hook.what, "hook skipped: its bytes do not decode");
             continue;
         };
-        // SAFETY: forwarded from this function's contract.
+        if let Some(why) = unusable(&expect, &new, hook.rva, size) {
+            tracing::warn!(what = hook.what, "hook skipped: {why}");
+            continue;
+        }
+        // SAFETY: forwarded from this function's contract, and `unusable`
+        // checked that the whole hook lies inside the image.
         if unsafe { apply(base, hook.rva as usize, &expect, &new, &hook.what) } {
             applied += 1;
         }
     }
     applied
+}
+
+/// Why a hook cannot be applied to an image of `size` bytes, if it cannot.
+fn unusable(expect: &[u8], new: &[u8], rva: u64, size: usize) -> Option<&'static str> {
+    if expect.is_empty() {
+        return Some("it has no bytes");
+    }
+    if new.len() != expect.len() {
+        return Some("its new bytes differ in length from its expect bytes");
+    }
+    match usize::try_from(rva) {
+        Ok(at) if at.checked_add(expect.len()).is_some_and(|end| end <= size) => None,
+        _ => Some("it lies outside the mapped image"),
+    }
 }
 
 /// Writes `new` over `expect` at `base + rva` if the bytes there are the
@@ -55,10 +79,6 @@ pub(crate) unsafe fn apply_profile(base: usize, hash: &blake3::Hash) -> usize {
 /// # Safety
 /// See [`apply_profile`].
 unsafe fn apply(base: usize, rva: usize, expect: &[u8], new: &[u8], what: &str) -> bool {
-    if expect.is_empty() || new.len() != expect.len() {
-        tracing::warn!(what, "hook skipped: no bytes, or the two lengths differ");
-        return false;
-    }
     let at = (base + rva) as *mut u8;
     // SAFETY: the offset is inside the mapped .text of this exact build.
     let now = unsafe { std::slice::from_raw_parts(at, expect.len()) };
@@ -79,4 +99,53 @@ unsafe fn apply(base: usize, rva: usize, expect: &[u8], new: &[u8], what: &str) 
     }
     tracing::info!(what, "hook applied");
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unusable;
+
+    /// An image of 0x1000 bytes with a five-byte hook at 0x100.
+    const SIZE: usize = 0x1000;
+
+    #[test]
+    fn a_hook_inside_the_image_is_usable() {
+        assert_eq!(unusable(&[1, 2, 3], &[4, 5, 6], 0x100, SIZE), None);
+        // The last byte of the image is still inside it.
+        assert_eq!(unusable(&[1, 2, 3], &[4, 5, 6], 0xffd, SIZE), None);
+    }
+
+    #[test]
+    fn a_hook_past_the_end_of_the_image_is_refused() {
+        assert_eq!(
+            unusable(&[1, 2, 3], &[4, 5, 6], 0xffe, SIZE),
+            Some("it lies outside the mapped image")
+        );
+        assert_eq!(
+            unusable(&[1], &[4], 0x1000, SIZE),
+            Some("it lies outside the mapped image")
+        );
+    }
+
+    #[test]
+    fn an_rva_beyond_the_address_space_is_refused_not_wrapped() {
+        assert_eq!(
+            unusable(&[1, 2, 3], &[4, 5, 6], u64::MAX, SIZE),
+            Some("it lies outside the mapped image")
+        );
+        // The end would overflow `usize`: refused, not wrapped to a low one.
+        assert_eq!(
+            unusable(&[1, 2], &[3, 4], u64::MAX - 1, usize::MAX),
+            Some("it lies outside the mapped image")
+        );
+    }
+
+    #[test]
+    fn a_hook_whose_new_bytes_differ_in_length_is_refused() {
+        assert_eq!(
+            unusable(&[1, 2, 3], &[4, 5], 0x100, SIZE),
+            Some("its new bytes differ in length from its expect bytes")
+        );
+        assert_eq!(unusable(&[], &[], 0x100, SIZE), Some("it has no bytes"));
+    }
 }

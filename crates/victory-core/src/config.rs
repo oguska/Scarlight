@@ -8,7 +8,8 @@
 //! these that holds one for the image being run:
 //! `VICTORY_PROFILE_DIR`, `%APPDATA%\victory\titles`,
 //! `$XDG_CONFIG_HOME/victory/titles` (or `~/.config/victory/titles`), else
-//! the data directory's `titles/`. A Windows build under Wine reaches the
+//! `%LOCALAPPDATA%\victory\titles` (the cache's parent, for a system with
+//! none of those variables). A Windows build under Wine reaches the
 //! last two through the `Z:` drive; the `Z:` form of a POSIX path is tried
 //! before the path itself, so both spellings work.
 
@@ -105,7 +106,7 @@ impl Config {
             .map_or_else(|| default_dir("data"), Ok)?;
         // Profiles are found through the user's shell environment or inside
         // the Wine prefix, not beside whichever victory.toml was passed.
-        let profile_dirs = profile_dirs(&env)?;
+        let profile_dirs = profile_dirs(&env);
         Ok(Config {
             game_dir: env_path("VICTORY_GAME_DIR").or(file.game_dir),
             cache_dir,
@@ -145,7 +146,7 @@ impl Config {
 
 /// The directories profiles are read from, in priority order: the
 /// environment, the roaming AppData, then the user's config directory.
-fn profile_dirs(env: &impl Fn(&str) -> Option<std::ffi::OsString>) -> Result<Vec<PathBuf>> {
+fn profile_dirs(env: &impl Fn(&str) -> Option<std::ffi::OsString>) -> Vec<PathBuf> {
     let env_path = |k: &str| env(k).filter(|v| !v.is_empty()).map(PathBuf::from);
     let mut dirs: Vec<PathBuf> = Vec::new();
     if let Some(dir) = env_path(crate::profile::DIR_ENV) {
@@ -154,15 +155,19 @@ fn profile_dirs(env: &impl Fn(&str) -> Option<std::ffi::OsString>) -> Result<Vec
     if let Some(appdata) = env_path("APPDATA") {
         dirs.push(appdata.join("victory").join("titles"));
     }
-    let config_home = env_path("XDG_CONFIG_HOME")
-        .or_else(|| env_path("HOME").map(|home| home.join(".config")));
+    let config_home =
+        env_path("XDG_CONFIG_HOME").or_else(|| env_path("HOME").map(|home| home.join(".config")));
     if let Some(config_home) = config_home {
         dirs.extend(dir_aliases(&config_home.join("victory").join("titles")));
     }
     if dirs.is_empty() {
-        dirs.push(default_dir("titles")?);
+        // Profiles are optional: a system that names no home at all runs
+        // without them rather than failing to start.
+        if let Ok(dir) = default_dir("titles") {
+            dirs.push(dir);
+        }
     }
-    Ok(dirs)
+    dirs
 }
 
 /// `dir`, plus how a Windows build reaches it under Wine: the same absolute
@@ -249,6 +254,13 @@ mod tests {
         let at = |dir: &Path| cfg.profile_dirs.iter().position(|d| d == dir);
         assert!(at(&appdata) > Some(0));
         assert!(at(&xdg) > at(&appdata));
+    }
+
+    #[test]
+    fn profiles_are_optional_on_a_system_that_names_no_home() {
+        let env = |_: &str| None;
+        let cfg = Config::resolve(FilePaths::default(), None, env).unwrap();
+        assert!(cfg.title_profile("0123456789abcdef").is_none());
     }
 
     #[test]

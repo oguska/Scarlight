@@ -99,11 +99,12 @@ build = ["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"]
                                          # BLAKE3 of the executable; the layer prints it as
                                          # "build unknown (<hash>)" when no profile matches
 
-[[hooks]]                                # optional: a code patch, applied only if the bytes match
+[[hooks]]                                # optional: a code patch; skipped, with a log line, if
+                                         # new is another length or rva+len leaves the image
 what   = "example patch"                 # your words, logged
 rva    = 0x12345                         # offset from the start of the mapped image
 expect = "488b0500000000"                # bytes that must be there first (hex, spaces allowed)
-new    = "eb18909090909090"              # what to write instead (same length)
+new    = "eb189090909090"                # what to write instead, same length as expect
 
 [skip]                                   # optional: work the GPU layer leaves out
 shaders = ["0011223344556677"]           # 16-digit host shader hashes

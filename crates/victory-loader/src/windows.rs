@@ -86,8 +86,13 @@ pub fn load(prepared: &PreparedImage, dir: &Path) -> Result<LoadedImage> {
     }
     if crate::hooks::enabled() {
         // SAFETY: just mapped, and no title code has run.
-        let applied =
-            unsafe { crate::hooks::apply_profile(loaded.base(), &prepared.original_hash) };
+        let applied = unsafe {
+            crate::hooks::apply_profile(
+                loaded.base(),
+                loaded.info.size_of_image as usize,
+                &prepared.original_hash,
+            )
+        };
         if applied > 0 {
             tracing::info!("title profile: {applied} hooks applied");
         } else {

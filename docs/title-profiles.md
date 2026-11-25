@@ -29,9 +29,10 @@ title profile: 2 hooks applied
 title profile: none matched
 ```
 
-The log never carries the image hash (logs are pasted into issues, and
-`docs/asset-policy.md` keeps hashes of game files out of them); `RUST_LOG=debug` shows it, and
-`victory title-id <exe>` prints it on request together with the profile that matches.
+The log never carries the image hash at info level (logs are pasted into issues, and
+`docs/asset-policy.md` keeps hashes of game files out of them). It appears on a debug line, which
+only a build with the `diagnostics` feature can emit (`VICTORY_LOG=debug`), or on request:
+`victory title-id <exe>` prints the hash, the directories searched and the profile that matches.
 
 **A profile is user data, never repository data.** It may name hashes of the title's files,
 per-build offsets and shader hashes — all of which `docs/asset-policy.md` keeps out of the
@@ -48,7 +49,7 @@ build = ["<hex>"]                   # BLAKE3 of the image, 16+ digits, matched a
 what   = "our words for the patch"  # logged
 rva    = 0x1000                     # offset from the start of the mapped image
 expect = "488b0500000000"           # bytes that must be there first (hex, spaces allowed)
-new    = "eb18909090909090"         # bytes to write (same length as expect)
+new    = "eb189090909090"           # bytes to write, the same length as expect
 
 [skip]                              # optional; work the GPU layer leaves out
 shaders = ["<16 hex digits>"]       # skip a pipeline containing one of these shaders
@@ -59,8 +60,9 @@ Every value above is made up. To get the hash for `build`, run `victory title-id
 the BLAKE3, whether a profile already matches it, and the directories searched. Keep the hash in
 your own notes, not in an issue.
 
-A hook is only applied when `expect` matches exactly, so a profile that names the wrong
-build changes nothing. Hooks need `VICTORY_HOOKS=1` (formerly `VICTORY_NO_WATCHDOG=1`,
+A hook is only applied when `new` is as long as `expect`, `rva..rva+len` lies inside the mapped
+image, and `expect` matches the bytes there exactly. Anything else is logged and skipped, so a
+wrong profile changes nothing and cannot crash the process. Hooks need `VICTORY_HOOKS=1` (formerly `VICTORY_NO_WATCHDOG=1`,
 still accepted) — patches are opt-in, never automatic.
 
 ## What a profile cannot do
