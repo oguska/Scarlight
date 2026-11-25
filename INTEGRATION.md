@@ -39,6 +39,10 @@ Maintained by @pablogonz12. Tested on Linux (RX 9070 XT, RADV, GE-Proton / vkd3d
 | Shaders: a table descriptor read only as numbers takes its raw view's values (816/820 of that class; world 681 -> 684/751) | not sent yet |
 | GPU: no blending on integer render targets in host pipelines | [#806](https://github.com/Marvisak/VIctory/issues/806) |
 
+## Buffer stride batch
+
+Merged with author commits kept: Marvisak/VIctory #2122 (imjustprism), #2046 (fuzeofficial), #2084 (Rafael), #2068 (fuzeofficial), #2079 (0xkn0wh3r3). 751 programs offline: 728 ok before and after; #2122 changes 2 translations, #2046 305, #2068 142, #2084 and #2079 none. Not yet run in the title.
+
 ## Known test failure
 
 `emit::tests::indexed_move_initializes_an_input_before_its_first_use` (from #457) fails on this branch (`WrongStart` case); it fails with or without #383.
