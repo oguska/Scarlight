@@ -10,7 +10,10 @@
 //! 2. The title pipelines a run drew or dispatched with are listed by a key
 //!    known when the title creates them (their shader containers and
 //!    graphics state); the next run hands those to the workers at
-//!    creation, during loading.
+//!    creation, during loading. The list is capped at `EARLY_MAX` keys:
+//!    once it is full a new key is dropped — the keys asked for last are
+//!    kept out of the list rather than evicting older ones — and `save`
+//!    logs the listed count, the cap and how many keys were dropped.
 //!
 //! All library calls are serialised: the interface does not promise that
 //! stores, loads and serialising may overlap.
@@ -50,7 +53,9 @@ unsafe impl Send for Library {}
 
 const LIBRARY_FILE: &str = "host-pipelines.bin";
 const EARLY_FILE: &str = "early-pipelines.txt";
-/// Title pipelines listed for an early start, at most.
+/// Title pipelines listed for an early start, at most. Once the list is
+/// full, new keys are dropped rather than evicting older ones; `save`
+/// logs how many were dropped.
 const EARLY_MAX: usize = 8192;
 
 fn library() -> Option<&'static Mutex<Library>> {
@@ -173,14 +178,20 @@ pub(crate) fn save(now: bool) {
         .and_then(|()| write_atomically(&dir.join(LIBRARY_FILE), &blob))
         .and_then(|()| write_atomically(&dir.join(EARLY_FILE), used.join("\n").as_bytes()));
     match written {
-        Ok(()) => tracing::info!(
-            bytes = blob.len(),
-            early = used.len(),
-            made = MADE.load(Ordering::Relaxed),
-            loaded = LOADED.load(Ordering::Relaxed),
-            started_early = EARLY.load(Ordering::Relaxed),
-            "host pipeline library saved"
-        ),
+        Ok(()) => {
+            let dropped = EARLY_DROPPED.load(Ordering::Relaxed);
+            tracing::info!(
+                bytes = blob.len(),
+                early = used.len(),
+                early_cap = EARLY_MAX,
+                early_dropped = dropped,
+                early_truncated = dropped > 0,
+                made = MADE.load(Ordering::Relaxed),
+                loaded = LOADED.load(Ordering::Relaxed),
+                started_early = EARLY.load(Ordering::Relaxed),
+                "host pipeline library saved"
+            );
+        }
         Err(e) => tracing::warn!(error = %e, "host pipeline library not saved"),
     }
 }
@@ -196,6 +207,8 @@ fn write_atomically(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()>
 /// Title pipeline keys drawn or dispatched with (this run and the last).
 static USED: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 static USED_CHANGED: AtomicBool = AtomicBool::new(false);
+/// New keys refused because the early list had reached `EARLY_MAX`.
+static EARLY_DROPPED: AtomicU64 = AtomicU64::new(0);
 
 fn used() -> std::sync::MutexGuard<'static, Option<HashSet<String>>> {
     let mut used = USED.lock().unwrap_or_else(|e| e.into_inner());
@@ -216,12 +229,20 @@ pub(crate) fn wanted_early(key: &str) -> bool {
     used().as_ref().is_some_and(|s| s.contains(key))
 }
 
-/// The title pipeline with `key` was drawn or dispatched with.
+/// The title pipeline with `key` was drawn or dispatched with. A key the
+/// list has no room for is dropped and counted in `EARLY_DROPPED`, which
+/// `save` logs.
 pub(crate) fn note_used(key: &str) {
     let mut used = used();
     let set = used.get_or_insert_with(HashSet::new);
-    if set.len() < EARLY_MAX && set.insert(key.to_owned()) {
+    if set.contains(key) {
+        return;
+    }
+    if set.len() < EARLY_MAX {
+        set.insert(key.to_owned());
         USED_CHANGED.store(true, Ordering::Relaxed);
+    } else {
+        EARLY_DROPPED.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -239,6 +260,28 @@ mod tests {
         assert_ne!(a, name("mesh", b"root", &[b"vs", b"ps"], "state"));
         // Parts do not run into each other.
         assert_ne!(a, name("graphics", b"root", &[b"vsp", b"s"], "state"));
+    }
+
+    #[test]
+    fn the_early_list_stops_at_the_cap_and_counts_the_refused() {
+        // `used()` starts empty here: no cache folder is set in tests.
+        for i in 0..EARLY_MAX + 2 {
+            note_used(&format!("key-{i}"));
+        }
+        {
+            let list = used();
+            let set = list.as_ref().expect("the list is loaded on first use");
+            assert_eq!(set.len(), EARLY_MAX, "the list stops at the cap");
+            assert!(set.contains("key-0"), "the first keys are kept");
+        }
+        assert!(
+            EARLY_DROPPED.load(Ordering::Relaxed) >= 2,
+            "a key refused at the cap is counted"
+        );
+        // A key already in the list is not a refusal.
+        let before = EARLY_DROPPED.load(Ordering::Relaxed);
+        note_used("key-0");
+        assert_eq!(EARLY_DROPPED.load(Ordering::Relaxed), before);
     }
 
     #[test]
