@@ -98,6 +98,8 @@ cat >"$STAGE/toolmanifest.vdf" <<'VDF'
 {
   "version" "2"
   "commandline" "/scarlight %verb%"
+  "require_tool_appid" "4183110"
+  "use_sessions" "1"
 }
 VDF
 install -m 644 "$EXE" "$STAGE/files/victory-$BUILDNAME.exe"

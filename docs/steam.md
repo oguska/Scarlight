@@ -15,6 +15,12 @@ Steam  ──▶  Scarlight (compatibility tool)  ──▶  victory.exe (the ti
 We do not ship or fork Proton. The tool uses the Wine in an installed GE-Proton or Valve Proton
 for the operating-system side, and its own Windows DLLs for the GPU side.
 
+Steam runs the tool inside the same kind of container it runs Proton in: `toolmanifest.vdf` asks for
+the Steam Linux Runtime GE-Proton declares (`require_tool_appid`, `use_sessions`), so the tool sees
+`compatibilitytools.d` — including the Proton folder it names — exactly as Proton does, on any
+distribution. Distros whose container setup is unusual can drop those two lines and the tool runs on
+the host instead; nothing else changes.
+
 ## 1. Install
 
 ### Option A: from a release tarball (no build)
@@ -142,3 +148,5 @@ cache. In Steam, the game's Compatibility setting falls back to its previous too
 | A run left a stuck prefix | the tool clears a leftover wineserver itself at the start of `waitforexitandrun`; if a title still hangs, `files/bin/wineserver -k` in your Proton folder, or delete the game's `compatdata/<appid>/pfx` |
 | Title builds its shaders again every launch | the Mesa cache is per game under `compatdata/<appid>/mesa_cache`; delete it if it is stale, and keep `MESA_CACHE_MAX_SIZE` large enough |
 | Flatpak Steam | all paths move to `~/.var/app/com.valvesoftware.Steam/data/Steam/`; `install.sh` detects that folder by itself |
+| The tool starts in a container and your Proton is not found | Scarlight runs inside a Steam Linux Runtime container, like Proton, so `compatibilitytools.d` is exposed there and a `PROTON` name resolves against it (and against the usual Steam folders, Flatpak included). If a distro's container still hides it, set `PROTON` to a full path in `scarlight.conf` |
+| The runtime container breaks the launch on your distro | the two lines that ask for it are `require_tool_appid` and `use_sessions` in `Scarlight/toolmanifest.vdf`; delete them and the tool runs on the host, on the same Wine |

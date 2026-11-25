@@ -32,10 +32,25 @@ DATA="${STEAM_COMPAT_DATA_PATH:-$HOME/.local/share/scarlight}"
 LOG="$DATA/scarlight.log"
 mkdir -p "$DATA"
 
-case "$PROTON" in
-  /*) PDIR="$PROTON" ;;
-  *) PDIR="$(dirname "$HERE")/$PROTON" ;;
-esac
+# Which Proton's Wine to use. A name is looked for in this tool's own
+# compatibilitytools.d first, then in the usual Steam folders: inside Steam's
+# runtime container compatibilitytools.d is exposed, but not always under the
+# same root as the tool (Flatpak Steam, for one).
+if [ "${PROTON#/}" != "$PROTON" ]; then
+  PDIR="$PROTON"
+else
+  PDIR=""
+  for base in "$(dirname "$HERE")" \
+    "$HOME/.local/share/Steam/compatibilitytools.d" \
+    "$HOME/.steam/root/compatibilitytools.d" \
+    "$HOME/.var/app/com.valvesoftware.Steam/data/Steam/compatibilitytools.d"; do
+    if [ -x "$base/$PROTON/files/bin/wine" ]; then
+      PDIR="$base/$PROTON"
+      break
+    fi
+  done
+  [ -n "$PDIR" ] || PDIR="$(dirname "$HERE")/$PROTON"
+fi
 WINE="$PDIR/files/bin/wine"
 WSRV="$PDIR/files/bin/wineserver"
 export WINEPREFIX="$DATA/pfx"

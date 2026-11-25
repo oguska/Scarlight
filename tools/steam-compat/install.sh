@@ -142,11 +142,18 @@ cat >"$T/compatibilitytool.vdf" <<'VDF'
   }
 }
 VDF
+# Steam runs the tool inside a Steam Linux Runtime container, the way it runs
+# Proton, so compatibilitytools.d and the concat'ed Proton folder are visible
+# there. 4183110 is Steam Linux Runtime 4.0, the one GE-Proton11-14 declares in
+# its own toolmanifest; use_sessions is the matching session API. See
+# docs/steam.md if a container breaks on your distro: the two lines can go.
 cat >"$T/toolmanifest.vdf" <<'VDF'
 "manifest"
 {
   "version" "2"
   "commandline" "/scarlight %verb%"
+  "require_tool_appid" "4183110"
+  "use_sessions" "1"
 }
 VDF
 
