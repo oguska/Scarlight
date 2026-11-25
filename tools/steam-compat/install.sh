@@ -90,6 +90,10 @@ fi
   echo "(build it with: cargo xwin build --release -p victory --target x86_64-pc-windows-msvc)" >&2
   exit 1
 }
+# The folder the Wine and the DXVK DLLs are copied from (a name is relative to
+# this compatibilitytools.d, a full path is used as it is).
+if [ "${PROTON#/}" != "$PROTON" ]; then PDIR="$PROTON"; else PDIR="$DEST/$PROTON"; fi
+
 [ -n "$DLLS" ] || {
   echo "pass --dlls DIR: the folder holding d3d12.dll, d3d12core.dll (vkd3d-proton) and dxil.dll, dxcompiler.dll (DXC)" >&2
   echo "(docs/steam.md says where each one comes from; they are redistributable, d3dcompiler_47.dll is not)" >&2
@@ -123,7 +127,7 @@ done
 if [ -n "$D3DC" ]; then install -m 644 "$D3DC" "$T/files/d3dcompiler_47.dll"; fi
 # dxgi/d3d11/d3d10core come from the Proton you already have: copy, do not ship.
 for f in dxgi.dll d3d11.dll d3d10core.dll; do
-  src="$DEST/${PROTON#/}/files/lib/wine/dxvk/x86_64-windows/$f"
+  src="$PDIR/files/lib/wine/dxvk/x86_64-windows/$f"
   if [ -f "$src" ]; then install -m 644 "$src" "$T/files/"; fi
 done
 
@@ -166,8 +170,9 @@ if [ ! -f "$T/scarlight.conf" ]; then
 BUILD=default
 
 # The Proton whose Wine Scarlight runs on: a folder name in this
-# compatibilitytools.d, or a full path to a Proton folder.
-PROTON=$PROTON
+# compatibilitytools.d, or a full path to a Proton folder (shell-quoted here,
+# because it is sourced as shell).
+PROTON=$(printf '%q' "$PROTON")
 
 # Microsoft's d3dcompiler_47.dll is optional and not shipped. If you have one
 # you are licensed to use, put its path here; empty means use Wine's built-in.

@@ -82,9 +82,13 @@ if [ ! -f "$GAME" ]; then
   exit 1
 fi
 mkdir -p "$WINEPREFIX"
-# A run killed by Steam leaves its wineserver holding the prefix: clear it first.
-[ "$verb" = waitforexitandrun ] && "$WSRV" -w 2>/dev/null
-[ "$verb" = waitforexitandrun ] && "$WSRV" -k 2>/dev/null
+# A run killed by Steam leaves its wineserver holding the prefix: stop it, then
+# wait for it to be gone. Waiting first would block on the very server we want
+# gone, so the order matters.
+if [ "$verb" = waitforexitandrun ]; then
+  "$WSRV" -k 2>/dev/null
+  "$WSRV" -w 2>/dev/null
+fi
 
 # Scarlight runs from its own folder in the prefix so its DLLs (vkd3d-proton,
 # DXC) win over anything else on the search path.

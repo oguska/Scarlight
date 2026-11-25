@@ -8,6 +8,8 @@
 #                    (default: target/x86_64-pc-windows-msvc/release/victory.exe)
 #   --build NAME     the build name the exe is installed as, files/victory-<NAME>.exe (default: default)
 #   --version VER    version in the file name (default: latest git tag, else 0.0.0)
+#   --vkd3d-version TAG   the vkd3d-proton release --vkd3d came from (recorded, with its source URL)
+#   --dxc-version TAG     the DXC release --dxc came from (recorded)
 #   --out DIR        where to write the tarball (default: dist)
 #   -h, --help       this text
 #
@@ -29,6 +31,8 @@ DXC=""
 EXE="$ROOT/target/x86_64-pc-windows-msvc/release/victory.exe"
 BUILDNAME="default"
 VERSION=""
+VKD3D_VERSION=""
+DXC_VERSION=""
 OUT="$ROOT/dist"
 
 usage() { sed -n '2,24p' "$0"; }
@@ -40,6 +44,8 @@ while [ $# -gt 0 ]; do
     --exe) EXE="$2"; shift ;;
     --build) BUILDNAME="$2"; shift ;;
     --version) VERSION="$2"; shift ;;
+    --vkd3d-version) VKD3D_VERSION="$2"; shift ;;
+    --dxc-version) DXC_VERSION="$2"; shift ;;
     --out) OUT="$2"; shift ;;
     -h | --help) usage; exit 0 ;;
     *)
@@ -51,6 +57,12 @@ while [ $# -gt 0 ]; do
   shift
 done
 
+case "$BUILDNAME" in
+  '' | *[!A-Za-z0-9._-]*)
+    echo "--build must be letters, digits, dot, dash or underscore: got '$BUILDNAME'" >&2
+    exit 2
+    ;;
+esac
 [ -n "$VKD3D" ] || { echo "pass --vkd3d DIR (d3d12.dll, d3d12core.dll)" >&2; exit 1; }
 [ -n "$DXC" ] || { echo "pass --dxc DIR (dxil.dll, dxcompiler.dll)" >&2; exit 1; }
 [ -f "$EXE" ] || {
@@ -111,8 +123,8 @@ cat >"$STAGE/scarlight.conf" <<'CONF'
 # Scarlight compatibility tool settings. Edit, then press Play again.
 # Full reference: docs/steam.md in the Scarlight repository.
 
-# Which build to run: files/victory-<BUILD>.exe (default: the shipped one).
-BUILD=default
+# Which build to run: files/victory-<BUILD>.exe (the one this package shipped).
+BUILD=__BUILD__
 
 # The Proton whose Wine Scarlight runs on: a folder name in this
 # compatibilitytools.d, or a full path to a Proton folder.
@@ -134,12 +146,40 @@ VKD3D_CONFIG=ignore_shared_fence
 # Extra environment for the run, space separated, e.g. VICTORY_LOG=debug
 EXTRA_ENV=
 CONF
+# The packaged build name, so BUILD and files/victory-<BUILD>.exe always agree.
+sed -i "s/__BUILD__/$BUILDNAME/" "$STAGE/scarlight.conf"
 
 cp "$ROOT/LICENSE" "$STAGE/LICENSE"
 cp "$HERE/licenses/LGPL-2.1.txt" "$HERE/licenses/vkd3d-proton-LGPL-2.1.txt" \
-  "$HERE/licenses/DXC-LICENSE-LLVM.txt" "$HERE/licenses/DXC-LICENSE-MS.txt" \
+  "$HERE/licenses/DXC-LICENSE-MS.txt" "$HERE/licenses/DXC-LICENCE-MIT.txt" \
+  "$HERE/licenses/DXC-LICENSE-LLVM.txt" "$HERE/licenses/DXC-CLANG-LICENSE-Apache-2.0-LLVM.txt" \
   "$STAGE/files/licenses/"
 install -m 644 "$HERE/licenses/README.md" "$STAGE/files/licenses/README.md"
+
+# Which binaries these are, where they came from, and where their source is: the
+# LGPL asks for the corresponding source and this is the written offer that goes
+# with it (the release job also attaches the source archive).
+cat >"$STAGE/files/licenses/VERSIONS.txt" <<VERS
+Scarlight $VERSION
+  built from https://github.com/pablogonz12/Scarlight, GPL-3.0-or-later (see LICENSE).
+
+vkd3d-proton ${VKD3D_VERSION:-unknown}
+  files/d3d12.dll, files/d3d12core.dll, unmodified release binaries, LGPL-2.1-or-later.
+  Source for that exact version: https://github.com/HansKristian-Work/vkd3d-proton/releases/tag/${VKD3D_VERSION:-unknown}
+  (the release of this tarball also carries the matching source archive). If it is
+  missing, write to the project's issue tracker and we will send it; the offer is
+  good for three years after the release date.
+
+DXC ${DXC_VERSION:-unknown}
+  files/dxil.dll, files/dxcompiler.dll, unmodified release binaries from
+  https://github.com/microsoft/DirectXShaderCompiler/releases/tag/${DXC_VERSION:-unknown}.
+  Their notices are the ones in this folder; they are optional at runtime, and you
+  may delete the two DLLs and use your own copy instead.
+
+Microsoft d3dcompiler_47.dll is not included and not required.
+VERS
+
+
 
 mkdir -p "$OUT"
 TARBALL="$OUT/Scarlight-$VERSION.tar.gz"

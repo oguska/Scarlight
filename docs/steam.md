@@ -29,6 +29,7 @@ the host instead; nothing else changes.
 2. Extract the `Scarlight/` folder into Steam's compatibility tools folder:
 
    ```bash
+   mkdir -p ~/.local/share/Steam/compatibilitytools.d/
    tar -xzf Scarlight-*.tar.gz -C ~/.local/share/Steam/compatibilitytools.d/
    ```
 
@@ -59,7 +60,8 @@ detects your installed Proton, and writes a `scarlight.conf` for you.
 | `--dest DIR` | the `compatibilitytools.d` to install into (default: Steam's own) |
 | `--uninstall` | remove the installed tool |
 
-Build the exe first (see [the README](../README.md#install)), or use a release tarball instead.
+Build the exe first — [CONTRIBUTING.md](../CONTRIBUTING.md#build) has the commands — or use a release
+tarball instead.
 
 ### The DLLs
 
@@ -132,8 +134,12 @@ tools/steam-compat/install.sh --uninstall      # or: rm -rf ~/.local/share/Steam
 ```
 
 Nothing else is needed: Scarlight keeps no service, no system package and no file outside the tool
-folder and the game's `compatdata/<appid>/`. Delete that folder to reclaim the prefix and the shader
-cache. In Steam, the game's Compatibility setting falls back to its previous tool after a restart.
+folder and the game's `compatdata/<appid>/`.
+
+That folder is the game's Wine prefix, and **a game's saved games can live inside it**: back up
+whatever saves matter to you, or check that Steam Cloud has them, before deleting it. With that done,
+delete `compatdata/<appid>/` to reclaim the prefix and the shader cache. In Steam, the game's
+Compatibility setting falls back to its previous tool after a restart.
 
 ## 6. Troubleshooting
 
@@ -145,7 +151,7 @@ cache. In Steam, the game's Compatibility setting falls back to its previous too
 | The log says `game exe not found` | the title was launched with an argument the tool cannot resolve; clear Launch Options and try again |
 | Crash or black window at world entry | check `vulkaninfo --summary` shows a Mesa driver (`radv`, `Intel … Mesa`, `nvk`) with Vulkan 1.3+; a proprietary driver is not a supported target |
 | Dark picture, missing detail, single-digit fps | expected today: see the status in the [README](../README.md#status) |
-| A run left a stuck prefix | the tool clears a leftover wineserver itself at the start of `waitforexitandrun`; if a title still hangs, `files/bin/wineserver -k` in your Proton folder, or delete the game's `compatdata/<appid>/pfx` |
+| A run left a stuck prefix | the tool stops a leftover wineserver itself at the start of `waitforexitandrun`; if the game still hangs, stop that game's server only: `WINEPREFIX=<the game's compatdata/<appid>/pfx> <your Proton>/files/bin/wineserver -k`. As a last resort delete `compatdata/<appid>/pfx` — after backing up any saved games that live in it |
 | Title builds its shaders again every launch | the Mesa cache is per game under `compatdata/<appid>/mesa_cache`; delete it if it is stale, and keep `MESA_CACHE_MAX_SIZE` large enough |
 | Flatpak Steam | all paths move to `~/.var/app/com.valvesoftware.Steam/data/Steam/`; `install.sh` detects that folder by itself |
 | The tool starts in a container and your Proton is not found | Scarlight runs inside a Steam Linux Runtime container, like Proton, so `compatibilitytools.d` is exposed there and a `PROTON` name resolves against it (and against the usual Steam folders, Flatpak included). If a distro's container still hides it, set `PROTON` to a full path in `scarlight.conf` |

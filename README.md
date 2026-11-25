@@ -58,6 +58,7 @@ Three steps. Full detail — every option, logs, uninstall, troubleshooting — 
    from [Releases](https://github.com/pablogonz12/Scarlight/releases) and extract it there:
 
    ```bash
+   mkdir -p ~/.local/share/Steam/compatibilitytools.d/
    tar -xzf Scarlight-*.tar.gz -C ~/.local/share/Steam/compatibilitytools.d/
    ```
 

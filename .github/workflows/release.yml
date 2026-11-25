@@ -74,16 +74,25 @@ jobs:
           name: victory-exe
           path: exe
       - name: Fetch the redistributable DLLs
+        env:
+          # Pinned, not "latest": LGPL-2.1 section 6 wants the source of the exact
+          # binaries we ship, so the release names its tags and carries that source.
+          VKD3D_TAG: v3.1
+          DXC_TAG: v1.9.2609
         run: |
           set -euo pipefail
           command -v zstd >/dev/null || (sudo apt-get update && sudo apt-get install -y --no-install-recommends zstd)
           tmp="$(mktemp -d)"
-          vkd3d_url="$(curl -fsSL https://api.github.com/repos/HansKristian-Work/vkd3d-proton/releases/latest \
+          echo "VKD3D_TAG=$VKD3D_TAG" >> "$GITHUB_ENV"
+          echo "DXC_TAG=$DXC_TAG" >> "$GITHUB_ENV"
+          vkd3d_url="$(curl -fsSL "https://api.github.com/repos/HansKristian-Work/vkd3d-proton/releases/tags/$VKD3D_TAG" \
             | jq -r '[.assets[].browser_download_url | select(endswith(".tar.zst"))] | first')"
-          dxc_url="$(curl -fsSL https://api.github.com/repos/microsoft/DirectXShaderCompiler/releases/latest \
+          dxc_url="$(curl -fsSL "https://api.github.com/repos/microsoft/DirectXShaderCompiler/releases/tags/$DXC_TAG" \
             | jq -r '[.assets[].browser_download_url | select(test("/dxc_[0-9_]+\\.zip$"))] | first')"
           curl -fsSL -o "$tmp/vkd3d.tar.zst" "$vkd3d_url"
           curl -fsSL -o "$tmp/dxc.zip" "$dxc_url"
+          # The vkd3d-proton archives are their corresponding source: keep one.
+          cp "$tmp/vkd3d.tar.zst" vkd3d-proton-"$VKD3D_TAG"-source.tar.zst
           mkdir -p "$tmp/vkd3d" "$tmp/dxc"
           zstd -d --stdout "$tmp/vkd3d.tar.zst" | tar -x -C "$tmp/vkd3d"
           unzip -q -o "$tmp/dxc.zip" -d "$tmp/dxc"
@@ -98,7 +107,8 @@ jobs:
           version="${{ github.ref_name }}"
           if [ "${{ github.event_name }}" = workflow_dispatch ]; then version="dev-${{ github.run_number }}"; fi
           tools/steam-compat/package.sh --vkd3d dlls-vkd3d --dxc dlls-dxc \
-            --exe exe/victory.exe --version "$version" --out dist
+            --exe exe/victory.exe --version "$version" \
+            --vkd3d-version "$VKD3D_TAG" --dxc-version "$DXC_TAG" --out dist
           tar -tzf dist/Scarlight-*.tar.gz
       - name: Attach to the release
         env:
@@ -107,12 +117,15 @@ jobs:
           set -euo pipefail
           tag="${{ github.ref_name }}"
           if [ "${{ github.event_name }}" = workflow_dispatch ]; then tag="dev-${{ github.run_number }}"; fi
+          # The tarball, plus vkd3d-proton's corresponding source for the version
+          # it ships (LGPL-2.1 section 6).
+          assets=(dist/Scarlight-*.tar.gz vkd3d-proton-"$VKD3D_TAG"-source.tar.zst)
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" dist/Scarlight-*.tar.gz --clobber
+            gh release upload "$tag" "${assets[@]}" --clobber
           else
-            gh release create "$tag" dist/Scarlight-*.tar.gz --generate-notes --title "$tag" \
+            gh release create "$tag" "${assets[@]}" --generate-notes --title "$tag" \
               --target "$GITHUB_SHA" \
-              --notes "Steam compatibility tool from $tag: extract Scarlight/ into Steam's compatibilitytools.d. Reads files you supply; no game files are included or needed to build."
+              --notes "Steam compatibility tool from $tag: extract Scarlight/ into Steam's compatibilitytools.d. Reads files you supply; no game files are included or needed to build. Ships vkd3d-proton $VKD3D_TAG (LGPL-2.1; its source archive is attached) and DXC $DXC_TAG DLLs with their notices."
           fi
       - uses: actions/upload-artifact@v7
         with:
