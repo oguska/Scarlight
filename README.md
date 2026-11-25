@@ -155,8 +155,8 @@ VKD3D_CONFIG=ignore_shared_fence VICTORY_LOG=info \
 
 Check the stack first: `vulkaninfo --summary` should show `driverName` `radv`, `Intel open-source Mesa
 driver` (ANV) or `nvk`, with an `apiVersion` of at least 1.3. The first run creates the Wine prefix by
-itself, about 30 s. Play script, keyboard-as-gamepad map, switches and troubleshooting are in
-**[docs/linux.md](docs/linux.md)**.
+itself, about 30 s. Play script, keyboard-as-gamepad map, switches, the Mesa shader cache and
+troubleshooting are in **[docs/linux.md](docs/linux.md)**.
 
 The build and the bind-only part above were run as written on a fresh clone and an empty prefix: the
 load prints `missing=0` for the title and its DLLs, and without `--execute` it only lists what it would
