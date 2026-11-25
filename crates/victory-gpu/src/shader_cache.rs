@@ -52,8 +52,8 @@ pub fn counts() -> (u64, u64) {
 /// What a translation depends on besides its container: the translator
 /// (`victory_shader::SOURCE_HASH`: its sources, manifest, the lock file and
 /// the compiler), the entry's encoding (this file's text) and the
-/// translation settings (the loop limit, which a diagnostics build can
-/// change at run time).
+/// translation settings (the loop limit, which
+/// `VICTORY_SHADER_LOOP_LIMIT` can change in any build).
 fn build() -> &'static [u8; 32] {
     static BUILD: OnceLock<[u8; 32]> = OnceLock::new();
     BUILD.get_or_init(|| {
@@ -61,7 +61,7 @@ fn build() -> &'static [u8; 32] {
         if limit != victory_shader::emit::DEFAULT_LOOP_LIMIT {
             tracing::warn!(
                 limit,
-                "VICTORY_SHADER_LOOP_LIMIT: translated loops stop sooner"
+                "VICTORY_SHADER_LOOP_LIMIT: translated loops stop after this many iterations per lane"
             );
         }
         key(victory_shader::SOURCE_HASH, ENCODING, limit)
