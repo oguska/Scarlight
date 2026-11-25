@@ -52,7 +52,9 @@ Three things follow, and they set the order of the steps:
 
 Each step is tried on the current build, measured on the fixed test scene (two runs per side against
 its baseline, see [testing.md](testing.md)), and kept only if the picture holds and the numbers move.
-A step that fails is written down and left.
+Steps that only restructure (the backend seam, step 3) have a different gate: the picture and the
+numbers must stay the same within run noise, since they are not meant to move them. A step that fails
+is written down and left.
 
 1. **Zero-copy title memory, through vkd3d-proton.** Import the title's memory into Vulkan with
    `OpenExistingHeapFromAddress` instead of copying it every frame. This is first because it attacks
