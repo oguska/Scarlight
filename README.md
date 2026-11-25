@@ -21,6 +21,12 @@
 
 </div>
 
+> **25 Nov 2026 — new packaging, same code.** Scarlight now installs as a Steam compatibility tool:
+> choose **Scarlight (Xbox Series)** in a game's *Properties → Compatibility* and press Play. The
+> previous development setup (offline lab, GPU queue, performance ledger) is preserved, not deleted,
+> on branch [`legacy/amd-hub`](https://github.com/pablogonz12/Scarlight/tree/legacy/amd-hub) and tag
+> `legacy-amd-hub-2026-11-25`. Read the [announcement](ANNOUNCEMENT.md).
+
 ## What it is
 
 Scarlight is a compatibility layer for titles built against the Xbox Series GDK. It loads a title's
