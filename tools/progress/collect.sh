@@ -336,18 +336,28 @@ if [ -n "${MATRIX_AMD:-}" ]; then
     fact mesa 0 "AMD families whose whole world set compiles offline" note "$amd_all of $amd_n AMD families compile the whole set through the noop shim (Mesa driver, no GPU)"
     say "mesa  AMD $amd_all/$amd_n families compile the whole set ($(basename "$MATRIX_AMD"))"
   fi
-  [ "$vega_tot" -gt 0 ] && fact mesa 2 "Vega (gfx900): world programs that compile offline" impl "$vega_ok,$vega_tot"
-  [ "$vega_tot" -gt 0 ] && fact mesa 2 "Vega (gfx900): world programs that compile offline" note "$((vega_tot - vega_ok)) of $vega_tot abort the driver: every mesh-shader program, and GFX9 has no mesh shader support in RADV"
+  [ "$vega_tot" -gt 0 ] && fact mesa 4 "Vega (gfx900): world programs that compile offline" impl "$vega_ok,$vega_tot"
+  [ "$vega_tot" -gt 0 ] && fact mesa 4 "Vega (gfx900): world programs that compile offline" note "$((vega_tot - vega_ok)) of $vega_tot abort the driver: every mesh-shader program, and GFX9 has no mesh shader support in RADV"
 else
   skip "mesa: no AMD family-matrix tsv in $OFF"
 fi
 if [ -n "${MATRIX_INTEL:-}" ]; then
-  read -r in_all in_n _ _ <<< "$(count_matrix "$MATRIX_INTEL" '^(dg2|bmg|mtl|lnl|ptl|nvl|acm)$')"
-  if [ "$in_n" -gt 0 ]; then
-    fact mesa 1 "Intel (ANV) families measured offline" impl "$in_n,$in_n"
-    fact mesa 1 "Intel (ANV) families measured offline" note "$in_n Intel families measured through Mesa's Intel noop shim, $in_all of them with the whole set; there is no Intel card here to run on"
-    say "mesa  Intel $in_n families measured, $in_all with the whole set ($(basename "$MATRIX_INTEL"))"
-  fi
+  # one row per Intel family: ANV's answer differs per family (DG2 and Xe-LPG
+  # each miss one program on the stub's query gap, Arc B misses none), so an
+  # aggregate would hide the only number a reader wants.
+  MATRIX_INTEL_TXT="${MATRIX_INTEL%.tsv}.txt"
+  intel_fact() { # <family> <row> <label> <what the misses are>
+    read -r ok tot <<< "$(awk -F'\t' -v f="$1" '$2==f {t++; if ($3=="ok") o++} END {printf "%d %d", o+0, t+0}' "$MATRIX_INTEL")"
+    [ "${tot:-0}" -gt 0 ] || return 0
+    med=$(awk -v f="$1" '$1==f {print $7; exit}' "$MATRIX_INTEL_TXT" 2>/dev/null)
+    note="$ok of $tot build a pipeline through ANV and Mesa's Intel noop shim; $4; median ${med:-?} ms per program"
+    fact mesa "$2" "$3" impl "$ok,$tot"
+    fact mesa "$2" "$3" note "$note"
+    say "mesa  Intel $1 $ok/$tot pipelines ($(basename "$MATRIX_INTEL"))"
+  }
+  intel_fact bmg 1 "Arc B (Xe2): world programs that build pipelines offline" "none is refused"
+  intel_fact dg2 2 "Arc A (DG2): world programs that build pipelines offline" "the one miss is the stub's gap (Unknown drm_i915_query_item), not a compiler error"
+  intel_fact mtl 3 "Xe-LPG: world programs that build pipelines offline" "the one miss is the same stub gap"
 else
   skip "mesa: no Intel family-matrix tsv in $OFF"
 fi
@@ -404,4 +414,24 @@ json.dump(doc, open(path, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
 open(path, "a", encoding="utf-8").write("\n")
 print("wrote %s: %d rows updated, %d kept as they were" % (path, applied, kept), file=sys.stderr)
 PY
+# The README's Shaders row shows a verified column: it must be the real-pipeline
+# count, not a note that no validation has happened. Keep the pointer on the
+# validated row, so a regeneration cannot bring the stale text back.
+python3 -I - "$JSON" <<'PY'
+import json, sys
+path = sys.argv[1]
+doc = json.load(open(path, encoding="utf-8"))
+area = {a["id"]: a for a in doc["areas"]}["shaders"]
+row = next((i for i, r in enumerate(area["rows"]) if "real RADV pipeline" in r.get("label", "")), None)
+if row is None:
+    print("keep  shaders: no validated-pipeline row, README detail unchanged", file=sys.stderr)
+else:
+    area["readme_from"] = {"impl": area.get("readme_from", {}).get("impl", 3), "verified": row}
+    area["readme_labels"] = ["", "real RADV pipeline"]
+    area.pop("readme_verified_text", None)
+    json.dump(doc, open(path, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+    open(path, "a", encoding="utf-8").write("\n")
+    print("wrote %s: shaders README detail reads row %d (%s)" % (path, row, area["rows"][row]["label"]), file=sys.stderr)
+PY
+
 say "next: python3 -I tools/progress/render.py"

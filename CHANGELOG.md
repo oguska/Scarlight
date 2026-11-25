@@ -14,13 +14,17 @@ behaviour without a major version bump.
   on Mesa's open Vulkan drivers, RADV first.
 - Boot, menus, audio and gamepad input work; menus run at 30 fps.
 - Built and run with one title so far; its world renders lit and textured on an RX 9070 XT with
-  Mesa 26.3.1 RADV: **1.45-1.6 fps** on the
+  Mesa 26.3.1 RADV: **1.45-1.7 fps** on the
   fixed test scene in current builds, **up to 3.0 fps** in one earlier build.
 - Offline shader translation: **751 of 751** world programs translate.
 - Diagnostics build with per-frame statistics on copies, read-back, memory watches and pipelines.
 - Switches for the title's watchdog, logging, GPU timing and frame capture, plus experimental async
   write-back.
-- Documentation: Linux setup, architecture, testing method, hardware status and roadmap in `docs/`.
+- Documentation: Linux setup, architecture, testing method, hardware status and roadmap in `docs/`,
+  and a progress page whose numbers are generated from counted sets by `tools/progress/`.
+- The world shader set is compiled into real pipelines, not just translated: 749 of 751 on RADV here,
+  and through Mesa's noop shims for RDNA1-3, Vega and three Intel ANV families (see
+  [docs/hardware.md](docs/hardware.md#compile-check-per-family)).
 
 ### Known limitations
 
