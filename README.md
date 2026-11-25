@@ -191,7 +191,8 @@ long-term idea, are in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Launcher
 
-**Coming in the next release.** A `scarlight` launcher that puts the whole stack in one place:
+**Available now** in [`tools/scarlight-launcher/`](tools/scarlight-launcher/README.md). A
+`scarlight` launcher that puts the whole stack in one place:
 
 - a **system check** before the first run: GPU, Mesa version, Vulkan, Proton build, and which parts
   of the stack are missing;
@@ -200,8 +201,9 @@ long-term idea, are in [docs/ROADMAP.md](docs/ROADMAP.md).
 - a **ray-tracing toggle** where the driver and build support it, the **Mesa options** that matter
   here in one panel, and a **backend choice**: Proton today, native Vulkan when it exists.
 
-It lives in `tools/scarlight-launcher/` and lands in a separate pull request; until then,
-[docs/linux.md](docs/linux.md) has the manual setup.
+It is one bash script (`scarlight`, plus a desktop entry template and an example profile), needs
+nothing but `vulkan-tools` for the check, and uses `gum`, `fzf`, `whiptail`/`dialog` or plain
+prompts, whichever is installed; [docs/linux.md](docs/linux.md) still has the manual setup.
 
 <a id="help-us-test"></a>
 
