@@ -183,6 +183,7 @@
 //!   console never exports them).
 
 mod bitcode;
+pub mod clamp;
 #[cfg(all(test, windows))]
 mod bvh_tests;
 mod container;
@@ -227,36 +228,38 @@ pub use shader::{
 pub const DEFAULT_LOOP_LIMIT: u32 = lower::LOOP_LIMIT;
 
 /// The iteration count after which a translated loop is left, per lane and
-/// per entry into the loop: [`DEFAULT_LOOP_LIMIT`].
+/// per entry into the loop: [`DEFAULT_LOOP_LIMIT`], or what
+/// `VICTORY_SHADER_LOOP_LIMIT` (decimal or `0x` hex, at least 1, clamped
+/// to 2^31-1) says in any build, `debug`, `release` or `diagnostics`.
 ///
-/// With the `diagnostics` feature, `VICTORY_SHADER_LOOP_LIMIT` (decimal or
-/// `0x` hex, at least 1) sets it instead. A loop that hits the limit in
-/// every lane of a full-screen pass still runs for seconds (2^20 times a
-/// 4K screen is about 10^13 iterations); a much lower limit shows whether
-/// such loops are what makes a frame slow. The value is part of the
-/// translation, so the shader cache must key on it (`victory-gpu`'s does).
+/// A loop that hits the limit in every lane of a full-screen pass can run
+/// for seconds (2^20 times a 4K screen is about 10^13 iterations), so a
+/// loop whose exit condition never becomes true costs that much GPU time
+/// per frame; a much lower limit shows whether such loops are what makes a
+/// frame slow. The value is part of the translation, so the shader cache
+/// must key on it (`victory-gpu`'s does).
 pub fn loop_limit() -> u32 {
     static LIMIT: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     *LIMIT.get_or_init(|| {
-        if cfg!(feature = "diagnostics") {
-            parse_loop_limit(std::env::var("VICTORY_SHADER_LOOP_LIMIT").ok().as_deref())
-        } else {
-            lower::LOOP_LIMIT
-        }
+        parse_loop_limit(std::env::var("VICTORY_SHADER_LOOP_LIMIT").ok().as_deref())
     })
 }
 
 /// `VICTORY_SHADER_LOOP_LIMIT`'s value; the default when it is unset,
-/// unreadable or 0. Pure, for testing.
+/// unreadable or 0. The constant and the counter are `i32` in the emitted
+/// code and compared unsigned, so a value from 2^31 up would behave like no
+/// limit at all (two billion iterations, the hang the limit exists for):
+/// it is clamped to [`i32::MAX`]. Pure, for testing.
 fn parse_loop_limit(value: Option<&str>) -> u32 {
-    let parsed = value
-        .map(str::trim)
-        .and_then(|v| match v.strip_prefix("0x") {
+    let parsed = value.map(str::trim).and_then(|v| {
+        let hex = v.strip_prefix("0x").or_else(|| v.strip_prefix("0X"));
+        match hex {
             Some(hex) => u32::from_str_radix(hex, 16).ok(),
             None => v.parse().ok(),
-        });
+        }
+    });
     match parsed {
-        Some(n) if n > 0 => n,
+        Some(n) if n > 0 => n.min(i32::MAX as u32),
         _ => lower::LOOP_LIMIT,
     }
 }
@@ -624,8 +627,22 @@ mod tests {
         assert_eq!(parse_loop_limit(None), LOOP_LIMIT);
         assert_eq!(parse_loop_limit(Some("4096")), 4096);
         assert_eq!(parse_loop_limit(Some(" 0x1000 ")), 4096);
+        assert_eq!(parse_loop_limit(Some("0X20")), 32);
+        assert_eq!(parse_loop_limit(Some("\t256\n")), 256);
         assert_eq!(parse_loop_limit(Some("1")), 1);
-        for bad in ["", "0", "-5", "lots", "0x", "4294967296"] {
+        // The count is an i32 in the emitted code: no negative limit.
+        assert_eq!(parse_loop_limit(Some("2147483647")), i32::MAX as u32);
+        assert_eq!(parse_loop_limit(Some("0xFFFFFFFF")), i32::MAX as u32);
+        for bad in [
+            "",
+            "0",
+            "0x0",
+            "-5",
+            "lots",
+            "0x",
+            "4294967296",
+            "0x100000000",
+        ] {
             assert_eq!(parse_loop_limit(Some(bad)), LOOP_LIMIT, "{bad:?}");
         }
     }

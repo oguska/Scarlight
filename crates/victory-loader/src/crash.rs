@@ -214,8 +214,10 @@ unsafe fn emulate_amd_only(info: *mut EXCEPTION_POINTERS) -> bool {
         if record.ExceptionCode != EXCEPTION_ILLEGAL_INSTRUCTION {
             return false;
         }
-        let code = context.Rip as *const u8;
-        match code.cast::<[u8; 3]>().read_unaligned() {
+        let (bytes, n) = code_at(context.Rip as usize);
+        // Zeros past `n`, so every decoder may read the copy.
+        let code = bytes.as_ptr();
+        match [bytes[0], bytes[1], bytes[2]] {
             [0x0f, 0x01, 0xfc] => return clzero(context),
             [0x0f, 0x01, 0xfa] => {}
             [0x0f, 0x01, 0xfb] => std::thread::yield_now(),
@@ -228,12 +230,6 @@ unsafe fn emulate_amd_only(info: *mut EXCEPTION_POINTERS) -> bool {
                 context.Rdx = cycles >> 32;
             }
             _ => {
-                // Only bytes inside the faulting instruction's page are read: the next page may
-                // not be mapped.
-                let room = 0x1000 - (context.Rip as usize & 0xfff);
-                let mut bytes = [0u8; 32];
-                let n = room.min(bytes.len());
-                std::ptr::copy_nonoverlapping(code, bytes.as_mut_ptr(), n);
                 if let Some(pass) = clwb_loop(&bytes[..n])
                     && let Some(end) =
                         clwb_loop_end(*gpr(context, pass.base), *gpr(context, pass.limit))
@@ -261,6 +257,44 @@ unsafe fn emulate_amd_only(info: *mut EXCEPTION_POINTERS) -> bool {
         context.Rip += 3;
     }
     true
+}
+
+/// The code at `rip`, 32 bytes at most: what is left of its page, and the
+/// next page's when that page can be read (an instruction may straddle the
+/// two). Reading past a short instruction at the end of a page into an
+/// unmapped one would fault inside the handler. The count is that of the
+/// bytes read; the rest are zero.
+///
+/// # Safety
+///
+/// `rip`'s page is readable.
+unsafe fn code_at(rip: usize) -> ([u8; 32], usize) {
+    let mut bytes = [0u8; 32];
+    let room = 0x1000 - (rip & 0xfff);
+    let n = if room < bytes.len() && readable(rip + room) {
+        bytes.len()
+    } else {
+        room.min(bytes.len())
+    };
+    // SAFETY: `n` bytes from `rip` are readable, as above.
+    unsafe { std::ptr::copy_nonoverlapping(rip as *const u8, bytes.as_mut_ptr(), n) };
+    (bytes, n)
+}
+
+/// Whether the page at `address` is committed and can be read.
+fn readable(address: usize) -> bool {
+    use windows_sys::Win32::System::Memory::{
+        MEM_COMMIT, MEMORY_BASIC_INFORMATION, PAGE_EXECUTE, PAGE_GUARD, PAGE_NOACCESS,
+        VirtualQuery,
+    };
+    // SAFETY: a zeroed MEMORY_BASIC_INFORMATION is valid.
+    let mut info: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
+    // SAFETY: reads the address space's bookkeeping, not `address` itself.
+    let n = unsafe { VirtualQuery(address as *const _, &mut info, size_of_val(&info)) };
+    n != 0
+        && info.State == MEM_COMMIT
+        && info.Protect & (PAGE_GUARD | PAGE_NOACCESS) == 0
+        && info.Protect & 0xff != PAGE_EXECUTE
 }
 
 /// `clwb m8` (`66 [rex] 0f ae /6`, a memory operand), which Intel CPUs before
@@ -1117,6 +1151,53 @@ mod tests {
                 assert_eq!(context.Rip, end as u64 + insn.len() as u64);
             }
             VirtualFree(page.cast(), 0, MEM_RELEASE);
+        }
+    }
+
+    #[test]
+    fn a_clwb_across_a_page_end_is_read_whole_if_the_next_page_can_be() {
+        use windows_sys::Win32::System::Memory::{
+            MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE, VirtualAlloc, VirtualFree,
+        };
+        // SAFETY: a fresh reservation of two pages, the first committed;
+        // freed at the end.
+        unsafe {
+            let base = VirtualAlloc(std::ptr::null(), 0x2000, MEM_RESERVE, PAGE_READWRITE);
+            assert!(!base.is_null());
+            let page = VirtualAlloc(base, 0x1000, MEM_COMMIT, PAGE_READWRITE).cast::<u8>();
+            assert!(!page.is_null());
+            let put = |at: usize, code: &[u8]| {
+                std::ptr::copy_nonoverlapping(code.as_ptr(), page.add(at), code.len());
+                page.add(at).cast_const()
+            };
+            // How far the emulation moves RIP, if it emulates at all.
+            let step = |at: *const u8| {
+                let mut record: EXCEPTION_RECORD = std::mem::zeroed();
+                record.ExceptionCode = EXCEPTION_ILLEGAL_INSTRUCTION;
+                let mut context: CONTEXT = std::mem::zeroed();
+                context.Rip = at as u64;
+                let mut pointers = EXCEPTION_POINTERS {
+                    ExceptionRecord: &mut record,
+                    ContextRecord: &mut context,
+                };
+                emulate_amd_only(&mut pointers).then(|| context.Rip - at as u64)
+            };
+
+            // The next page reserved only: any read of it would fault.
+            assert_eq!(step(put(0xffe, &[0x0f, 0x0b])), None); // ud2
+            assert_eq!(step(put(0xfff, &[0x90])), None);
+            // A clwb [rax+disp32] cut off by the page end is not one.
+            let cut = put(0xffc, &[0x66, 0x0f, 0xae, 0xb0]);
+            assert_eq!(step(cut), None);
+
+            // The next page readable: the instruction is read whole.
+            let next = base.cast::<u8>().add(0x1000);
+            let next = VirtualAlloc(next.cast(), 0x1000, MEM_COMMIT, PAGE_READWRITE).cast::<u8>();
+            assert!(!next.is_null());
+            next.copy_from_nonoverlapping([0, 1, 0, 0].as_ptr(), 4);
+            assert_eq!(step(cut), Some(8)); // clwb [rax+0x100]
+
+            assert_ne!(VirtualFree(base, 0, MEM_RELEASE), 0);
         }
     }
 
