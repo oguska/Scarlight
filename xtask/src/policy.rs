@@ -39,10 +39,6 @@ const EXCEPTIONS: &[(&str, &str)] = &[
 /// check (size, forbidden signatures, NUL bytes, encoded-data runs).
 const EXTENSION_EXCEPTIONS: &[(&str, &str)] = &[
     (
-        "docs/brand/banner.svg",
-        "the README banner: a vector drawing of our own (wordmark strokes, tagline glyph outlines), text only",
-    ),
-    (
         "docs/brand/logo.svg",
         "the project logo: a hand-written vector drawing of our own, text only",
     ),

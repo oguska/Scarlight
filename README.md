@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/brand/banner.svg" alt="Scarlight: console titles on PC, AMD + Linux first" width="100%">
+<img src="docs/brand/logo.svg" alt="Scarlight" width="420">
 
 <br>
 
