@@ -3159,7 +3159,6 @@ fn lds_wrap_atomics_validate_as_32_bit_dxil() {
     }
 }
 
-
 fn check_lds_rsub(body: &[u32], inputs: &[[u32; 4]], check_output: impl Fn(&str, Vec<[u32; 4]>)) {
     let mut shader = lower_program(&program(body, false)).expect("lower LDS reverse subtract");
     let container = crate::Container::parse(&shader.dxil).unwrap();
@@ -3265,7 +3264,6 @@ fn lds_rsub_serializes_contending_lanes() {
         );
     });
 }
-
 
 fn lds_exchange_pair_probes() -> [Probe; 3] {
     let inputs: Vec<_> = (0..64)
