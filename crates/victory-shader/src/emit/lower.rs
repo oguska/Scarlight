@@ -2673,7 +2673,7 @@ impl<'a> Lower<'a> {
         let Fields::Valu(v) = &inst.fields else {
             unreachable!()
         };
-        if v.clamp || v.omod != 0 {
+        if v.omod != 0 || (v.clamp && !matches!(inst.name(), "v_add_nc_i32" | "v_sub_nc_i32")) {
             return Err("integer output modifiers");
         }
         match v.dst {
@@ -6374,6 +6374,8 @@ impl<'a> Lower<'a> {
         const INT: &[&str] = &[
             "v_add_nc_u16",
             "v_sub_nc_u16",
+            "v_add_nc_i16",
+            "v_sub_nc_i16",
             "v_subrev_nc_u16",
             "v_mul_lo_u16",
             "v_lshlrev_b16",
@@ -6531,8 +6533,9 @@ impl<'a> Lower<'a> {
             let r = self.cvt_norm16(inst, name == "v_cvt_norm_i16_f16")?;
             return self.write_half(inst, r, guard);
         }
-        // 16-bit integers: computed on the low halves, the low 16 bits kept.
-        if v.clamp || v.omod != 0 || v.abs != 0 || v.neg != 0 {
+        // 16-bit integer results keep the low 16 bits after any saturation.
+        let signed_add_sub = matches!(name, "v_add_nc_i16" | "v_sub_nc_i16");
+        if (v.clamp && !signed_add_sub) || v.omod != 0 || v.abs != 0 || v.neg != 0 {
             return Err("modifiers on a 16-bit integer operation");
         }
         let r = match name {
@@ -6569,6 +6572,24 @@ impl<'a> Lower<'a> {
                 match name {
                     "v_add_nc_u16" => self.s.m.bin(c, Bin::Add, a, b),
                     "v_sub_nc_u16" => self.s.m.bin(c, Bin::Sub, a, b),
+                    "v_add_nc_i16" | "v_sub_nc_i16" => {
+                        let op = if name == "v_add_nc_i16" {
+                            Bin::Add
+                        } else {
+                            Bin::Sub
+                        };
+                        let r = self.s.m.bin(c, op, a, b);
+                        if v.clamp {
+                            let lo = self.s.m.i32(i32::from(i16::MIN) as u32);
+                            let hi = self.s.m.i32(i16::MAX as u32);
+                            let below = self.s.m.cmp(c, pred::SLT, r, lo);
+                            let r = self.s.m.select(c, below, lo, r);
+                            let above = self.s.m.cmp(c, pred::SGT, r, hi);
+                            self.s.m.select(c, above, hi, r)
+                        } else {
+                            r
+                        }
+                    }
                     "v_subrev_nc_u16" => self.s.m.bin(c, Bin::Sub, b, a),
                     "v_mul_lo_u16" => self.s.m.bin(c, Bin::Mul, a, b),
                     "v_lshlrev_b16" | "v_lshrrev_b16" | "v_ashrrev_i16" => {
@@ -6860,6 +6881,29 @@ impl<'a> Lower<'a> {
                     _ => (Bin::Mul, a, b),
                 };
                 self.s.m.bin(c, op, a, b)
+            }
+            "v_add_nc_i32" | "v_sub_nc_i32" => {
+                let Fields::Valu(v) = &inst.fields else {
+                    unreachable!()
+                };
+                let (a, b) = (s(self, 0)?, s(self, 1)?);
+                let add = name == "v_add_nc_i32";
+                let r = self.s.m.bin(c, if add { Bin::Add } else { Bin::Sub }, a, b);
+                if v.clamp {
+                    // Overflow changes the sign of a with equal operand signs
+                    // for addition, or opposite operand signs for subtraction.
+                    let ar = self.s.m.bin(c, Bin::Xor, a, r);
+                    let other = self.s.m.bin(c, Bin::Xor, b, if add { r } else { a });
+                    let bits = self.s.m.bin(c, Bin::And, ar, other);
+                    let zero = k(self, 0);
+                    let overflow = self.s.m.cmp(c, pred::SLT, bits, zero);
+                    let negative = self.s.m.cmp(c, pred::SLT, a, zero);
+                    let (lo, hi) = (k(self, i32::MIN as u32), k(self, i32::MAX as u32));
+                    let limit = self.s.m.select(c, negative, lo, hi);
+                    self.s.m.select(c, overflow, limit, r)
+                } else {
+                    r
+                }
             }
             "v_xnor_b32" => {
                 let (a, b) = (s(self, 0)?, s(self, 1)?);

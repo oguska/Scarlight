@@ -322,6 +322,101 @@ fn s_bitreplicate_b64_b32_replicates_both_halves_and_preserves_scc() {
     });
 }
 
+fn assert_no_int64(shader: &HostShader) {
+    let container = crate::Container::parse(&shader.dxil).unwrap();
+    let features = container.part(crate::FourCC::SFI0).unwrap();
+    let features = u64::from_le_bytes(features.data.try_into().unwrap());
+    assert_eq!(
+        features & 0x8000,
+        0,
+        "signed no-carry arithmetic requires INT64"
+    );
+}
+
+#[test]
+fn v_add_sub_nc_i32_wrap_and_saturate() {
+    for (op, add) in [(0x37f, true), (0x376, false)] {
+        let inputs = [
+            [20, -3, 0, 0],
+            [-20, -3, 0, 0],
+            [i32::MAX, if add { 1 } else { -1 }, 0, 0],
+            [i32::MIN, if add { -1 } else { 1 }, 0, 0],
+            [i32::MIN, if add { i32::MAX } else { i32::MIN }, 0, 0],
+            [i32::MAX, 0, 0, 0],
+            [i32::MIN, 0, 0, 0],
+        ]
+        .map(|input| input.map(|x| x as u32));
+        for clamp in [false, true] {
+            let mut body = vop3(op, 0, vgpr(1), vgpr(2), 0);
+            body[0] |= u32::from(clamp) << 15;
+            let shader = build_valu_cs(&body);
+            assert_no_int64(&shader);
+            run_cases(&shader, &inputs, |backend, i, [a, b, ..], got| {
+                let (a, b) = (a as i32, b as i32);
+                let want = match (add, clamp) {
+                    (true, false) => a.wrapping_add(b),
+                    (true, true) => a.saturating_add(b),
+                    (false, false) => a.wrapping_sub(b),
+                    (false, true) => a.saturating_sub(b),
+                };
+                assert_eq!(
+                    got, want as u32,
+                    "{backend}: VOP3 {op:#x}, clamp {clamp}, case {i}"
+                );
+            });
+        }
+    }
+}
+
+#[test]
+fn v_add_sub_nc_i16_wrap_and_saturate_with_op_sel() {
+    let old = 0xA5A5_5A5A;
+    for (op, add) in [(0x30d, true), (0x30e, false)] {
+        let operands = [
+            (20, -3),
+            (-20, -3),
+            (i16::MAX, if add { 1 } else { -1 }),
+            (i16::MIN, if add { -1 } else { 1 }),
+            (i16::MAX, 0),
+            (i16::MIN, 0),
+        ];
+        for opsel in [0, 0b0001, 0b0010, 0b1011] {
+            let a_high = (opsel & 1) * 16;
+            let b_high = (opsel >> 1 & 1) * 16;
+            let dst_high = (opsel >> 3 & 1) * 16;
+            let inputs = operands.map(|(a, b)| {
+                [
+                    (u32::from(a as u16) << a_high) | (0x1234 << (16 - a_high)),
+                    (u32::from(b as u16) << b_high) | (0x5678 << (16 - b_high)),
+                    old,
+                    0,
+                ]
+            });
+            for clamp in [false, true] {
+                let mut inst = vop3(op, 0, vgpr(1), vgpr(2), 0);
+                inst[0] |= u32::from(clamp) << 15 | opsel << 11;
+                let shader = build_valu_cs(&[vop1(0x001, 0, vgpr(3)), inst[0], inst[1]]);
+                assert_no_int64(&shader);
+                run_cases(&shader, &inputs, |backend, i, _, got| {
+                    let (a, b) = operands[i];
+                    let result = match (add, clamp) {
+                        (true, false) => a.wrapping_add(b),
+                        (true, true) => a.saturating_add(b),
+                        (false, false) => a.wrapping_sub(b),
+                        (false, true) => a.saturating_sub(b),
+                    };
+                    let want =
+                        (old & !(0xFFFF << dst_high)) | (u32::from(result as u16) << dst_high);
+                    assert_eq!(
+                        got, want,
+                        "{backend}: VOP3 {op:#x}, clamp {clamp}, op_sel {opsel:#06b}, case {i}"
+                    );
+                });
+            }
+        }
+    }
+}
+
 #[test]
 fn scalar_quad_masks_pack_nibbles_and_set_scc() {
     let pack_words = |opcode: u32| {
