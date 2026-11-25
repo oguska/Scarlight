@@ -3265,3 +3265,133 @@ fn lds_rsub_serializes_contending_lanes() {
         );
     });
 }
+
+fn ds(op: u32, vdst: u8, addr: u8, data: u8, offset: u16) -> [u32; 2] {
+
+fn lds_exchange_pair_probes() -> [Probe; 3] {
+    let inputs: Vec<_> = (0..64)
+        .map(|lane| {
+            let data1 = if lane % 2 == 0 {
+                0xFEDC_BA98 + lane
+            } else {
+                lane / 2
+            };
+            [lane, data1, 0x1234_5678 + lane, 0x8765_4321 - lane]
+        })
+        .collect();
+    [
+        (0x02E, [1, 0], [4, 0]),
+        (0x02E, [1, 1], [4, 0]),
+        (0x02F, [0, 1], [0, 256]),
+    ]
+    .map(|(op, [offset0, offset1], [bytes0, bytes1])| {
+        let st64 = op == 0x02F;
+        // Adjacent dwords per thread for the regular pair, two 256-byte
+        // planes for st64. Use single-address DS for setup and readback.
+        let shift = if st64 { 2 } else { 3 };
+        let (addr, data0) = if st64 { (5, 1) } else { (11, 5) };
+        let mut body = vec![vop2(0x1A, 11, int(shift), 0)];
+        body.extend(ds(0x0D, 0, 11, 3, bytes0));
+        body.extend(ds(0x0D, 0, 11, 4, bytes1));
+        body.extend([
+            vop1(0x01, 5, v(if st64 { 11 } else { 1 })),
+            vop1(0x01, 6, v(2)),
+            sop1(0x03, 20, EXEC_LO),
+            vopc(0xD4, v(1), 2), // v_cmpx_gt_u32: odd lanes exchange.
+        ]);
+        let mut exchange = ds(op, 5, addr, data0, u16::from_le_bytes([offset0, offset1]));
+        exchange[1] |= 6 << 16; // data1 is v6, also the second destination.
+        body.extend(exchange);
+        body.push(sop1(0x03, 126, s(20)));
+        body.extend(ds(0x36, 7, 11, 0, bytes0));
+        body.extend(ds(0x36, 8, 11, 0, bytes1));
+        probe(
+            body,
+            inputs.clone(),
+            INT,
+            move |[data0, data1, old0, old1]| {
+                if data0 <= data1 {
+                    let kept = if st64 { data0 << shift } else { data0 };
+                    vec![kept, data1, old0, old1]
+                } else if offset0 == offset1 {
+                    vec![old0, data0, data1, old1]
+                } else {
+                    vec![old0, old1, data0, data1]
+                }
+            },
+        )
+    })
+}
+
+#[test]
+fn lds_exchange_pair_ir_and_dxil() {
+    use gfx10::{Fields, Operand};
+    use ir::Reg;
+
+    let path = validator::Validator::default_path();
+    let mut validator = validator::Validator::load(path.as_deref());
+    if std::env::var_os("VICTORY_DXIL").is_some() {
+        assert!(
+            validator.is_ok(),
+            "configured DXIL validator: {:?}",
+            validator.err()
+        );
+    }
+    let cases = [
+        ("ds_wrxchg2_rtn_b32", 11, 5, 1, 0),
+        ("ds_wrxchg2_rtn_b32", 11, 5, 1, 1),
+        ("ds_wrxchg2st64_rtn_b32", 5, 1, 0, 1),
+    ];
+    for (probe, (name, addr, data0, offset0, offset1)) in
+        lds_exchange_pair_probes().into_iter().zip(cases)
+    {
+        let words = program(&probe.body, false);
+        let code: Vec<_> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let ir = ir::build(&code, false, 32).unwrap();
+        let exchange = ir
+            .blocks
+            .iter()
+            .flat_map(|b| &b.insts)
+            .find(|i| i.name() == name)
+            .unwrap();
+        let vgpr = |reg, dwords| Operand::Vector { reg, dwords };
+        assert_eq!(
+            exchange.fields,
+            Fields::Ds {
+                dst: Some(vgpr(5, 2)),
+                addr: Some(vgpr(addr, 1)),
+                data: vec![vgpr(data0, 1), vgpr(6, 1)],
+                offset0,
+                offset1,
+                gds: false,
+            }
+        );
+        for reg in [
+            Reg::V(addr),
+            Reg::V(data0),
+            Reg::V(5),
+            Reg::V(6),
+            Reg::S(126),
+        ] {
+            assert!(exchange.read(reg).is_some(), "{name} must read {reg:?}");
+        }
+        assert_eq!(
+            exchange.writes.iter().map(|&(r, _)| r).collect::<Vec<_>>(),
+            [Reg::V(5), Reg::V(6)]
+        );
+
+        let mut shader = lower_program(&words).unwrap();
+        let container = crate::Container::parse(&shader.dxil).unwrap();
+        let features = container.part(crate::FourCC::SFI0).unwrap();
+        let features = u64::from_le_bytes(features.data.try_into().unwrap());
+        assert_eq!(features & 0x8000, 0, "{name} requires Int64");
+        if let Ok(validator) = &mut validator {
+            validator.validate(&mut shader.dxil).unwrap();
+        }
+    }
+}
+
+#[test]
+fn lds_exchange_pair_matches_isa() {
+    assert_clean(check(&lds_exchange_pair_probes()));
+}

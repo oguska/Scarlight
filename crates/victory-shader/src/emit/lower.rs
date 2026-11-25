@@ -3187,12 +3187,36 @@ impl<'a> Lower<'a> {
             self.end_guarded(at, &[]);
             return Ok(());
         }
+        use super::bitcode::Rmw;
+        if matches!(name, "ds_wrxchg2_rtn_b32" | "ds_wrxchg2st64_rtn_b32") {
+            let reg = dst_reg.ok_or("an LDS exchange result")?;
+            let v0 = self.vgprs(inst, data.first().ok_or("an LDS exchange source")?, 1)?[0];
+            let v1 = self.vgprs(inst, data.get(1).ok_or("an LDS exchange source")?, 1)?[0];
+            let regs = [Reg::V(reg), Reg::V(reg + 1)];
+            let [old0, old1] = regs.map(|r| {
+                inst.read(r)
+                    .and_then(|v| self.i32_of(v).ok())
+                    .unwrap_or_else(|| self.s.m.i32(0))
+            });
+            let elements = pair(name);
+            let at = self.begin_guarded(guard);
+            let p0 = dword(self, elements[0].0);
+            let r0 = self.s.m.atomic(self.cur, Rmw::Xchg, p0, v0);
+            let p1 = dword(self, elements[1].0);
+            let r1 = self.s.m.atomic(self.cur, Rmw::Xchg, p1, v1);
+            for (r, x) in regs
+                .into_iter()
+                .zip(self.end_guarded(at, &[(r0, old0), (r1, old1)]))
+            {
+                self.write(inst, r, x, None);
+            }
+            return Ok(());
+        }
         // Atomics: the old value returns with `_rtn`.
         let op = name
             .strip_prefix("ds_")
             .map(|n| n.replace("_rtn", ""))
             .ok_or("an LDS operation")?;
-        use super::bitcode::Rmw;
         let rmw = match op.as_str() {
             "add_u32" => Some(Rmw::Add),
             "sub_u32" => Some(Rmw::Sub),
