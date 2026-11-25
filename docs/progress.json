@@ -17,7 +17,7 @@
     {
       "id": "hle",
       "title": "System APIs (HLE)",
-      "summary": "What the title's import table asks for and who answers it. The image imports 587 functions from 68 DLLs and **all 587 resolve: 0 missing**. Only 88 of them are written by this project (our HLE modules); 427 are passed to Wine, which implements them, and 72 come from libraries the title ships itself. That split is the honest reading of the bars below: resolved is complete, Scarlight's own HLE covers 15 % of the table.",
+      "summary": "What the title's import table asks for and who answers it. Every import of the image resolves, but most of them are not our code: our HLE modules answer a small share, Wine answers the bulk, and the rest are libraries the title ships itself. That split is the honest reading of the bars below.",
       "column": "Set",
       "rows": [
         {
@@ -30,7 +30,7 @@
             587,
             587
           ],
-          "note": "0 missing in the last world run: every import of the image and of the title's 68 DLLs binds"
+          "note": "0 of 587 imports did not bind in this loader run; the census scans the image, the run binds every DLL"
         },
         {
           "label": "… of which by Scarlight's HLE modules",
@@ -78,7 +78,7 @@
             280,
             280
           ],
-          "note": "35 to our HLE, 245 to Wine; 0 missing"
+          "note": "kernel and API-set calls; the split between ours and Wine's is in the row above"
         },
         {
           "label": "Console DLLs: memory, audio, input, GPU",
@@ -90,7 +90,7 @@
             38,
             38
           ],
-          "note": "xmem 12, acphal 9, xapu 5, chad 5, d3d12_xs 3, xg_xs 2, xcrdapi 1, gameinput 1, all in our HLE"
+          "note": "console memory, audio, input and GPU entry points, all in our HLE"
         },
         {
           "label": "C runtime and OS (msvcp140, vcruntime, ws2_32, winhttp, bcrypt, mfplat)",
@@ -102,14 +102,14 @@
             187,
             187
           ],
-          "note": "11 to our HLE, 176 to Wine"
+          "note": "C runtime and OS calls, most of them passed to Wine"
         },
         {
           "label": "HLE exports in the registry beyond this image's needs",
-          "impl_text": "134",
-          "ver_text": "88 used",
+          "impl_text": "more",
+          "ver_text": "used",
           "status": "spare",
-          "note": "extra console API surface, so another build of the title can bind without a new module"
+          "note": "extra console API surface beyond this image's needs, so another build of the title can bind without a new module"
         }
       ],
       "foot": [
@@ -137,7 +137,7 @@
     {
       "id": "shaders",
       "title": "Shaders",
-      "summary": "Two sets are counted: the 751-program world set used for offline checks, and the title's whole shader archive (26,084 programs). The world set is the one every change is checked against, end to end; the archive is the size of the real job, and only its translation and emission are counted so far.",
+      "summary": "Two sets are counted: the world set used for offline checks, and the title's whole shader archive. The world set is the one every change is checked against, end to end; the archive is the size of the real job, and only its translation and emission are counted so far.",
       "column": "Set",
       "rows": [
         {
@@ -150,7 +150,7 @@
             751,
             751
           ],
-          "note": "0 refused, 0 undecodable"
+          "note": "translated to host shader with nothing refused and nothing undecodable"
         },
         {
           "label": "World set, translated + validated + real RADV pipeline",
@@ -162,7 +162,7 @@
             749,
             751
           ],
-          "note": "0 stop: 751 of 751 reached a real RADV pipeline in the 25 Nov 13:14 run"
+          "note": "749 of 751 reached a real pipeline in this run; the other 2 stop before one"
         },
         {
           "label": "Whole archive, translated",
@@ -171,7 +171,7 @@
             26084
           ],
           "verified": null,
-          "note": "40.6 M IR instructions; 25,889 programs have every resource access traced"
+          "note": "every program reaches IR; the traced-resource count is in the translator's summary"
         },
         {
           "label": "Whole archive, host shader emitted: all stages",
@@ -180,7 +180,7 @@
             25694
           ],
           "verified": null,
-          "note": "vertex + pixel, compute and mesh together; the per-stage rows below add up to this"
+          "note": "vertex + pixel, compute and mesh: 92 of 25,694 programs of those stages are not emitted"
         },
         {
           "label": "Whole archive, host shader emitted: vertex + pixel",
@@ -216,7 +216,7 @@
             1232
           ],
           "verified": null,
-          "note": "the table is the full RDNA2 opcode list (1,232 entries across 20 encodings); 313 are named in the decoder, and the title uses far fewer than that. A per-program opcode census is not taken yet, so this row is a source count, not a decode census"
+          "note": "313 of the 1,232 opcode-table entries are named in the decoder; the title uses far fewer than the table holds, and a per-program opcode census is not taken yet"
         }
       ],
       "foot": [
@@ -252,7 +252,7 @@
             4309,
             4688
           ],
-          "note": "the last world frame (3,000 draws or more) of the newest run that has one: the backend's own per-frame lines"
+          "note": "the last world frame of the newest run that has one: the backend's own per-frame lines"
         },
         {
           "label": "D3D12 calls the title makes that our backend has",
@@ -269,22 +269,22 @@
         {
           "label": "Drops: ray-tracing hit shading, left out",
           "status": "off",
-          "note": "631/frame in the reference run of 24 Nov, which is a different run from the headline frame; behind a switch until the trace path is correct"
+          "note": "left out on purpose until the trace path is correct, and the largest single reason for drops"
         },
         {
           "label": "Drops: one stage of the ray-tracing structure builder",
           "status": "off",
-          "note": "346-361/frame in that same reference run; off with the same switch"
+          "note": "off with the same switch as the trace path"
         },
         {
           "label": "Drops: one whole-wave compute step",
-          "status": "14-28/frame",
-          "note": "14-28/frame in that same reference run: a section step our wave simulation does not follow yet"
+          "status": "dropped",
+          "note": "a section step our wave simulation does not follow yet"
         },
         {
           "label": "Drops: compute and pixel programs while their pipeline is made",
-          "status": "1-4/frame",
-          "note": "1-4/frame in that same reference run: each named program appears once and then runs, which is the pipeline area's business"
+          "status": "late",
+          "note": "each named program appears once and then runs; that is the pipeline area's business"
         }
       ],
       "foot": [
@@ -331,14 +331,14 @@
             2601
           ],
           "verified": null,
-          "note": "2,252 keys known ahead from the title's own early list, 1,785 of them buildable from the saved library"
+          "note": "1,785 of the 2,601 keys the title's own early list names can be built from the saved library"
         },
         {
           "label": "Late creates per frame in a world run",
-          "impl_text": "~38",
+          "impl_text": "late",
           "ver_text": "measured",
           "status": "late",
-          "note": "63,794 drops over 1,673 frames of one run; they are the 1-4/frame rows above"
+          "note": "programs dropped while their pipeline is made, summed over a whole run"
         }
       ],
       "foot": [
@@ -369,7 +369,7 @@
         {
           "label": "Lit, textured world",
           "status": "partly",
-          "note": "the fixed test scene renders lit and textured at 1.5 fps"
+          "note": "the fixed test scene renders lit and textured, at the speed the Performance area reports"
         },
         {
           "label": "Shadows",
@@ -379,7 +379,7 @@
         {
           "label": "Characters and faces",
           "status": "broken",
-          "note": "some characters' faces fail to render; regressed again on 25 Nov"
+          "note": "some characters' faces fail to render; regressed again in the last change window"
         },
         {
           "label": "Ray tracing",
@@ -428,7 +428,7 @@
     {
       "id": "mesa",
       "title": "Mesa reach (compiled offline, not run)",
-      "summary": "Whether the world shader set compiles for a GPU family's Mesa driver, without that GPU. Mesa 26.3.1's noop drm-shim fakes each chip, so RADV and ANV build every pipeline with that family's ISA and limits. All 751 world pipelines compile on **4 of 5 AMD families** (RDNA4, RDNA3, RDNA2, RDNA1); Vega compiles 669 and aborts on the 82 mesh-shader programs. Three Intel families were measured (dg2, mtl, bmg) and all but one or two programs compile on each. This is a compile result: only RDNA4 has actually been run.",
+      "summary": "Whether the world shader set compiles for a GPU family's Mesa driver, without that GPU. Mesa's noop drm-shim fakes each chip, so RADV and ANV build every pipeline with that family's ISA and limits. Every AMD generation up to ours compiles the whole set except Vega, whose mesh-shader programs abort the driver; three Intel families compile all but one or two programs each. This is a compile result: only RDNA4 has actually been run.",
       "column": "GPU families",
       "rows": [
         {
@@ -438,7 +438,7 @@
             5
           ],
           "verified": null,
-          "note": "RDNA4, RDNA3, RDNA2, RDNA1: 751/751 each through the noop shim (Mesa driver, no GPU)"
+          "note": "4 of 5 AMD families compile the whole set through the noop shim (Mesa driver, no GPU)"
         },
         {
           "label": "Intel (ANV) families measured offline",
@@ -447,7 +447,7 @@
             3
           ],
           "verified": null,
-          "note": "dg2 750/751, mtl 750/751, bmg 751/751 through Mesa's Intel noop shim; one program fails on two of the three, and there is no Intel card here to run on"
+          "note": "3 Intel families measured through Mesa's Intel noop shim, 1 of them with the whole set; there is no Intel card here to run on"
         },
         {
           "label": "Vega (gfx900): world programs that compile offline",
@@ -456,7 +456,7 @@
             751
           ],
           "verified": null,
-          "note": "82 abort the driver: every mesh-shader program, and GFX9 has no mesh shader support in RADV"
+          "note": "82 of 751 abort the driver: every mesh-shader program, and GFX9 has no mesh shader support in RADV"
         },
         {
           "label": "Families with a run, not just a compile",
@@ -465,7 +465,7 @@
             8
           ],
           "verified": null,
-          "note": "RDNA4 only: 5 AMD and 3 Intel families have compiled pipelines, none of them has been run"
+          "note": "only our card: every other family has compiled pipelines and no run"
         }
       ],
       "foot": [
@@ -488,7 +488,7 @@
     {
       "id": "performance",
       "title": "Performance",
-      "summary": "Speed is measured at one fixed scene, the only figure compared between builds. The console target for this title is 30 fps; the port is at about one twentieth of it, and the card is idle for most of the frame because the CPU side is the cost.",
+      "summary": "Speed is measured at one fixed scene, the only figure compared between builds, against the console's 30 fps target. The port is far from it, and the card is idle for most of the frame because the CPU side is the cost.",
       "column": "Measure",
       "rows": [
         {
@@ -501,7 +501,7 @@
             1.6,
             30
           ],
-          "note": "median 1.95 fps at the window scene in the last recorded row; 1.45-2.30 across the 25 Nov rows, 3.0 in one earlier build"
+          "note": "1.6 fps median at the window scene of the last recorded run, compared only with rows of the same scene"
         },
         {
           "label": "Card busy share of the frame",
@@ -513,11 +513,11 @@
             30,
             100
           ],
-          "note": "24-38 % by our own clock count; the rest is the title's CPU work and our copies"
+          "note": "by our own clock count; the rest is the title's CPU work and our copies"
         },
         {
           "label": "Time to the world",
-          "impl_text": "133-218 s",
+          "impl_text": "seconds",
           "ver_text": "measured",
           "status": "no target set",
           "note": "from launch to the first world frame; the pre-bake should cut it"

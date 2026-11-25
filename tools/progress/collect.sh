@@ -71,6 +71,7 @@ say() { printf '%s\n' "$*" >&2; }
 skip() { printf 'skip  %s\n' "$*" >&2; }
 fact() { printf '%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5" >> "$FACTS"; }
 newest() { ls -t "$@" 2>/dev/null | head -1; }
+fmt() { printf '%s' "$1" | rev | sed 's/\([0-9][0-9][0-9]\)/\1,/g' | rev | sed 's/^,//'; }
 jsonget() { python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); a={x["id"]:x for x in d["areas"]}[sys.argv[2]]["rows"][int(sys.argv[3])].get(sys.argv[4]); print("" if a is None else ",".join(str(v) for v in a) if isinstance(a,list) else a)' "$JSON" "$@" 2>/dev/null; }
 
 # ---- 1. system APIs (HLE): the import census ---------------------------------
@@ -123,6 +124,7 @@ if [ -f "$CENSUS" ]; then
       missed=$(printf '%s' "$BOUND" | sed -E 's/.* ([0-9]+) missing.*/\1/')
       bound=$((all_total - missed))
       fact hle 0 "Imports resolved" verified "$bound,$all_total"
+      fact hle 0 "Imports resolved" note "$missed of $all_total imports did not bind in this loader run; the census scans the image, the run binds every DLL"
       say "hle   loader bound $bound/$all_total (missing $missed) in $(basename "$(dirname "$BOUNDSRC")")/run.txt"
     else
       skip "hle: no loader bound line to verify the resolved count; verified left as it was"
@@ -151,10 +153,11 @@ if [ -f "${TRANSLATE:-/nonexistent}" ]; then
       sum_d=$((sum_d + ${1:-0})); sum_t=$((sum_t + ${2:-0}))
     done
     [ "$sum_t" -gt 0 ] && fact shaders 3 "Whole archive, host shader emitted: all stages" impl "$sum_d,$sum_t"
+    [ "$sum_t" -gt 0 ] && fact shaders 3 "Whole archive, host shader emitted: all stages" note "vertex + pixel, compute and mesh: $(fmt $((sum_t - sum_d))) of $(fmt "$sum_t") programs of those stages are not emitted"
     stage_row() { # <row> <label> <done> <total>
       [ "${4:-0}" -gt 0 ] || return 0
       fact shaders "$1" "$2" impl "$3,$4"
-      fact shaders "$1" "$2" note "$(( $4 - $3 )) programs of this stage are not emitted; no pipeline validation has been run on the archive yet"
+      fact shaders "$1" "$2" note "$(fmt $(( $4 - $3 ))) programs of this stage are not emitted; no pipeline validation has been run on the archive yet"
     }
     set -- $vs; stage_row 4 "Whole archive, host shader emitted: vertex + pixel" "${1:-0}" "${2:-0}"
     set -- $cs; stage_row 5 "Whole archive, host shader emitted: compute" "${1:-0}" "${2:-0}"
@@ -183,6 +186,7 @@ else
       fact shaders 0 "World set, translated to host shader" verified "$tot,$tot"
       fact shaders 1 "World set, translated + validated + real RADV pipeline" impl "$ok,$tot"
       fact shaders 1 "World set, translated + validated + real RADV pipeline" verified "$ok,$tot"
+      fact shaders 1 "World set, translated + validated + real RADV pipeline" note "$ok of $tot reached a real pipeline in this run; the other $((tot - ok)) stop before one"
       fact pipelines 0 "World set: pipelines that build offline" impl "$ok,$tot"
       fact pipelines 0 "World set: pipelines that build offline" verified "$ok,$tot"
       fact pipelines 0 "World set: pipelines that build offline" note "$((tot - ok)) of $tot do not reach a pipeline in this run"
@@ -205,6 +209,7 @@ if [ -f "$SH/gfx10/opcodes.rs" ] && [ -d "$SH/emit" ]; then
   done <<< "$tbl"
   if [ "$all" -gt 0 ]; then
     fact shaders 7 "ISA: opcode-table entries the decoder names" impl "$used,$all"
+    fact shaders 7 "ISA: opcode-table entries the decoder names" note "$used of the $(fmt "$all") opcode-table entries are named in the decoder; the title uses far fewer than the table holds, and a per-program opcode census is not taken yet"
     say "isa   $used/$all opcode-table entries named in the decoder"
   fi
 else
@@ -287,6 +292,7 @@ if [ -f "${EARLY:-/nonexistent}" ]; then
   [ "$build" -gt "$keys" ] && build=$keys
   if [ "$keys" -gt 0 ] && [ "$build" -gt 0 ]; then
     fact pipelines 1 "Pipelines the title asks for, covered by the pre-bake list" impl "$build,$keys"
+    fact pipelines 1 "Pipelines the title asks for, covered by the pre-bake list" note "$(fmt "$build") of the $(fmt "$keys") keys the title's own early list names can be built from the saved library"
     say "pipelines $build/$keys keys covered by the saved library ($(basename "$EARLY"))"
   fi
 else
@@ -327,9 +333,11 @@ if [ -n "${MATRIX_AMD:-}" ]; then
   read -r amd_all amd_n vega_ok vega_tot <<< "$(count_matrix "$MATRIX_AMD" '^(gfx[0-9]+)$')"
   if [ "$amd_n" -gt 0 ]; then
     fact mesa 0 "AMD families whose whole world set compiles offline" impl "$amd_all,$amd_n"
+    fact mesa 0 "AMD families whose whole world set compiles offline" note "$amd_all of $amd_n AMD families compile the whole set through the noop shim (Mesa driver, no GPU)"
     say "mesa  AMD $amd_all/$amd_n families compile the whole set ($(basename "$MATRIX_AMD"))"
   fi
   [ "$vega_tot" -gt 0 ] && fact mesa 2 "Vega (gfx900): world programs that compile offline" impl "$vega_ok,$vega_tot"
+  [ "$vega_tot" -gt 0 ] && fact mesa 2 "Vega (gfx900): world programs that compile offline" note "$((vega_tot - vega_ok)) of $vega_tot abort the driver: every mesh-shader program, and GFX9 has no mesh shader support in RADV"
 else
   skip "mesa: no AMD family-matrix tsv in $OFF"
 fi
@@ -337,6 +345,7 @@ if [ -n "${MATRIX_INTEL:-}" ]; then
   read -r in_all in_n _ _ <<< "$(count_matrix "$MATRIX_INTEL" '^(dg2|bmg|mtl|lnl|ptl|nvl|acm)$')"
   if [ "$in_n" -gt 0 ]; then
     fact mesa 1 "Intel (ANV) families measured offline" impl "$in_n,$in_n"
+    fact mesa 1 "Intel (ANV) families measured offline" note "$in_n Intel families measured through Mesa's Intel noop shim, $in_all of them with the whole set; there is no Intel card here to run on"
     say "mesa  Intel $in_n families measured, $in_all with the whole set ($(basename "$MATRIX_INTEL"))"
   fi
 else
@@ -348,6 +357,7 @@ if [ -z "$SCENE" ]; then SCENE="$NOTES/scene-results.tsv"; fi
 if [ -f "$SCENE" ]; then
   fps=$(awk -F'\t' '$3=="window" && $4=="yes" && $7 ~ /^[0-9.]+$/ {v=$7} END{print v+0}' "$SCENE")
   if awk -v v="$fps" 'BEGIN{exit !(v > 0)}'; then
+    fact performance 0 "Fixed test scene vs the 30 fps console target" note "$fps fps median at the window scene of the last recorded run, compared only with rows of the same scene"
     fact performance 0 "Fixed test scene vs the 30 fps console target" impl "$fps,30"
     fact performance 0 "Fixed test scene vs the 30 fps console target" verified "$fps,30"
     say "perf  fixed scene $fps fps of 30"
