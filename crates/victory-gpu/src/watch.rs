@@ -461,7 +461,16 @@ fn install() {
         if r.ExceptionCode != EXCEPTION_ACCESS_VIOLATION as NTSTATUS || r.NumberParameters < 2 {
             return EXCEPTION_CONTINUE_SEARCH;
         }
-        let is_write = r.ExceptionInformation[0] == WRITE;
+        const READ: usize = 0;
+        // Only reads and writes can be answered here. Windows reports execute
+        // faults (access type 8) through the same code, and PAGE_READWRITE does
+        // not run under DEP: retrying one would re-fault at the same
+        // instruction forever, so it goes to the next handler instead.
+        let kind = r.ExceptionInformation[0];
+        if kind != READ && kind != WRITE {
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+        let is_write = kind == WRITE;
         let at = r.ExceptionInformation[1];
         // A write-back job has this block (it is inaccessible to both reads
         // and writes): wait for the GPU's bytes to be put back before the
