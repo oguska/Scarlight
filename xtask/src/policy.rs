@@ -15,7 +15,7 @@ const MAX_ENCODED_RUN: usize = 512;
 
 const ALLOWED_EXTENSIONS: &[&str] = &[
     "rs", "toml", "md", "txt", "lock", "yml", "yaml", "json", "hlsl", "hlsli", "ps1", "cmd", "sh",
-    "env",
+    "env", "py",
 ];
 /// Two-part extensions, matched as a suffix of the name including the dot
 /// (`x.desktop.in` is not an `.in` file we can judge by extension alone, and
@@ -54,10 +54,6 @@ const EXTENSION_EXCEPTIONS: &[(&str, &str)] = &[
     (
         "docs/brand/logo-mark.svg",
         "the project mark: a hand-written vector drawing of our own, text only",
-    ),
-    (
-        "docs/brand/status.svg",
-        "the README pipeline-status graphic: a vector drawing of our own (label glyph outlines), text only",
     ),
     (
         "docs/brand/divider.svg",

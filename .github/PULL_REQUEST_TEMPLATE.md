@@ -4,7 +4,7 @@
 
 ## Credit
 
-- Upstream PR / commit / author, if this is not new work: <!-- e.g. Marvisak/VIctory#704 by @r4tedx, carries #193 by @n-romanovich -->
+- Upstream PR / commit / author, if this is not new work: <!-- e.g. upstream PR #704 by @r4tedx -->
 - If it came from another fork or project, name it and its licence.
 
 ## How it was tested
@@ -19,7 +19,7 @@
 - [ ] `cargo test --workspace --locked` passes (or the failure is pre-existing and named above)
 - [ ] No game names, assets, executables, screenshots or hashes of game data ([docs/asset-policy.md](docs/asset-policy.md))
 - [ ] Internal `victory*` crate, binary and environment-variable names are unchanged
-- [ ] If this merges an upstream PR, it is merged (not squashed or copied) so the author's commits are kept, and [INTEGRATION.md](INTEGRATION.md) is updated
+- [ ] If this merges an upstream PR, it is merged (not squashed or copied) so the author's commits are kept, and every new author is added to [CREDITS.md](CREDITS.md)
 
 ## AI assistance
 
