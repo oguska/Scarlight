@@ -285,13 +285,13 @@ impl Staging {
             if before == 0 || last.read.len() != size {
                 last.read.resize(size, 0);
                 crate::host::copy_mapped(last.read.as_mut_ptr(), self.memory, size, false);
-                self.detile(&last.read, None);
                 #[cfg(feature = "diagnostics")]
                 {
                     use crate::copystat::{C, add};
                     add(C::TexWatched, size as u64);
                     add(C::TexReadUs, started.elapsed().as_micros() as u64);
                 }
+                self.detile(&last.read, None);
                 return (size, false);
             }
             // The rest of the memory is as last read: read again only the

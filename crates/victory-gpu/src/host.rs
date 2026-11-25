@@ -1462,7 +1462,7 @@ impl HostList {
         #[cfg(feature = "diagnostics")]
         use crate::copystat::{C, add};
         for step in &self.deferred().copies {
-            let started = std::time::Instant::now();
+            let mut started = std::time::Instant::now();
             let copied = match step {
                 &Step::Copy(dst, src, len) => {
                     #[cfg(feature = "diagnostics")]
@@ -1471,6 +1471,8 @@ impl HostList {
                         add(C::CopyBytes, len as u64);
                     }
                     batch.title_written(Some((dst, dst.saturating_add(len))));
+                    // The flush above is already counted; time the copy only.
+                    started = std::time::Instant::now();
                     copy_mapped(dst as *mut u8, src as *const u8, len, true);
                     #[cfg(feature = "diagnostics")]
                     crate::copystat::kind(
@@ -1692,8 +1694,13 @@ impl Batch {
         {
             for (_, ranges) in &refreshes {
                 for &(from, to) in ranges {
-                    // One copy's time is its own; a shared question's is not.
-                    let us = if refreshes.len() == 1 { us } else { 0 };
+                    // One copy's time is its own; a shared question's is not,
+                    // and neither is a flush's total for each of its ranges.
+                    let us = if refreshes.len() == 1 && ranges.len() == 1 {
+                        us
+                    } else {
+                        0
+                    };
                     crate::copystat::range(from, to - from, us, 0);
                 }
             }
