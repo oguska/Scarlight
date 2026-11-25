@@ -6,127 +6,199 @@
 
 [![CI](https://img.shields.io/github/actions/workflow/status/pablogonz12/Scarlight/ci.yml?branch=main&style=flat-square&labelColor=14072c&label=CI&color=ff2e63)](https://github.com/pablogonz12/Scarlight/actions/workflows/ci.yml)
 [![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-ff7a3d?style=flat-square&labelColor=14072c)](LICENSE)
-![GPU: RDNA4 tested](https://img.shields.io/badge/GPU-RDNA4%20tested-19d8ff?style=flat-square&labelColor=14072c)
-![Linux first](https://img.shields.io/badge/Linux-first-ffb347?style=flat-square&labelColor=14072c)
-[![PRs welcome](https://img.shields.io/badge/PRs-welcome-ff2e63?style=flat-square&labelColor=14072c)](#how-we-work)
+[![Last commit](https://img.shields.io/github/last-commit/pablogonz12/Scarlight?style=flat-square&labelColor=14072c&color=19d8ff)](https://github.com/pablogonz12/Scarlight/commits/main)
 [![Stars](https://img.shields.io/github/stars/pablogonz12/Scarlight?style=flat-square&labelColor=14072c&color=ffb347)](https://github.com/pablogonz12/Scarlight/stargazers)
+[![Linux](https://img.shields.io/badge/platform-Linux-ff2e63?style=flat-square&labelColor=14072c)](docs/linux.md)
+[![Mesa: RADV tested](https://img.shields.io/badge/Mesa-RADV%20tested-ff7a3d?style=flat-square&labelColor=14072c)](https://docs.mesa3d.org/drivers/radv.html)
 
-**A Linux + AMD RDNA4 (RX 9000) first port. Not playable yet.**
+# Scarlight: the Linux + Mesa port
 
-<sub>[What it is](#what-it-is) · [Target](#target) · [Status](#status) · [Requirements](#requirements) · [Build](#build) · [Run](#run) · [How we work](#how-we-work) · [Credits](#credits)</sub>
+**The console build on Linux, through open-source Mesa Vulkan drivers (RADV first, then ANV and NVK), Proton's Wine and vkd3d-proton.<br>Mesa is open source, so the driver itself is ours to tune and fix. Early, slow, not playable yet, and measured in the open.**
+
+<sub>[Status](#status) · [Quick start](#quick-start) · [What's different](#whats-different) · [Roadmap](#roadmap) · [Known problems](#known-problems) · [Contribute](#contribute) · [Credits](#credits)</sub>
 
 </div>
 
-## What it is
-
-Scarlight is a **GPL-3.0 port of the console build** of the title to PC, running through
-**Wine/Proton + vkd3d-proton + Mesa RADV**. It runs the title's own x86-64 code from files you
-supply, answers its console-only calls, and turns its GPU commands and shaders into Direct3D 12.
-It is based on [VIctory](https://github.com/Marvisak/VIctory) and
-[fxceless's victory-fork](https://github.com/fxceless/victory-fork), with their history and
-authors kept. No game files, dumps or screenshots are in this repository.
+Scarlight is a GPL-3.0 port of the console build to **Linux**, running on **open-source Mesa Vulkan
+drivers**: RADV (AMD) first, then ANV (Intel) and NVK (NVIDIA). It runs the title's own x86-64 code
+from files you supply, answers its console-only calls, and turns its GPU commands and shaders into
+Direct3D 12 on top of vkd3d-proton and Wine/Proton. It builds on
+[VIctory](https://github.com/Marvisak/VIctory) and
+[fxceless's victory-fork](https://github.com/fxceless/victory-fork). The goals, in order: the
+**picture**, then **speed**, then **stability**. Because Mesa is open source, the driver is in scope
+too: its switches, statistics, pipeline cache, a local Mesa build, and fixes sent upstream. No game
+files, dumps or screenshots are here.
 
 ```mermaid
 flowchart LR
     A["Title's x86-64 code<br/>(your files)"] --> B["victory-loader<br/>+ victory-hle"]
     B --> C["victory-gpu<br/>+ victory-shader"]
-    C --> D["Direct3D 12"] --> E["vkd3d-proton<br/>in Wine/Proton"] --> F["Mesa RADV<br/>RDNA4"]
+    C --> D["Direct3D 12"] --> E["vkd3d-proton<br/>in Wine"] --> F["Mesa Vulkan driver<br/>RADV first, then ANV / NVK"]
 ```
-
-Crates: [docs/architecture.md](docs/architecture.md).
-
-## Target
-
-| | |
-|---|---|
-| **First** | Arch-family Linux with an AMD RX 9000 (RDNA4) card |
-| **Tested** | RX 9070 XT on CachyOS |
-| **May work** | Other RDNA cards and other Linux distributions (not tested here) |
-| **Not supported here** | NVIDIA GPUs and native Windows |
-
-For NVIDIA or Windows, use [JMAN730/project-flamingo](https://github.com/JMAN730/project-flamingo)
-or [fxceless/victory-fork](https://github.com/fxceless/victory-fork).
 
 ## Status
 
-Measured on one machine (RX 9070 XT, Linux), 25 Nov 2026.
+**Tested on one machine so far (25 Nov 2026):** RX 9070 XT (RDNA4) · Mesa 26.3.1 **RADV** · CachyOS
+(Arch family), kernel 7.3.6 · GE-Proton11-14 · vkd3d-proton master · 30 GB RAM + zram. All game runs
+use diagnostics builds. **Other Mesa GPUs are untested**: older AMD cards on RADV, Intel on ANV and
+NVIDIA on NVK are the target, so a report from any of them is worth as much as a patch
+([see Contribute](#contribute)).
 
-> [!IMPORTANT]
-> The lit picture comes from the candidate build, tag
-> [`keep/scar-candidate-20261125`](https://github.com/pablogonz12/Scarlight/tree/keep/scar-candidate-20261125)
-> (on the fxceless base). **It is not merged into `main` yet.** On `main` the world is still mostly
-> black, at under 1 fps ([AMD-LINUX.md](AMD-LINUX.md)).
+The builds differ, and **the fastest one measured here is not Scarlight's code yet**:
 
-| Area (candidate build) | State |
+| Build | World fps | Time to world | Picture and run notes |
+|---|---|---|---|
+| [JoshuuDev/victory-amd](https://github.com/JoshuuDev/victory-amd) `003beef2`, unmodified (best measured; a base we are evaluating) | **1.20 / 1.33 / 1.85** (3 runs) | 155-160 s (about 2.5 min) | Lit, textured world with walls. A face and some close-up character detail are missing |
+| Scarlight [`keep/good-0257-live2`](https://github.com/pablogonz12/Scarlight/tree/keep/good-0257-live2) (**quick start**) | 0.82 / 0.95 (2 runs) | 217 s (run 1) | Faces showed in an earlier play session; run 1 had walls missing |
+| Scarlight candidate 3 (local branch, **not pushed yet**) | 1.18 (1 run) | 133 s | Walls and a face missing |
+
+fps is the test runner's per-run figure on an automated route into the world. Counting only
+world-frame lines, the three victory-amd runs have medians of 1.3, 1.8 and 2.2 fps: the same binary
+varies a lot, so small gains from single runs mean nothing. Camera and run length were not identical.
+`main` was not re-measured in this round; its last recorded state is a mostly black world under 1 fps
+([AMD-LINUX.md](AMD-LINUX.md)).
+
+**Offline shader translation** (a local set of 751 world programs, not distributed):
+
+| Tree | Translated |
 |---|---|
-| Boot, menus, audio, pad | Works |
-| World in the prologue | Renders lit, about **2-3 fps** at best; many runs are slower (1-2 fps) and it varies by scene and switches |
-| Interiors and shadowed areas | **Known issue:** dark |
-| Intro | **Known issue:** frames can show out of order |
-| Stability | **Known issue:** occasional freezes with experimental switches; `VICTORY_ASYNC_WRITEBACK=1` has hung the title |
-| Playable | **No** |
+| Scarlight candidate 3 (local) | **751 / 751** |
+| [project-flamingo](https://github.com/JMAN730/project-flamingo) `main` `e00a0198` | 679 / 751 |
 
-## Requirements
+Translating a program does not prove it draws correctly, or that the driver pipeline is ready in
+time. These counts are not for the quick-start tag.
 
-| | |
-|---|---|
-| OS / GPU | Arch-family Linux, RX 9070 XT (tested) |
-| Wine | **GE-Proton11-14** (tested), running its `wine` binary directly, not the `proton` script |
-| Direct3D 12 | **vkd3d-proton master** (or the DLLs shipped in GE-Proton11-14). Stock vkd3d-proton 3.1 crashes at world entry |
-| Driver | **Mesa 26.3.1** RADV (tested) |
-| RAM | **32 GB or more recommended** (tests ran with about 30 GB usable and little to spare) |
-| Build tools | Rust (pinned in `rust-toolchain.toml`) and `cargo-xwin` |
-| Game files | **Your own legally obtained copy.** None is included, linked or shared |
+## Quick start
 
-The candidate build also needs `dxcompiler.dll` and `dxil.dll`
-([DirectXShaderCompiler](https://github.com/microsoft/DirectXShaderCompiler/releases)) and, as a
-stop-gap, Microsoft's `d3dcompiler_47.dll` next to the exe. You supply these too.
+For Arch-family Linux with Mesa. Measured only on an RX 9070 XT with RADV; other Mesa GPUs (older
+AMD cards on RADV, Intel on ANV, NVIDIA on NVK) should work and are untested. NVIDIA's proprietary
+driver and native Windows are not supported here: see
+[project-flamingo](https://github.com/JMAN730/project-flamingo) or
+[victory-fork](https://github.com/fxceless/victory-fork). 32 GB of RAM or more is recommended.
 
-## Build
+**You need:**
+
+- your own legally obtained copy of the title's files, kept outside the repository (none is
+  included, linked or shared);
+- [GE-Proton11-14](https://github.com/GloriousEggroll/proton-ge-custom/releases);
+- 64-bit `d3d12.dll` and `d3d12core.dll` from [vkd3d-proton](https://github.com/HansKristian-Work/vkd3d-proton)
+  **master** (stock 3.1 crashed at world entry);
+- 64-bit `dxcompiler.dll` and `dxil.dll` from
+  [DirectXShaderCompiler](https://github.com/microsoft/DirectXShaderCompiler/releases);
+- Microsoft's 64-bit `d3dcompiler_47.dll`, from software you are licensed to use (a stop-gap:
+  Wine's built-in one rejects some runtime shaders).
+
+**Build** the tag:
 
 ```bash
+sudo pacman -S --needed mesa vulkan-radeon rustup git clang lld llvm   # vulkan-intel on Intel, mesa-vulkan-drivers elsewhere
 git clone https://github.com/pablogonz12/Scarlight && cd Scarlight
-git checkout keep/scar-candidate-20261125   # lit-world candidate; stay on main to contribute
-rustup target add x86_64-pc-windows-msvc
-cargo install cargo-xwin                    # once
-cargo xwin build --release -p victory --target x86_64-pc-windows-msvc
+git checkout keep/good-0257-live2
+rustup toolchain install                 # version pinned in rust-toolchain.toml
+cargo install cargo-xwin                 # once
+cargo xwin build --release -p victory --features diagnostics --target x86_64-pc-windows-msvc
 ```
 
-The output is a Windows binary that runs under Wine. Add `--features diagnostics` for per-frame
-statistics.
+**Run** it with GE-Proton's `wine` binary (not the `proton` script). Edit the first five paths:
 
-## Run
+```bash
+GE="$HOME/.local/share/Steam/compatibilitytools.d/GE-Proton11-14"  # your folder name
+VKD3D="$HOME/dlls/vkd3d-proton-master"   # d3d12.dll, d3d12core.dll (x64)
+DXC="$HOME/dlls/dxc"                     # dxcompiler.dll, dxil.dll (x64)
+D3DC="$HOME/dlls/d3dcompiler_47.dll"     # x64
+GAME="$HOME/victory-data/game/<the title's exe>"
+OUT="$PWD/target/x86_64-pc-windows-msvc/release"   # from the Scarlight folder
 
-Full setup and a copy-paste play script: **[docs/linux.md](docs/linux.md)**.
+cp "$VKD3D"/d3d12.dll "$VKD3D"/d3d12core.dll "$DXC"/dxcompiler.dll "$DXC"/dxil.dll "$D3DC" "$OUT"/
+cp "$GE"/files/lib/wine/dxvk/x86_64-windows/dxgi.dll "$OUT"/
 
-| Switch | Effect |
+WINEPREFIX="$HOME/.local/share/scarlight-prefix" \
+WINEDLLOVERRIDES="d3d12,d3d12core,dxgi,d3d11,d3d10core,d3dcompiler_47=n,b" \
+VKD3D_CONFIG=ignore_shared_fence VICTORY_LOG=info \
+"$GE/files/bin/wine" "$OUT/victory.exe" run "$GAME" --execute
+```
+
+The tag was built from a clean checkout on 25 Nov. The runs above used the maintainer's test
+scripts; this shortened command sequence has not been run as written on a fresh prefix. If it fails,
+please [open an issue](https://github.com/pablogonz12/Scarlight/issues/new/choose). A play script,
+controls and troubleshooting are in
+[docs/linux.md on `main`](https://github.com/pablogonz12/Scarlight/blob/main/docs/linux.md): the tag
+does not carry the guide, so read it there (the checkout replaces this page too).
+
+## What's different
+
+| | Scarlight |
 |---|---|
-| `VICTORY_NO_WATCHDOG=1` | Turns off the title's watchdog (opt-in hook, one known build). Use it: slow frames can otherwise make the title quit. A real hang then stays a hang |
-| `VICTORY_PIPELINE_WAIT_MS=<ms>` | *Candidate build.* Per-frame wait for background pipeline creation, default 500. Lower (e.g. 24) stalls less, but draws are left out until their pipeline is ready |
-| `VICTORY_DEPTH_TWINS=0` / `stencil` / `nodepth` | *Candidate build.* On by default. These turn off depth/stencil twin textures entirely or limit which are made; for comparing picture problems |
-| `VICTORY_ASYNC_WRITEBACK=1` | **Experimental**, off by default. Writes GPU results back on another thread; has hung the title in our tests |
+| **Built for Linux only** | The title runs on Linux through Wine/Proton and vkd3d-proton. Nothing here keeps a native Windows path working, so every change is measured on the stack people actually run |
+| **The driver is ours to fix** | Mesa is open source, so the driver is part of the project: RADV/ACO env and driconf switches, pipeline-executable statistics, a local Mesa build loaded through `VK_ICD_FILENAMES`, and bug reports or patches to Mesa itself. Other ports stop at the Vulkan API |
+| **RADV first, then ANV and NVK** | One driver family, several GPUs. RADV is the reference; Intel's ANV and NVIDIA's NVK come next. Driver-specific work is gated by Vulkan driver and device id, so no GPU loses a working path |
+| **Picture before speed** | A speed change that costs picture quality is not taken |
+| **Many ports, one test box** | We follow the other ports and forks, try their fixes on the same card, and bring in what helps, authors credited |
+| **Tests without the game first** | Unit tests and offline shader translation, with a per-program output diff, come before a game run |
+| **Honest numbers** | Build, run count and known faults are listed with each figure, including when another tree is ahead |
+| **Giving back** | Fixes that apply elsewhere are offered upstream as issues and pull requests |
 
-## How we work
+Other ports worth following, each with its own focus:
+[VIctory](https://github.com/Marvisak/VIctory),
+[victory-fork](https://github.com/fxceless/victory-fork),
+[project-flamingo](https://github.com/JMAN730/project-flamingo),
+[VItoriaBr](https://github.com/uiliannn/VItoriaBr),
+[victory-amd](https://github.com/JoshuuDev/victory-amd) and
+[VIctory-Belobug-AMD](https://github.com/Belobug/VIctory-Belobug-AMD). Their own pages report their
+results on their own hardware. The Belobug build we tried here did not get past loading under Wine;
+that says nothing about it on Windows.
 
-- We **watch the other ports** and forks, measure their fixes on RDNA4 + Linux, and take the ones
-  that help, **with credit** and the authors' commits kept ([INTEGRATION.md](INTEGRATION.md)).
-- **Every gain goes up as a PR** with its evidence (log lines, shader counts, frame timings).
-- Our gains **also go to [project-flamingo](https://github.com/JMAN730/project-flamingo) as PRs**.
-  Fixes that fit [VIctory](https://github.com/Marvisak/VIctory) should go there too.
-- PRs here target `main`; see [CONTRIBUTING.md](CONTRIBUTING.md). A test report from another RDNA
-  card is as useful as a patch.
-- Docs, commits and PRs never name the title or its developer. Never commit game files
-  ([asset policy](docs/asset-policy.md)).
+## Roadmap
+
+| Milestone | Goal |
+|---|---|
+| **M0 · Unblock** | Newer builds boot reliably; choose one base by close-up picture quality first, speed second |
+| **M1 · Picture parity** | On a fixed scene: faces, full-detail characters up close, walls, no black flashes, matching colour |
+| **M2 · Frame gaps** | Find where frame time is lost; pipelines ready earlier. Target: about 2.5-3 fps, world in under 90 s |
+| **M3 · Memory** | Fewer copies and memory-tracking calls. Target: about 4 fps, no stalls over 1 s |
+| **M4 · Overlap + stability** | Prepare the next frame while the GPU draws; one-hour sessions without a crash |
+
+Targets are goals, not results.
+
+**Mesa track, in parallel:** driver env and driconf switches, pipeline-executable statistics, a local
+Mesa build for experiments and upstream Mesa reports, each measured like any other change. Nothing
+Scarlight ships may require RDNA4; RADV- or ANV-only paths are gated by Vulkan driver id.
+
+## Known problems
+
+- **Not playable.** About 0.8-2 fps in the world, with multi-second stalls.
+- **Picture:** on the newest base, a face and some close-up character detail (lowest detail level up
+  close) are missing; under investigation. Other builds have missing walls.
+- **Shadows:** ray-traced lighting is incomplete, so some interiors and shadowed areas are dark.
+- **Intro:** frames can show out of order.
+- **Stability:** some builds and runs hang at boot or world entry, or lose the D3D12 device.
+  `VICTORY_ASYNC_WRITEBACK=1` is experimental and has hung the title.
+- **Branches:** the builds above are not merged into `main`.
+
+## Contribute
+
+**A test report from another Mesa GPU is as useful as a patch**, and the only tested config so far is
+RX 9070 XT + RADV: AMD (other RADV generations), Intel (ANV) and NVIDIA (NVK) all welcome — card,
+driver and Mesa version, build tag, fps and what looked wrong, in text and logs only (no screenshots
+or game data). Pull requests target `main`; see [CONTRIBUTING.md](CONTRIBUTING.md). CI and review come
+before merge. Docs, commits and PRs never name the title or its developer, and game files are never
+committed ([asset policy](docs/asset-policy.md)). Parts of this project, this page included, are
+written with AI coding tools. Crates: [docs/architecture.md](docs/architecture.md).
+
+If you want a **Linux + Mesa** port to keep moving, **star the repository**.
 
 ## Credits
 
-- [Marvisak/VIctory](https://github.com/Marvisak/VIctory): the project this is built on (Marvis and contributors).
-- [fxceless/victory-fork](https://github.com/fxceless/victory-fork) (fxceless / hyphennn): the base of the lit-world candidate.
-- [uiliannn/VItoriaBr](https://github.com/uiliannn/VItoriaBr) (uiliannn): a fork we follow and learn from.
+- [Marvisak/VIctory](https://github.com/Marvisak/VIctory) (Marvis and contributors): the project this is built on.
+- [fxceless/victory-fork](https://github.com/fxceless/victory-fork) (fxceless / hyphennn): the base of the quick-start tag and the candidates.
+- [uiliannn/VItoriaBr](https://github.com/uiliannn/VItoriaBr) (uiliannn): shader signature fixes, merged in local candidate 3.
+- [JoshuuDev/victory-amd](https://github.com/JoshuuDev/victory-amd) (Joshua Odom), built on
+  [myokex/victory-amd](https://github.com/myokex/victory-amd): the best build measured here. Their work, measured unmodified.
+- **wbkepler**: snapshot page reuse and indirect buffer work. **wrothgaril**: count-aware indirect clamp and related commits.
 - **ErRusso**: runtime HLSL through DXC. **ZazaJr24**: configurable pipeline waits.
   **ruvenesh**: the opt-in watchdog hook (VIctory #454).
 
-Authors of commits carried in the candidate build:
+Authors of commits carried in our candidate and quick-start builds:
 9hvn9yt2vk-netizen, Abdellah K., Advait Palve, AlanQiang0418, alessiodeia, Andrea Casale,
 AnoHunted, artor410, BaggyALPHA, Carlos Sant'Anna, cxchhh (cxccxc), Dathinel, Duff, EatCodeSleep2,
 Enzo Souza Duarte, errusso, Exorion, fever308, FIocker, fuzeofficial, fxceless, Henrique Bueno,
@@ -134,7 +206,7 @@ hophaver, ifBars, ismailchaka1, itsRevela, Jeremy Goldberg, julio, KoLolX3, lame
 LaunchDoesntCode, localshotgun, lordon1a, Louis Faust, LUIS LARIOS, Luiz Neves,
 Luiz Otavio Mello de Campos, Lyrnc, Manuel Pérez, Maraco91, marquezini, Marvis, meower, Nostyxx,
 oddiums, pablogonz12 (Pablo Gonzalez), Pedro Fortunato, quaternion, r4tedx (r4.), raffclar,
-Saitken91, spacede, tedin7, TG0000, undeadhuman37, Vanthys, wrothgaril, Yaekai, ZazaJr24.
+Saitken91, spacede, tedin7, TG0000, uiliannn, undeadhuman37, Vanthys, wrothgaril, Yaekai, ZazaJr24.
 Some commits were also authored by AI coding tools (Claude, Codex). More per-PR credit:
 [INTEGRATION.md](INTEGRATION.md). Missing or misnamed? Open an issue.
 

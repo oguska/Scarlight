@@ -1,12 +1,13 @@
-# Linux setup (AMD RDNA4)
+# Linux setup (Mesa)
 
-Tested: CachyOS (Arch family), RX 9070 XT, Mesa 26.3.1 RADV, GE-Proton11-14. Read the
-[status](../README.md#status) first: this is not playable.
+Tested on one machine: CachyOS (Arch family), RX 9070 XT, Mesa 26.3.1 RADV, GE-Proton11-14. Other
+Mesa GPUs (RADV generations, ANV, NVK) are untested. Read the [status](../README.md#status) first:
+this is not playable.
 
 ## 1. Packages
 
 ```bash
-sudo pacman -S --needed mesa vulkan-radeon rustup git clang lld llvm
+sudo pacman -S --needed mesa vulkan-radeon rustup git clang lld llvm   # vulkan-intel on Intel
 ```
 
 Install **GE-Proton11-14** from [proton-ge-custom](https://github.com/GloriousEggroll/proton-ge-custom/releases),
@@ -14,7 +15,7 @@ for example into `~/.local/share/Steam/compatibilitytools.d/`.
 
 ## 2. Build
 
-Follow [Build](../README.md#build).
+Follow [Quick start](../README.md#quick-start).
 
 ## 3. Files next to `victory.exe`
 
@@ -22,9 +23,10 @@ In `target/x86_64-pc-windows-msvc/release/`:
 
 | File | Source |
 |---|---|
+| `dxgi.dll` | GE-Proton's DXVK copy, `files/lib/wine/dxvk/x86_64-windows/` |
 | `d3d12.dll`, `d3d12core.dll` | [vkd3d-proton](https://github.com/HansKristian-Work/vkd3d-proton) master, 64-bit. Without them, GE-Proton11-14's own are used |
-| `dxcompiler.dll`, `dxil.dll` | DirectXShaderCompiler release, x64 (candidate build) |
-| `d3dcompiler_47.dll` | Microsoft's, from software you are licensed to use (candidate build; stop-gap, because Wine's built-in one rejects some runtime shaders) |
+| `dxcompiler.dll`, `dxil.dll` | DirectXShaderCompiler release, x64 (needed by the quick-start tag) |
+| `d3dcompiler_47.dll` | Microsoft's, from software you are licensed to use (stop-gap, because Wine's built-in one rejects some runtime shaders) |
 
 Never commit any of these, or any game file.
 
@@ -44,14 +46,14 @@ GAME_EXE="<the title's exe>"
 export WINEPREFIX="$HOME/.local/share/scarlight-prefix"
 export WINEDLLOVERRIDES="d3d12,d3d12core,dxgi,d3d11,d3d10core,d3dcompiler_47=n,b"
 export VKD3D_CONFIG=ignore_shared_fence
-export VICTORY_NO_WATCHDOG=1
+export VICTORY_NO_WATCHDOG=1   # newer builds; keep/good-0257-live2 has no such hook
 export VICTORY_GAME_DIR="$GAME_DIR"
 export VICTORY_LOG="${VICTORY_LOG:-info}"
 
 exec "$PROTON/files/bin/wine" "$EXE" run "$GAME_DIR/$GAME_EXE" --execute
 ```
 
-Make it executable once with `chmod +x play.sh`. Pass switches in front: `VICTORY_PIPELINE_WAIT_MS=24 ./play.sh`. See [Run](../README.md#run).
+Make it executable once with `chmod +x play.sh`. Pass switches in front: `VICTORY_PIPELINE_WAIT_MS=24 ./play.sh`. The switches are listed in [AMD-LINUX.md](../AMD-LINUX.md#diagnostics).
 If you use GE-Proton's own D3D12 DLLs, make sure your prefix has them installed or copy them next
 to the exe.
 
@@ -73,7 +75,7 @@ A gamepad works. Otherwise the keyboard acts as a pad while the title's window h
 |---|---|
 | Crash at world entry | Replace stock vkd3d-proton 3.1 DLLs with master's or GE-Proton11-14's |
 | Very slow, swapping | Close apps that hold RAM or GPU memory (local LLM servers, browsers) |
-| The title quits while waiting for the GPU | `VICTORY_NO_WATCHDOG=1` |
+| The title quits while waiting for the GPU | `VICTORY_NO_WATCHDOG=1` — builds with the watchdog hook only; `keep/good-0257-live2` has no such hook |
 | Freezes | Unset all experimental switches |
 | `victory` reports no paths | `victory config`; paths must be outside the repository |
 | RenderDoc installed and the title crashes | `VK_LOADER_LAYERS_DISABLE='*renderdoc*'` |
