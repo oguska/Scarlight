@@ -7,6 +7,7 @@
 
 use super::host::{Dispatch, Host, Root, View};
 use super::{HostShader, lower, validator};
+use crate::ir::Reg;
 use crate::native::{
     ComputeIo, HwStage, NativeProgram, ResourceType, RootParam, RootType, StageIo, UsedResource,
 };
@@ -184,6 +185,17 @@ fn run_cases(
     cases: &[[u32; 4]],
     mut check: impl FnMut(&str, usize, [u32; 4], u32),
 ) {
+    run_cases_with_output(shader, cases, 1, |backend, i, inputs, out| {
+        check(backend, i, inputs, out[0]);
+    });
+}
+
+fn run_cases_with_output(
+    shader: &HostShader,
+    cases: &[[u32; 4]],
+    output_dwords: u32,
+    mut check: impl FnMut(&str, usize, [u32; 4], &[u32]),
+) {
     let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     let mut ran = 0;
     for (label, warp) in [("hardware", false), ("warp", true)] {
@@ -212,17 +224,96 @@ fn run_cases(
                     &pso,
                     &Dispatch {
                         roots: vec![(0, Root::Constants(ud))],
-                        views: &[View::RawUav(1)],
+                        views: &[View::RawUav(output_dwords)],
                         samplers: &[],
                         groups: [1, 1, 1],
                     },
                 )
                 .unwrap_or_else(|e| panic!("{label}: dispatch failed: {e}"));
-            check(label, i, inputs, out[0][0]);
+            check(label, i, inputs, &out[0]);
         }
         ran += 1;
     }
     assert!(ran > 0, "neither hardware nor WARP SM 6.6 device available");
+}
+
+const BITREPLICATE_BODY: [u32; 9] = {
+    let [store_high, high_addr] = buffer_store_dword(5, 8, 4);
+    let [store_scc, scc_addr] = buffer_store_dword(6, 8, 8);
+    [
+        0xBF06_8101,          // s_cmp_eq_u32 s1, 1
+        0xBE90_3B00,          // s_bitreplicate_b64_b32 s[16:17], s0
+        vop1(1, 0, sgpr(16)), // v_mov_b32 v0, s16 (stored by build_valu_cs)
+        vop1(1, 5, sgpr(17)), // v_mov_b32 v5, s17
+        vop1(1, 6, 253),      // v_mov_b32 v6, src_scc
+        store_high,
+        high_addr,
+        store_scc,
+        scc_addr,
+    ]
+};
+
+#[test]
+fn s_bitreplicate_b64_b32_ir_and_dxil() {
+    let code: Vec<u8> = BITREPLICATE_BODY[..5]
+        .iter()
+        .chain(&[S_ENDPGM])
+        .flat_map(|word| word.to_le_bytes())
+        .collect();
+    let ir = ir::build(&code, false, 16).unwrap();
+    let insts = &ir.blocks[0].insts;
+    let replicate = &insts[1];
+    assert_eq!(replicate.name(), "s_bitreplicate_b64_b32");
+    assert_eq!(replicate.reads.len(), 1);
+    assert!(replicate.read(Reg::S(0)).is_some());
+    assert_eq!(replicate.writes.len(), 2);
+    for (use_inst, reg) in [(&insts[2], Reg::S(16)), (&insts[3], Reg::S(17))] {
+        assert_eq!(use_inst.read(reg).unwrap(), replicate.write(reg).unwrap());
+    }
+    assert_eq!(replicate.write(Reg::Scc), None);
+    assert_eq!(
+        insts[4].read(Reg::Scc).unwrap(),
+        insts[0].write(Reg::Scc).unwrap()
+    );
+
+    let shader = build_valu_cs(&BITREPLICATE_BODY);
+    let container = crate::Container::parse(&shader.dxil).unwrap();
+    let features = container.part(crate::FourCC::SFI0).unwrap();
+    let features = u64::from_le_bytes(features.data.try_into().unwrap());
+    assert_eq!(features & 0x8000, 0, "DXIL must not require Int64Ops");
+}
+
+#[test]
+fn s_bitreplicate_b64_b32_replicates_both_halves_and_preserves_scc() {
+    let mixed = 0x1234_5678u32;
+    let reference = |half: u32| {
+        (0..16)
+            .map(|bit| (3 * ((half >> bit) & 1)) << (2 * bit))
+            .sum()
+    };
+    let cases = [
+        (0x0000_0000, [0x0000_0000, 0x0000_0000]),
+        (0xffff_ffff, [0xffff_ffff, 0xffff_ffff]),
+        (0x0000_0001, [0x0000_0003, 0x0000_0000]),
+        (0x0000_8000, [0xc000_0000, 0x0000_0000]),
+        (0x0001_0000, [0x0000_0000, 0x0000_0003]),
+        (0x8000_0000, [0x0000_0000, 0xc000_0000]),
+        (0x5555_aaaa, [0xcccc_cccc, 0x3333_3333]),
+        (mixed, [reference(mixed), reference(mixed >> 16)]),
+    ];
+    let inputs: Vec<_> = cases
+        .iter()
+        .flat_map(|&(src, _)| [[src, 0, 0, 0], [src, 1, 0, 0]])
+        .collect();
+    let shader = build_valu_cs(&BITREPLICATE_BODY);
+    run_cases_with_output(&shader, &inputs, 3, |backend, i, [src, scc, ..], got| {
+        let [low, high] = cases[i / 2].1;
+        assert_eq!(
+            got,
+            [low, high, scc],
+            "{backend}: src={src:#010x}, SCC={scc}"
+        );
+    });
 }
 
 #[test]

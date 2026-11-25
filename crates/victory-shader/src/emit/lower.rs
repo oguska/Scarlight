@@ -3431,7 +3431,10 @@ impl<'a> Lower<'a> {
             self.set(scc, Val::Bit(r));
             return Ok(());
         }
-        let wide = name.ends_with("_b64") || name.ends_with("_u64") || name.ends_with("_i64");
+        let wide = name.ends_with("_b64")
+            || name.ends_with("_u64")
+            || name.ends_with("_i64")
+            || name == "s_bitreplicate_b64_b32";
         if wide {
             let hi = dst_code.and_then(|c| inst.write(Reg::S(c + 1)));
             let nonzero = |l: &mut Self, a: V, b: V| {
@@ -3440,6 +3443,18 @@ impl<'a> Lower<'a> {
                 l.s.m.cmp(c, pred::NE, o, z)
             };
             return match name {
+                "s_bitreplicate_b64_b32" => {
+                    let src = src32(self, 0)?;
+                    let mask = self.s.m.i32(0xffff);
+                    let shift = self.s.m.i32(16);
+                    let low = self.s.m.bin(c, Bin::And, src, mask);
+                    let high = self.s.m.bin(c, Bin::LShr, src, shift);
+                    let low = self.replicate_half_bits(low);
+                    let high = self.replicate_half_bits(high);
+                    self.set(lo, Val::I32(low));
+                    self.set(hi, Val::I32(high));
+                    Ok(())
+                }
                 "s_quadmask_b64" => {
                     let (a, b) = (half(self, 0, 0)?, half(self, 0, 1)?);
                     let low = self.quad_mask(a);
@@ -3783,6 +3798,27 @@ impl<'a> Lower<'a> {
             self.vals.insert(scc, val);
         }
         Ok(())
+    }
+
+    /// Duplicates each bit of a 16-bit value into a consecutive pair.
+    fn replicate_half_bits(&mut self, mut bits: V) -> V {
+        let c = self.cur;
+        let m = &mut self.s.m;
+        for (distance, keep) in [
+            (8, 0x00ff_00ff),
+            (4, 0x0f0f_0f0f),
+            (2, 0x3333_3333),
+            (1, 0x5555_5555),
+        ] {
+            let distance = m.i32(distance);
+            let shifted = m.bin(c, Bin::Shl, bits, distance);
+            let combined = m.bin(c, Bin::Or, bits, shifted);
+            let keep = m.i32(keep);
+            bits = m.bin(c, Bin::And, combined, keep);
+        }
+        let one = m.i32(1);
+        let shifted = m.bin(c, Bin::Shl, bits, one);
+        m.bin(c, Bin::Or, bits, shifted)
     }
 
     /// Packs whether each consecutive group of four pixels has a set bit.
