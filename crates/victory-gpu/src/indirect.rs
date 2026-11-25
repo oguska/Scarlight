@@ -18,10 +18,10 @@
 //! dispatches, the budget) cut legitimate work beyond them; raise them if
 //! the title needs more.
 
+use victory_shader::emit::{ROOT_CBV_SPACE, USER_DATA_SPACE, clamp};
 use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
 use windows::Win32::Graphics::Direct3D::ID3DBlob;
 use windows::Win32::Graphics::Direct3D12::*;
-use victory_shader::emit::{ROOT_CBV_SPACE, USER_DATA_SPACE, clamp};
 use windows::core::s;
 
 use crate::host::{HostList, host, transition};
@@ -122,14 +122,16 @@ unsafe impl Sync for Clamp {}
 fn clamp() -> Option<&'static Clamp> {
     static CLAMP: std::sync::OnceLock<Option<Clamp>> = std::sync::OnceLock::new();
     CLAMP
-        .get_or_init(|| match make().or_else(|e| {
-            tracing::warn!(error = %e, "no compiled argument clamp: using our own DXIL");
-            make_own()
-        }) {
-            Ok(c) => Some(c),
-            Err(e) => {
-                tracing::warn!(error = %e, "no argument clamp: indirect execution dropped");
-                None
+        .get_or_init(|| {
+            match make().or_else(|e| {
+                tracing::warn!(error = %e, "no compiled argument clamp: using our own DXIL");
+                make_own()
+            }) {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    tracing::warn!(error = %e, "no argument clamp: indirect execution dropped");
+                    None
+                }
             }
         })
         .as_ref()

@@ -284,8 +284,7 @@ unsafe fn code_at(rip: usize) -> ([u8; 32], usize) {
 /// Whether the page at `address` is committed and can be read.
 fn readable(address: usize) -> bool {
     use windows_sys::Win32::System::Memory::{
-        MEM_COMMIT, MEMORY_BASIC_INFORMATION, PAGE_EXECUTE, PAGE_GUARD, PAGE_NOACCESS,
-        VirtualQuery,
+        MEM_COMMIT, MEMORY_BASIC_INFORMATION, PAGE_EXECUTE, PAGE_GUARD, PAGE_NOACCESS, VirtualQuery,
     };
     // SAFETY: a zeroed MEMORY_BASIC_INFORMATION is valid.
     let mut info: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };

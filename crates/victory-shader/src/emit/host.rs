@@ -1103,7 +1103,9 @@ impl Host {
                         at.ptr += (index * size) as u64;
                         list.SetGraphicsRootDescriptorTable(*param, at);
                     }
-                    Root::View { .. } | Root::Uav(_) | Root::UavData(_) => return Err("root views in a draw".into()),
+                    Root::View { .. } | Root::Uav(_) | Root::UavData(_) => {
+                        return Err("root views in a draw".into());
+                    }
                 }
             }
             list.OMSetRenderTargets(1, Some(&rtv), false, None);

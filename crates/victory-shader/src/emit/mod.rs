@@ -183,9 +183,9 @@
 //!   console never exports them).
 
 mod bitcode;
-pub mod clamp;
 #[cfg(all(test, windows))]
 mod bvh_tests;
+pub mod clamp;
 mod container;
 #[cfg(all(test, windows))]
 mod diff_tests;

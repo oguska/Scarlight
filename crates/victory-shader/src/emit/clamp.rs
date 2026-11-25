@@ -76,8 +76,17 @@ pub fn argument_clamp() -> Vec<u8> {
 
     let [start, head, body, clamp, draw, other, dispatch, mesh, join] =
         std::array::from_fn(|_| s.m.new_block());
-    let [charged, walk, walked, after, empty, latch, done, spend, exit] =
-        std::array::from_fn(|_| s.m.new_block());
+    let [
+        charged,
+        walk,
+        walked,
+        after,
+        empty,
+        latch,
+        done,
+        spend,
+        exit,
+    ] = std::array::from_fn(|_| s.m.new_block());
 
     let one = s.m.i32(1);
     let size = s.m.i32(GROUP);
@@ -221,7 +230,10 @@ pub fn argument_clamp() -> Vec<u8> {
     let tile_next = s.m.bin(latch, Bin::Add, tile, one);
     s.m.terminate(latch, Term::Br(head));
     s.m.set_phi(tile, vec![(zero, entry), (zero, start), (tile_next, latch)]);
-    s.m.set_phi(left, vec![(zero, entry), (fresh, start), (left_next, latch)]);
+    s.m.set_phi(
+        left,
+        vec![(zero, entry), (fresh, start), (left_next, latch)],
+    );
 
     s.m.terminate(done, Term::CondBr(first, spend, exit));
     let total = s.m.bin(spend, Bin::Sub, list, left);
@@ -307,8 +319,7 @@ mod tests {
     use windows::Win32::Graphics::Direct3D12::*;
 
     use super::{
-        ARGUMENTS, BUDGET, DIMENSION, GROUPS, LIST, VERTEX_INSTANCES, VERTICES,
-        argument_clamp,
+        ARGUMENTS, BUDGET, DIMENSION, GROUPS, LIST, VERTEX_INSTANCES, VERTICES, argument_clamp,
     };
     use crate::emit::host::{Dispatch, Host, Root};
     use crate::emit::{ROOT_CBV_SPACE, USER_DATA_SPACE};

@@ -3305,7 +3305,11 @@ impl<'a> Lower<'a> {
                 // Omit SYNC_THREAD_GROUP (8) when control-dependent on a
                 // per-lane branch, where a 32-lane host deadlocks if one warp
                 // skips the barrier while another waits on it.
-                let sync = if self.fence_only_barrier.contains(&b) { 0 } else { 8 };
+                let sync = if self.fence_only_barrier.contains(&b) {
+                    0
+                } else {
+                    8
+                };
                 let mode = sync | 1 | if self.writes_uavs { 2 } else { 0 };
                 let mode = self.s.m.i32(mode);
                 let void = self.s.t.void;
@@ -8139,8 +8143,7 @@ impl<'a> Lower<'a> {
                     .s
                     .m
                     .int_value(w)
-                    .ok_or("a sample offset that is not constant")?
-                    as u32;
+                    .ok_or("a sample offset that is not constant")? as u32;
                 for (k, o) in os.iter_mut().enumerate().take(offsets) {
                     let x = (w >> (8 * k) & 0x3F) as i32;
                     let x = if x >= 32 { x - 64 } else { x };
