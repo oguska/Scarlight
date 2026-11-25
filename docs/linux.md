@@ -46,14 +46,14 @@ GAME_EXE="<the title's exe>"
 export WINEPREFIX="$HOME/.local/share/scarlight-prefix"
 export WINEDLLOVERRIDES="d3d12,d3d12core,dxgi,d3d11,d3d10core,d3dcompiler_47=n,b"
 export VKD3D_CONFIG=ignore_shared_fence
-export VICTORY_NO_WATCHDOG=1   # newer builds; keep/good-0257-live2 has no such hook
+export VICTORY_NO_WATCHDOG=1   # builds that carry the hook; see the README switches table
 export VICTORY_GAME_DIR="$GAME_DIR"
 export VICTORY_LOG="${VICTORY_LOG:-info}"
 
 exec "$PROTON/files/bin/wine" "$EXE" run "$GAME_DIR/$GAME_EXE" --execute
 ```
 
-Make it executable once with `chmod +x play.sh`. Pass switches in front: `VICTORY_PIPELINE_WAIT_MS=24 ./play.sh`. The switches are listed in [AMD-LINUX.md](../AMD-LINUX.md#diagnostics).
+Make it executable once with `chmod +x play.sh`. Pass switches in front: `VICTORY_PIPELINE_WAIT_MS=24 ./play.sh`. The switches are listed in [the README](../README.md#switches).
 If you use GE-Proton's own D3D12 DLLs, make sure your prefix has them installed or copy them next
 to the exe.
 
@@ -75,7 +75,7 @@ A gamepad works. Otherwise the keyboard acts as a pad while the title's window h
 |---|---|
 | Crash at world entry | Replace stock vkd3d-proton 3.1 DLLs with master's or GE-Proton11-14's |
 | Very slow, swapping | Close apps that hold RAM or GPU memory (local LLM servers, browsers) |
-| The title quits while waiting for the GPU | `VICTORY_NO_WATCHDOG=1` — builds with the watchdog hook only; `keep/good-0257-live2` has no such hook |
+| The title quits while waiting for the GPU | `VICTORY_NO_WATCHDOG=1` — only builds that carry the hook; see the [README switches](../README.md#switches) |
 | Freezes | Unset all experimental switches |
 | `victory` reports no paths | `victory config`; paths must be outside the repository |
 | RenderDoc installed and the title crashes | `VK_LOADER_LAYERS_DISABLE='*renderdoc*'` |
@@ -90,4 +90,4 @@ cargo xwin build --profile diag -p victory --features diagnostics --target x86_6
 
 Then point `EXE` in `play.sh` at `target/x86_64-pc-windows-msvc/diag/victory.exe`, with the same
 [files next to it](#3-files-next-to-victoryexe). The switches are listed in
-[AMD-LINUX.md](../AMD-LINUX.md#diagnostics).
+[the README](../README.md#switches).
