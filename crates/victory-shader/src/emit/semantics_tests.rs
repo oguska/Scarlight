@@ -3165,10 +3165,15 @@ fn check_lds_rsub(body: &[u32], inputs: &[[u32; 4]], check_output: impl Fn(&str,
     let sfi0 = container.part(crate::FourCC::SFI0).unwrap();
     let features = u64::from_le_bytes(sfi0.data.try_into().unwrap());
     assert_eq!(features & 0x8000, 0, "unexpected Int64 shader feature");
-    validator::Validator::load(validator::Validator::default_path().as_deref())
-        .expect("load dxil.dll")
-        .validate(&mut shader.dxil)
-        .expect("validate LDS reverse subtract");
+    match validator::Validator::load(validator::Validator::default_path().as_deref()) {
+        Ok(mut validator) => validator
+            .validate(&mut shader.dxil)
+            .expect("validate LDS reverse subtract"),
+        Err(e) => assert!(
+            std::env::var_os("VICTORY_DXIL").is_none(),
+            "could not load the configured DXIL validator: {e}"
+        ),
+    }
 
     let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     let mut ran = false;
