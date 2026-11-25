@@ -1104,7 +1104,9 @@ fn shared_texture(
     state: u32,
     clear: *const c_void,
 ) -> Option<std::sync::Arc<HostTexture>> {
-    let d = host_desc(desc)?;
+    // The flags the host can honor, before the shared texture is looked up:
+    // a host texture without a dropped flag still takes the description.
+    let d = supported_desc(host_desc(desc)?);
     let key = memory_key(address, desc);
     let mut map = MEMORY.lock().unwrap_or_else(|e| e.into_inner());
     let map = map.get_or_insert_with(Default::default);
@@ -1164,6 +1166,75 @@ fn current(this: This) -> bool {
         .is_none_or(|live| std::sync::Arc::ptr_eq(&live, h))
 }
 
+/// Texture flag: ALLOW_RENDER_TARGET.
+#[cfg(windows)]
+const RENDER_TARGET: u32 = 1;
+
+/// The `D3D12_FEATURE_DATA_FORMAT_SUPPORT.Support1` bits the device reports
+/// for `format`; `None` if the query fails.
+#[cfg(windows)]
+fn format_support(
+    device: &windows::Win32::Graphics::Direct3D12::ID3D12Device,
+    format: u32,
+) -> Option<u32> {
+    use windows::Win32::Graphics::Direct3D12::*;
+    let mut support = D3D12_FEATURE_DATA_FORMAT_SUPPORT {
+        Format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT(format as i32),
+        ..Default::default()
+    };
+    // SAFETY: plain feature query into our struct.
+    unsafe {
+        device.CheckFeatureSupport(
+            D3D12_FEATURE_FORMAT_SUPPORT,
+            (&raw mut support).cast(),
+            size_of::<D3D12_FEATURE_DATA_FORMAT_SUPPORT>() as u32,
+        )
+    }
+    .ok()
+    .map(|()| support.Support1.0 as u32)
+}
+
+/// `flags` without the unordered-access and render-target uses a typed
+/// format's `support1` bits (`D3D12_FORMAT_SUPPORT1`) do not offer.
+#[cfg(windows)]
+fn supported_flags(mut flags: u32, support1: u32) -> u32 {
+    use windows::Win32::Graphics::Direct3D12::*;
+    if support1 & D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW.0 as u32 == 0 {
+        flags &= !UNORDERED;
+    }
+    if support1 & D3D12_FORMAT_SUPPORT1_RENDER_TARGET.0 as u32 == 0 {
+        flags &= !RENDER_TARGET;
+    }
+    flags
+}
+
+/// Host description `d` as the host creates it: some console formats (such
+/// as B5G5R5A1_UNORM) allow unordered access or render-target flags that PC
+/// GPUs refuse, so unsupported flags on typed formats are dropped and the
+/// host texture is still made.
+#[cfg(windows)]
+fn supported_desc(mut d: ResourceDesc) -> ResourceDesc {
+    let typeless = family(d.format) == d.format && family(d.format + 1) == d.format;
+    if !typeless
+        && d.flags & (RENDER_TARGET | UNORDERED) != 0
+        && let Some(host) = crate::host::host()
+        && let Some(support) = format_support(&host.device, d.format)
+    {
+        d.flags = supported_flags(d.flags, support);
+    }
+    d
+}
+
+/// The optimized clear value the title passed, if the host texture still has
+/// a render-target or depth use: D3D12 requires none otherwise (id=815).
+#[cfg(windows)]
+fn optimized_clear(clear: *const c_void, flags: u32) -> Option<[u32; 5]> {
+    (!clear.is_null() && flags & (RENDER_TARGET | DEPTH) != 0).then(|| {
+        // SAFETY: the title passes a whole clear value.
+        unsafe { clear.cast::<[u32; 5]>().read_unaligned() }
+    })
+}
+
 /// A host texture of host description `d` in GPU memory, castable to
 /// [`castable`]'s formats (colour textures, through the enhanced-barrier
 /// creation; it starts in the common state) where the host takes that.
@@ -1175,9 +1246,7 @@ fn make_texture(d: &ResourceDesc, state: u32, clear: *const c_void) -> Option<Ho
     let host = crate::host::host()?;
     // The clear value names the format too: format, then color or depth
     // and stencil (5 words).
-    let clear_value = (!clear.is_null()).then(|| {
-        // SAFETY: the title passes a whole clear value.
-        let mut value = unsafe { clear.cast::<[u32; 5]>().read_unaligned() };
+    let clear_value = optimized_clear(clear, d.flags).map(|mut value| {
         value[0] = pc_format(value[0]);
         value
     });
@@ -1850,6 +1919,30 @@ pub(crate) fn test_buffer(width: u64) -> This {
 mod tests {
     use super::*;
     use crate::object::slot;
+
+    /// The flag filter and the clear-value rule on fixed support bits, the
+    /// same on every adapter.
+    #[cfg(windows)]
+    #[test]
+    fn unsupported_flags_and_clear_values_are_dropped() {
+        use windows::Win32::Graphics::Direct3D12::*;
+        let uav = D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW.0 as u32;
+        let rt = D3D12_FORMAT_SUPPORT1_RENDER_TARGET.0 as u32;
+        assert_eq!(supported_flags(5, 0), 0);
+        assert_eq!(supported_flags(5, uav), 4);
+        assert_eq!(supported_flags(5, rt), 1);
+        assert_eq!(supported_flags(5, uav | rt), 5);
+        // Flags outside the two stay.
+        assert_eq!(supported_flags(2 | 5, 0), 2);
+
+        let clear = [115u32, 1, 2, 3, 4];
+        let at = clear.as_ptr().cast();
+        assert_eq!(optimized_clear(at, 1), Some(clear));
+        assert_eq!(optimized_clear(at, 2), Some(clear), "depth keeps it");
+        assert_eq!(optimized_clear(at, 0), None, "no render target or depth");
+        assert_eq!(optimized_clear(at, 4), None, "unordered only");
+        assert_eq!(optimized_clear(std::ptr::null(), 1), None);
+    }
 
     #[test]
     fn a8_unorm_is_not_in_the_r8_typeless_family() {
