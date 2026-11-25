@@ -7,13 +7,30 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use victory_shader::emit::{RawWindow, StrideEntry};
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 
 use super::{VIEW_TAG, View, view_at};
-use crate::host::host;
+use crate::host::{HostList, host};
+
+/// An aligned upload copy backing a buffer SRV whose offset inside its shadow
+/// buffer is not a multiple of its element stride. Kept mapped so each draw
+/// or dispatch using the slot can schedule a submission-time refresh.
+#[derive(Clone)]
+struct UnalignedCopy {
+    resource: ID3D12Resource,
+    dst: usize,
+    src: usize,
+    len: usize,
+}
+
+struct LiveSlots {
+    seen: Vec<bool>,
+    slots: Vec<u32>,
+}
 
 pub(crate) struct HostHeap {
     pub(crate) heap: ID3D12DescriptorHeap,
@@ -27,11 +44,19 @@ pub(crate) struct HostHeap {
     sampler: bool,
     /// The record (view index and generation) each slot was last made from.
     made: Mutex<Vec<u64>>,
+    /// Title slots in this view heap that have held a view, for bindless
+    /// refresh before draws/dispatches.
+    live: Mutex<LiveSlots>,
+    /// Incremented whenever the title writes or updates a view in this heap.
+    generation: AtomicU64,
     /// The host resource each slot views, held while the slot does: shaders
     /// index heaps directly, so a slot the title has not rewritten since it
     /// released the resource may still be read, and a freed host resource
     /// read there is a GPU page fault (the console reads stale memory).
     kept: Mutex<Vec<Option<ID3D12Resource>>>,
+    /// Slots backed by an [`UnalignedCopy`] that must be refreshed from title
+    /// memory when a command list referencing the slot is submitted.
+    unaligned: Mutex<HashMap<u32, UnalignedCopy>>,
     /// Where the search for free dynamic slots starts, and which are taken
     /// (by lists not yet reset).
     next: Mutex<(u32, Vec<bool>)>,
@@ -246,7 +271,13 @@ impl HostHeap {
             dynamic: extra,
             sampler,
             made: Mutex::new(vec![0; count as usize]),
+            live: Mutex::new(LiveSlots {
+                seen: vec![false; if sampler { 0 } else { count as usize }],
+                slots: Vec::new(),
+            }),
+            generation: AtomicU64::new(0),
             kept: Mutex::new(vec![None; (count + extra) as usize]),
+            unaligned: Mutex::new(HashMap::new()),
             next: Mutex::new((0, vec![false; extra as usize])),
             strides,
             alias_base: count + extra,
@@ -416,7 +447,7 @@ impl HostHeap {
             null_for(view, self.cpu(index));
         }
         self.note_view(index, view, kept.as_ref());
-        self.keep(index, kept.flatten());
+        self.keep(index, kept.unwrap_or(Kept::Empty));
     }
 
     /// Makes slot `index` read nothing: a null view, or a plain sampler.
@@ -426,15 +457,51 @@ impl HostHeap {
         } else {
             null_view(self.cpu(index));
         }
-        self.keep(index, None);
+        self.keep(index, Kept::Empty);
         self.forget_view(index);
     }
 
-    /// Slot `index` now views `resource` (or nothing of the host's).
-    fn keep(&self, index: u32, resource: Option<ID3D12Resource>) {
-        let mut kept = self.kept.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(slot) = kept.get_mut(index as usize) {
+    /// Slot `index` now views `kept` (or nothing of the host's).
+    fn keep(&self, index: u32, kept: Kept) {
+        let (resource, unaligned) = match kept {
+            Kept::Empty => (None, None),
+            Kept::Resource(r) => (Some(r), None),
+            Kept::Unaligned(copy) => (Some(copy.resource.clone()), Some(copy)),
+        };
+        let mut slots = self.kept.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(slot) = slots.get_mut(index as usize) {
             *slot = resource;
+        }
+        drop(slots);
+        let mut map = self.unaligned.lock().unwrap_or_else(|e| e.into_inner());
+        match unaligned {
+            Some(copy) => {
+                map.insert(index, copy);
+            }
+            None if !map.is_empty() => {
+                map.remove(&index);
+            }
+            None => {}
+        }
+    }
+
+    /// If slot `index` is backed by an unaligned upload copy, schedules a
+    /// submission-time refresh from title memory on `list`.
+    pub(crate) fn refresh_slot(&self, index: u32, list: &HostList) {
+        let copy = {
+            let map = self.unaligned.lock().unwrap_or_else(|e| e.into_inner());
+            if map.is_empty() {
+                return;
+            }
+            map.get(&index).cloned()
+        };
+        if let Some(copy) = copy {
+            list.defer_fill_upload(
+                copy.resource,
+                copy.dst as *mut u8,
+                copy.src as *const u8,
+                copy.len,
+            );
         }
     }
 
@@ -461,7 +528,7 @@ impl HostHeap {
     /// Makes slot `index` (a dynamic one) a constant buffer view of host
     /// memory (the list's own, which it holds).
     pub(crate) fn constant_at(&self, index: u32, gpu: u64, size: u32) {
-        self.keep(index, None);
+        self.keep(index, Kept::Empty);
         self.forget_view(index);
         let Some(host) = host() else { return };
         let desc = D3D12_CONSTANT_BUFFER_VIEW_DESC {
@@ -500,7 +567,7 @@ impl HostHeap {
             host.device
                 .CreateShaderResourceView(buffer, Some(&desc), self.cpu(index))
         };
-        self.keep(index, Some(buffer.clone()));
+        self.keep(index, Kept::Resource(buffer.clone()));
     }
 
     /// Makes slot `index` (a dynamic one) a raw buffer view with unordered
@@ -520,13 +587,13 @@ impl HostHeap {
                 self.cpu(index),
             )
         };
-        self.keep(index, Some(buffer.clone()));
+        self.keep(index, Kept::Resource(buffer.clone()));
     }
 
     /// Makes slot `index` a raw buffer view that reads zeros.
     pub(crate) fn null_raw_at(&self, index: u32) {
         null_buffer_view(self.cpu(index));
-        self.keep(index, None);
+        self.keep(index, Kept::Empty);
     }
 
     /// Makes slot `index` a raw buffer view with unordered access of no
@@ -543,7 +610,7 @@ impl HostHeap {
                 self.cpu(index),
             )
         };
-        self.keep(index, None);
+        self.keep(index, Kept::Empty);
     }
 
     /// Whether this is a sampler heap.
@@ -597,10 +664,16 @@ impl HostHeap {
             if made[index as usize] != 0 {
                 made[index as usize] = 0;
                 self.make_null(index);
+                if !self.sampler {
+                    self.generation.fetch_add(1, Ordering::Release);
+                }
+            } else if !for_draw && !self.sampler {
+                self.generation.fetch_add(1, Ordering::Release);
             }
             return None;
         };
-        if made[index as usize] != key {
+        let changed = made[index as usize] != key;
+        if changed {
             let later = !for_draw && view.is_buffer();
             made[index as usize] = if later { 0 } else { key };
             let kept = if later {
@@ -612,9 +685,32 @@ impl HostHeap {
                 null_for(&view, self.cpu(index));
             }
             self.note_view(index, &view, kept.as_ref());
-            self.keep(index, kept.flatten());
+            self.keep(index, kept.unwrap_or(Kept::Empty));
+        }
+        if !self.sampler && (!for_draw || changed) {
+            let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(seen) = live.seen.get_mut(index as usize)
+                && !*seen
+            {
+                *seen = true;
+                live.slots.push(index);
+            }
+            drop(live);
+            self.generation.fetch_add(1, Ordering::Release);
         }
         Some(view)
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn live_slots(&self) -> Vec<u32> {
+        self.live
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .slots
+            .clone()
     }
 
     /// The view host slot `index` was made from, in a few words, with the
@@ -743,7 +839,15 @@ impl HostHeap {
             return self.forget_view(index);
         };
         let stride = view_stride(view);
-        let entry = match viewed_bytes(view, kept.as_ref()) {
+        // An aligned copy of the viewed bytes is a buffer of its own: the
+        // slot's own view reads the right element from element 0, so the
+        // entry names no raw view of the host copy.
+        let viewed = match kept {
+            Kept::Unaligned(_) => Viewed::Own,
+            Kept::Resource(resource) => viewed_bytes(view, Some(resource)),
+            Kept::Empty => Viewed::Own,
+        };
+        let entry = match viewed {
             // Not a buffer view, or a raw one: the slot's own view.
             Viewed::Own => {
                 self.unalias(index);
@@ -1025,8 +1129,13 @@ fn unordered_range(base: u64, words: &[u32; 10]) -> Option<(u64, u64)> {
     ))
 }
 
-/// The host resource a slot made by [`make`] views, if any.
-type Kept = Option<ID3D12Resource>;
+/// What a slot made by [`make`] views: nothing of the host's, the resource it
+/// made the view on, or an aligned copy of the bytes a structured view reads.
+enum Kept {
+    Empty,
+    Resource(ID3D12Resource),
+    Unaligned(UnalignedCopy),
+}
 
 fn buffer_srv(
     address: u64,
@@ -1039,13 +1148,58 @@ fn buffer_srv(
     // SAFETY: a buffer view's union member.
     let buffer = unsafe { &mut desc.Anonymous.Buffer };
     let offset = shadow.offset(address);
-    if element == 0 || offset % element != 0 {
+    let host = host()?;
+    if element == 0 {
         once!(
             offset,
             element,
             "buffer view not on an element of its host copy"
         );
         return None;
+    }
+    if offset % element != 0 {
+        // The title's placed buffer starts at an address that is not a
+        // multiple of `element` inside our larger host shadow buffer (e.g. a
+        // non-power-of-two structured element stride inside a ring buffer).
+        // Copy the viewed bytes into a persistently mapped aligned upload
+        // buffer starting at element 0, and track it so draws refresh it from
+        // title memory at submission time.
+        let view_offset = buffer.FirstElement.checked_mul(element)?;
+        let room = shadow.left(address).checked_sub(view_offset)? / element;
+        let elements = if buffer.NumElements == 0 {
+            u32::try_from(room.min(u64::from(u32::MAX))).ok()?
+        } else {
+            buffer.NumElements.min(u32::try_from(room).unwrap_or(u32::MAX))
+        };
+        if elements == 0 {
+            return None;
+        }
+        buffer.NumElements = elements;
+        let bytes = u64::from(elements).checked_mul(element)?;
+        const MAX_UNALIGNED_COPY: u64 = 1 << 20;
+        if bytes == 0 || bytes > MAX_UNALIGNED_COPY {
+            once!(
+                offset,
+                element,
+                "buffer view not on an element of its host copy"
+            );
+            return None;
+        }
+        let start = address.checked_add(view_offset)?;
+        let (upload, dst) = host.upload_buffer(bytes)?;
+        crate::host::copy_mapped(dst, start as *const u8, bytes as usize, false);
+        buffer.FirstElement = 0;
+        // SAFETY: a live upload buffer and a slot of our heap.
+        unsafe {
+            host.device
+                .CreateShaderResourceView(&upload, Some(&desc), at)
+        };
+        return Some(Kept::Unaligned(UnalignedCopy {
+            resource: upload,
+            dst: dst as usize,
+            src: start as usize,
+            len: bytes as usize,
+        }));
     }
     buffer.FirstElement += offset / element;
     let remaining = shadow.left(address) / element;
@@ -1057,13 +1211,12 @@ fn buffer_srv(
     if buffer.NumElements == 0 {
         return None;
     }
-    let host = host()?;
     // SAFETY: a live buffer and a slot of our heap.
     unsafe {
         host.device
             .CreateShaderResourceView(&shadow.buffer, Some(&desc), at)
     };
-    Some(Some(shadow.buffer.clone()))
+    Some(Kept::Resource(shadow.buffer.clone()))
 }
 
 /// An unordered access view of title buffer memory at `address` (`len`
@@ -1123,7 +1276,7 @@ fn buffer_uav(
             at,
         )
     };
-    Some(Some(shadow.buffer.clone()))
+    Some(Kept::Resource(shadow.buffer.clone()))
 }
 
 /// Whether the host can make a shader (or unordered access) view of
@@ -1201,7 +1354,7 @@ fn make(view: &View, at: D3D12_CPU_DESCRIPTOR_HANDLE) -> Option<Kept> {
             };
             // SAFETY: a slot of our heap; the range lies in the host copy.
             unsafe { device.CreateConstantBufferView(Some(&desc), at) };
-            Some(Some(shadow.buffer.clone()))
+            Some(Kept::Resource(shadow.buffer.clone()))
         }
         View::Shader(resource, desc) => {
             let resource = *resource as crate::object::This;
@@ -1218,7 +1371,7 @@ fn make(view: &View, at: D3D12_CPU_DESCRIPTOR_HANDLE) -> Option<Kept> {
                         at,
                     )
                 };
-                Some(Some(texture.clone()))
+                Some(Kept::Resource(texture.clone()))
             } else if let (Some((data, len)), Some(desc)) =
                 (crate::resource::buffer_bytes(resource), desc)
             {
@@ -1250,7 +1403,7 @@ fn make(view: &View, at: D3D12_CPU_DESCRIPTOR_HANDLE) -> Option<Kept> {
                     at,
                 )
             };
-            Some(Some(texture.clone()))
+            Some(Kept::Resource(texture.clone()))
         }
         View::Sampler(words) => {
             // SAFETY: 13 words in the host's layout.
@@ -1261,13 +1414,13 @@ fn make(view: &View, at: D3D12_CPU_DESCRIPTOR_HANDLE) -> Option<Kept> {
             };
             // SAFETY: a slot of our sampler heap.
             unsafe { device.CreateSampler(&desc, at) };
-            Some(None)
+            Some(Kept::Empty)
         }
         View::ConsoleSampler(words) => {
             let desc = crate::sampler::console(words);
             // SAFETY: a slot of our sampler heap.
             unsafe { device.CreateSampler(&desc, at) };
-            Some(None)
+            Some(Kept::Empty)
         }
         View::Placed(unordered, resource, desc) => {
             if let Some(view) = placed_texture(view) {
@@ -1577,5 +1730,62 @@ mod tests {
         heap.release(a, 50);
         assert_eq!(heap.dynamic(50), Some(4));
         assert_eq!(heap.dynamic(40), Some(4 + heap.dynamic - 40));
+    }
+
+    /// A structured buffer SRV whose offset inside its shadow buffer is not a
+    /// multiple of its element stride is copied into an aligned upload buffer
+    /// and refreshed from title memory when a command list referencing the slot
+    /// is submitted.
+    #[test]
+    fn unaligned_structured_buffer_srv_refreshes_on_submission() {
+        let Some(host) = host() else {
+            return; // no host GPU
+        };
+        let Some(heap) = HostHeap::new(false, 4) else {
+            return;
+        };
+        let mut backing: Vec<u8> = (0..4096usize).map(|i| (i % 251) as u8).collect();
+        let base = backing.as_ptr() as u64;
+        crate::shadow::register(base as usize, base, backing.len() as u64);
+        // Offset 32 is not a multiple of stride 24 (32 % 24 == 8).
+        let desc = D3D12_SHADER_RESOURCE_VIEW_DESC {
+            Format: DXGI_FORMAT_UNKNOWN,
+            ViewDimension: D3D12_SRV_DIMENSION_BUFFER,
+            Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+            Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
+                Buffer: D3D12_BUFFER_SRV {
+                    FirstElement: 0,
+                    NumElements: 1,
+                    StructureByteStride: 24,
+                    Flags: D3D12_BUFFER_SRV_FLAG_NONE,
+                },
+            },
+        };
+        let kept = buffer_srv(base + 32, 24, desc, heap.cpu(0))
+            .expect("unaligned structured SRV should succeed");
+        let (upload, dst) = match &kept {
+            Kept::Unaligned(copy) => (copy.resource.clone(), copy.dst as *const u8),
+            _ => panic!("expected an unaligned upload copy"),
+        };
+        heap.keep(0, kept);
+
+        // Mutate the title slice *after* creating the view (as a ring buffer does).
+        let updated: [u8; 24] = std::array::from_fn(|i| 0xA0u8.wrapping_add(i as u8));
+        backing[32..56].copy_from_slice(&updated);
+
+        let list = host.new_list().expect("host command list");
+        heap.refresh_slot(0, &list);
+        list.close();
+        host.execute(&[&list]);
+        crate::shadow::unregister(base as usize, base);
+
+        // SAFETY: `upload` is persistently mapped for its lifetime (`24` bytes)
+        // and `host.execute` has completed.
+        unsafe {
+            assert_eq!(upload.GetDesc().Width, 24);
+            let got = std::slice::from_raw_parts(dst, 24);
+            assert_eq!(got, &updated);
+            assert!(host.device.GetDeviceRemovedReason().is_ok());
+        }
     }
 }

@@ -703,7 +703,9 @@ extern "system" fn clear_rtv(
             unsafe { std::slice::from_raw_parts(rects.cast(), count as usize) }
         });
         const RENDER_TARGET: u32 = 0x4;
-        let rtv = host.rtv(texture, record.desc().as_ref());
+        let Some(rtv) = host.rtv(texture, record.desc().as_ref()) else {
+            return;
+        };
         // SAFETY: an open list, a fresh view of a live texture.
         unsafe {
             if let Some((_, before)) = list.transition(record.resource, RENDER_TARGET) {
@@ -935,14 +937,14 @@ mod state {
         count: u32,
         viewports: *const D3D12_VIEWPORT,
     ) {
-        if let Some(list) = host_list(this) {
-            crate::draw::viewports(list, items(viewports, count));
-        }
+        with_state(this, |list, s| {
+            crate::draw::viewports(list, s, items(viewports, count));
+        });
     }
     pub(super) extern "system" fn scissors(this: This, count: u32, rects: *const RECT) {
-        if let Some(list) = host_list(this) {
-            crate::draw::scissors(list, items(rects, count));
-        }
+        with_state(this, |list, s| {
+            crate::draw::scissors(list, s, items(rects, count));
+        });
     }
     pub(super) extern "system" fn blend_factor(this: This, factor: *const [f32; 4]) {
         if let Some(list) = host_list(this) {

@@ -2,14 +2,16 @@
 //! (or `s_nand_saveexec 0`) and the restore of the saved mask runs in every lane of the console's
 //! wave, the inactive ones included, which is how the compiler expands
 //! HLSL wave reductions and prefix sums (an identity put into the inactive
-//! lanes with `v_cndmask`, then DPP, `v_permlanex16` and `v_readlane`
-//! steps). A host lane that is elsewhere cannot run that code, so each
+//! lanes with `v_cndmask`, then DPP, `v_permlanex16`,
+//! `v_readlane`/`v_readfirstlane`, `v_writelane` and scalar ALU steps). A
+//! host lane that is elsewhere cannot run that code, so each
 //! section is simulated on the console's lanes with symbolic values, and a
 //! value it leaves is lowered by what it turned out to be: the reduction or
 //! prefix of one operation over the lanes' (masked) inputs, which DXIL's
 //! wave operations compute over the host's active lanes. No instruction
 //! sequence is matched; any step the simulation does not model leaves the
-//! values it writes unknown.
+//! values it writes unknown (the lowering still computes those of steps
+//! that read no other lane as it would outside a section).
 
 use std::collections::HashMap;
 
@@ -46,6 +48,21 @@ impl Op {
             "v_or_b32" => Op::Or,
             "v_and_b32" => Op::And,
             "v_xor_b32" => Op::Xor,
+            _ => return None,
+        })
+    }
+
+    /// The scalar ALU form, on two uniform dwords.
+    fn of_scalar(name: &str) -> Option<Op> {
+        Some(match name {
+            "s_add_u32" | "s_add_i32" => Op::AddU,
+            "s_min_u32" => Op::MinU,
+            "s_max_u32" => Op::MaxU,
+            "s_min_i32" => Op::MinI,
+            "s_max_i32" => Op::MaxI,
+            "s_and_b32" => Op::And,
+            "s_or_b32" => Op::Or,
+            "s_xor_b32" => Op::Xor,
             _ => return None,
         })
     }
@@ -194,6 +211,30 @@ fn dpp_lane(d: Dpp, l: u32) -> Option<(u32, bool, bool)> {
     }
 }
 
+/// A scalar operand: a constant, a uniform the section wrote, or one from
+/// before it.
+fn scalar_sym(inst: &Inst, op: &Operand, uni: &HashMap<Value, Sym>) -> Sym {
+    match *op {
+        Operand::Scalar { code, .. } if code != NULL => match inst.read(Reg::S(code)) {
+            Some(x) => uni.get(&x).copied().unwrap_or(Sym::Uni(x)),
+            None => Sym::Unknown,
+        },
+        Operand::Const(c) => crate::resource::inline(c).map_or(Sym::Unknown, Sym::K),
+        Operand::Literal(x) => Sym::K(x),
+        _ => Sym::Unknown,
+    }
+}
+
+/// What lane `l` holds of `x`, read from another lane `from` (DPP,
+/// `v_permlane16`, `v_readlane`): a lane's own value of an earlier VGPR is
+/// that lane's only.
+fn moved(x: Sym, from: u32, l: u32) -> Sym {
+    match x {
+        Sym::Own(_) if from != l => Sym::Unknown,
+        _ => x,
+    }
+}
+
 fn combine(op: Op, a: Sym, b: Sym) -> Sym {
     match (a, b) {
         (Sym::K(k), x) | (x, Sym::K(k)) if op.identity(k) => x,
@@ -271,15 +312,32 @@ fn simulate(insts: &[Inst], wave: u32, saved: Value) -> HashMap<Value, Shape> {
             exec = exec & 0xFFFF_FFFF | k << 32;
             continue;
         }
-        if let Fields::Sop { src, .. } = &inst.fields {
-            if name.starts_with("s_and_b")
-                && src.iter().any(|o| matches!(*o, Operand::Scalar { code, .. } if inst.read(Reg::S(code)).is_some_and(|v| masked.contains(&v))))
+        if let Fields::Sop { dst, src, .. } = &inst.fields {
+            let reads_masked = |o: &Operand| matches!(*o, Operand::Scalar { code, .. } if inst.read(Reg::S(code)).is_some_and(|v| masked.contains(&v)));
+            // A mask ANDed with the saved one, or a copy of such a mask.
+            if (name.starts_with("s_and_b") && src.iter().any(reads_masked)
+                || name.starts_with("s_mov_b") && src.first().is_some_and(reads_masked))
                 && let Some(&(_, w)) = inst.writes.iter().find(|w| matches!(w.0, Reg::S(_)))
             {
                 masked.push(w);
             }
+            // A uniform copied, or two combined (the halves of a Wave64
+            // reduction read with `v_readlane`).
+            let scalar = |k: usize| {
+                src.get(k)
+                    .map_or(Sym::Unknown, |o| scalar_sym(inst, o, &uni))
+            };
+            let result = match (name, Op::of_scalar(name)) {
+                ("s_mov_b32", _) => scalar(0),
+                (_, Some(op)) => combine(op, scalar(0), scalar(1)),
+                _ => Sym::Unknown,
+            };
+            let out = match dst {
+                Some(Operand::Scalar { code, .. }) if *code != NULL => inst.write(Reg::S(*code)),
+                _ => None,
+            };
             for &(_, w) in &inst.writes {
-                uni.entry(w).or_insert(Sym::Unknown);
+                uni.insert(w, if Some(w) == out { result } else { Sym::Unknown });
             }
             continue;
         }
@@ -312,22 +370,29 @@ fn simulate(insts: &[Inst], wave: u32, saved: Value) -> HashMap<Value, Shape> {
             }
         };
         let modifiers = v.abs != 0 || v.neg != 0 || v.clamp || v.omod != 0 || v.sdwa.is_some();
-        if name == "v_readlane_b32" {
-            let (Some(Operand::Scalar { code, .. }), Some(src), Some(lane)) =
-                (v.dst, v.src.first(), v.src.get(1))
-            else {
+        // The lane `v_readlane_b32` reads or `v_writelane_b32` writes: the
+        // low bits of a constant or of a uniform the simulation knows.
+        let lane_sel = |k: usize| match v.src.get(k).map(|o| scalar_sym(inst, o, &uni)) {
+            Some(Sym::K(l)) => Some(l & (wave - 1)),
+            _ => None,
+        };
+        if matches!(name, "v_readlane_b32" | "v_readfirstlane_b32") {
+            let (Some(Operand::Scalar { code, .. }), Some(src)) = (v.dst, v.src.first()) else {
                 continue;
             };
-            let l = match *lane {
-                Operand::Const(c) => crate::resource::inline(c),
-                Operand::Literal(x) => Some(x),
-                _ => None,
+            let l = if name == "v_readlane_b32" {
+                lane_sel(1)
+            } else {
+                // The first lane EXEC holds.
+                (exec != 0).then(|| exec.trailing_zeros())
             };
             let x = lanes(src, &vec, &uni);
             if let Some(w) = inst.write(Reg::S(code)) {
-                let s = l
-                    .and_then(|l| x.get(l as usize).copied())
-                    .unwrap_or(Sym::Unknown);
+                // One lane's own value is no other lane's.
+                let s = match l.map(|l| x[l as usize]) {
+                    Some(Sym::Own(_)) | None => Sym::Unknown,
+                    Some(s) => s,
+                };
                 uni.insert(w, s);
             }
             continue;
@@ -349,6 +414,24 @@ fn simulate(insts: &[Inst], wave: u32, saved: Value) -> HashMap<Value, Shape> {
             &vec,
             &uni,
         );
+        if name == "v_writelane_b32" {
+            // The lane given takes the scalar whatever EXEC holds; the others
+            // keep their value.
+            let x = v
+                .src
+                .first()
+                .map_or(Sym::Unknown, |o| scalar_sym(inst, o, &uni));
+            let merged = match lane_sel(1) {
+                Some(l) => {
+                    let mut m = old;
+                    m[l as usize] = x;
+                    m
+                }
+                None => vec![Sym::Unknown; wave as usize],
+            };
+            vec.insert(dst, merged);
+            continue;
+        }
         // src0 as each lane fetches it (DPP), with the lanes that write.
         let src0 = v.src.first().map(|o| lanes(o, &vec, &uni));
         let mut writes = exec;
@@ -363,7 +446,11 @@ fn simulate(insts: &[Inst], wave: u32, saved: Value) -> HashMap<Value, Shape> {
                 for l in 0..wave {
                     match dpp_lane(d, l) {
                         Some((src, zero, on)) if src < wave => {
-                            f.push(if zero { Sym::K(0) } else { s[src as usize] });
+                            f.push(if zero {
+                                Sym::K(0)
+                            } else {
+                                moved(s[src as usize], src, l)
+                            });
                             if !on {
                                 writes &= !(1u64 << l);
                             }
@@ -423,7 +510,7 @@ fn simulate(insts: &[Inst], wave: u32, saved: Value) -> HashMap<Value, Shape> {
                             .map(|l| {
                                 let other = (l & !31) | ((l & 16) ^ 16);
                                 let pick = (s >> (4 * (l & 15)) & 15) as u32;
-                                a[(other | pick) as usize]
+                                moved(a[(other | pick) as usize], other | pick, l)
                             })
                             .collect()
                     }
@@ -675,5 +762,137 @@ mod tests {
             per_lane(&vec![red(u64::MAX); 64], u64::MAX),
             Some(Shape::Active(Op::AddU, x, m, 0))
         );
+    }
+
+    fn build(words: &[u32], wave64: bool) -> Program {
+        let code: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        crate::ir::build(&code, wave64, 8).unwrap()
+    }
+
+    #[test]
+    fn wave64_halves_combine_in_a_scalar_add() {
+        // Assembled with llvm-mc (gfx1030, wave64): each half of 32 lanes
+        // summed with DPP and `v_permlanex16`, then lanes 0 and 32 read
+        // and added with `s_add_u32`.
+        let p = build(
+            &[
+                0xBE80_25C1, // s_or_saveexec_b64 s[0:1], -1
+                0xD501_0001,
+                0x0002_0080, // v_cndmask_b32_e64 v1, 0, v0, s[0:1]
+                0x4A02_02FA,
+                0xFF01_6101, // v_add_nc_u32_dpp v1, v1, v1 row_xmask:1
+                0x4A02_02FA,
+                0xFF01_6201, // v_add_nc_u32_dpp v1, v1, v1 row_xmask:2
+                0x4A02_02FA,
+                0xFF01_6401, // v_add_nc_u32_dpp v1, v1, v1 row_xmask:4
+                0x4A02_02FA,
+                0xFF01_6801, // v_add_nc_u32_dpp v1, v1, v1 row_xmask:8
+                0xD778_0002,
+                0x0305_8301, // v_permlanex16_b32 v2, v1, -1, -1
+                0x4A02_0501, // v_add_nc_u32_e32 v1, v1, v2
+                0xD760_0002,
+                0x0001_0101, // v_readlane_b32 s2, v1, 0
+                0xD760_0003,
+                0x0001_4101, // v_readlane_b32 s3, v1, 32
+                0x8002_0302, // s_add_u32 s2, s2, s3
+                0xBEFE_0400, // s_mov_b64 exec, s[0:1]
+                0xBF81_0000, // s_endpgm
+            ],
+            true,
+        );
+        let insts = &p.blocks[0].insts;
+        let (saved, x) = (
+            insts[0].write(Reg::S(0)).unwrap(),
+            insts[1].read(Reg::V(0)).unwrap(),
+        );
+        let found = sections(&p, 0);
+        let shapes = &found[&0].shapes;
+        // Each read alone is a half.
+        assert_eq!(shapes.get(&insts[8].write(Reg::S(2)).unwrap()), None);
+        let total = insts[10].write(Reg::S(2)).unwrap();
+        assert_eq!(
+            shapes.get(&total),
+            Some(&Shape::Active(Op::AddU, x, saved, 0))
+        );
+    }
+
+    #[test]
+    fn writelane_carries_a_row_total_into_an_exclusive_prefix() {
+        // Assembled with llvm-mc (gfx1030, wave32): an inclusive prefix sum
+        // (row_shr steps, then lane 15 brought to the second row with
+        // `v_permlanex16` and a row-masked DPP move), shifted right by one
+        // lane: row_shr:1 within rows, lane 15 to lane 16 with
+        // `v_readlane`/`v_writelane`.
+        let p = build(
+            &[
+                0xBE80_3DC1, // s_or_saveexec_b32 s0, -1
+                0xD501_0001,
+                0x0002_0080, // v_cndmask_b32_e64 v1, 0, v0, s0
+                0x4A02_02FA,
+                0xFF01_1101, // v_add_nc_u32_dpp v1, v1, v1 row_shr:1
+                0x4A02_02FA,
+                0xFF01_1201, // v_add_nc_u32_dpp v1, v1, v1 row_shr:2
+                0x4A02_02FA,
+                0xFF01_1401, // v_add_nc_u32_dpp v1, v1, v1 row_shr:4
+                0x4A02_02FA,
+                0xFF01_1801, // v_add_nc_u32_dpp v1, v1, v1 row_shr:8
+                0xD778_0002,
+                0x0305_8301, // v_permlanex16_b32 v2, v1, -1, -1
+                0x7E06_0280, // v_mov_b32_e32 v3, 0
+                0x7E06_02FA,
+                0xAF00_E402, // v_mov_b32_dpp v3, v2 quad_perm:[0,1,2,3] row_mask:0xa
+                0x4A02_0701, // v_add_nc_u32_e32 v1, v1, v3
+                0x7E08_0280, // v_mov_b32_e32 v4, 0
+                0x7E08_02FA,
+                0xFF01_1101, // v_mov_b32_dpp v4, v1 row_shr:1
+                0xD760_0001,
+                0x0001_1F01, // v_readlane_b32 s1, v1, 15
+                0xD761_0004,
+                0x0001_2001, // v_writelane_b32 v4, s1, 16
+                0xBEFE_0300, // s_mov_b32 exec_lo, s0
+                0xBF81_0000, // s_endpgm
+            ],
+            false,
+        );
+        let insts = &p.blocks[0].insts;
+        let (saved, x) = (
+            insts[0].write(Reg::S(0)).unwrap(),
+            insts[1].read(Reg::V(0)).unwrap(),
+        );
+        let found = sections(&p, 0);
+        let shapes = &found[&0].shapes;
+        let inclusive = insts[9].write(Reg::V(1)).unwrap();
+        assert_eq!(
+            shapes.get(&inclusive),
+            Some(&Shape::Prefix(Op::AddU, x, saved, 0, true))
+        );
+        let exclusive = insts[13].write(Reg::V(4)).unwrap();
+        assert_eq!(
+            shapes.get(&exclusive),
+            Some(&Shape::Prefix(Op::AddU, x, saved, 0, false))
+        );
+    }
+
+    #[test]
+    fn another_lanes_own_value_is_not_the_lanes_own() {
+        // A VGPR from before the section moved one lane over with DPP, or
+        // read from lane 3: no lane's own value.
+        let p = build(
+            &[
+                0xBE80_3DC1, // s_or_saveexec_b32 s0, -1
+                0x7E02_02FA,
+                0xFF09_1100, // v_mov_b32_dpp v1, v0 row_shr:1 bound_ctrl:1
+                0xD760_0001,
+                0x0001_0700, // v_readlane_b32 s1, v0, 3
+                0xBEFE_0300, // s_mov_b32 exec_lo, s0
+                0xBF81_0000, // s_endpgm
+            ],
+            false,
+        );
+        let insts = &p.blocks[0].insts;
+        let found = sections(&p, 0);
+        let shapes = &found[&0].shapes;
+        assert_eq!(shapes.get(&insts[1].write(Reg::V(1)).unwrap()), None);
+        assert_eq!(shapes.get(&insts[2].write(Reg::S(1)).unwrap()), None);
     }
 }

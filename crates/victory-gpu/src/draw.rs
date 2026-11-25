@@ -22,6 +22,45 @@ use windows::core::Interface;
 use crate::host::HostList;
 use crate::object::This;
 use crate::pipeline::host::HostPipeline;
+use crate::scissor;
+
+/// A root view with no bytes behind it reads zeros for every lane that
+/// loads through it (a vertex fetch then puts every vertex on the origin):
+/// counted and named (rate-limited).
+fn note_empty_root_view(address: u64, left: u64, why: &str) {
+    static EMPTY: AtomicU64 = AtomicU64::new(0);
+    let n = EMPTY.fetch_add(1, Ordering::Relaxed);
+    if n < 8 || n.is_multiple_of(512) {
+        tracing::warn!(
+            n,
+            address = format_args!("{address:#x}"),
+            left,
+            why,
+            "a root view reads zeros"
+        );
+    }
+}
+
+/// A vertex view with nothing in it reads zeros on the host, which puts
+/// every vertex drawn from it at the origin (`xcl-bin/notes/vtx.md`):
+/// counted and named (rate-limited).
+fn note_vertex_view(slot: u32, v: &VertexView) {
+    if v.size != 0 && v.stride != 0 {
+        return;
+    }
+    static EMPTY: AtomicU64 = AtomicU64::new(0);
+    let n = EMPTY.fetch_add(1, Ordering::Relaxed);
+    if n < 8 || n.is_multiple_of(512) {
+        tracing::warn!(
+            n,
+            slot,
+            size = v.size,
+            stride = v.stride,
+            address = format_args!("{:#x}", v.address),
+            "a vertex buffer without size or stride reads zeros"
+        );
+    }
+}
 
 /// A root argument as the title set it.
 #[derive(Debug, Clone, Default)]
@@ -81,6 +120,12 @@ pub(crate) struct State {
     /// The dynamic slots the list holds: title heap, first, count; given
     /// back when the list is reset or released.
     dynamic: Vec<(usize, u32, u32)>,
+    /// The title's last viewports, for `VICTORY_WIDE_SCISSOR` (a scissor
+    /// widened to them) and the scissor log lines.
+    viewports: Vec<[f32; 4]>,
+    /// The title's last scissor rects, kept only with `VICTORY_WIDE_SCISSOR`
+    /// so a viewport set after them widens them too.
+    scissors: Vec<[i32; 4]>,
     /// A fresh table of the stage being bound could not be made.
     table_failed: bool,
     /// Root SRVs bound as one-view tables in this list: (host heap, title
@@ -89,6 +134,13 @@ pub(crate) struct State {
     /// Root UAVs bound as one-view tables in this list: (host heap, title
     /// address) → dynamic slot.
     root_uav_slots: std::collections::HashMap<(usize, u64, u64), u32>,
+    /// `(host_heap_ptr, generation, forgotten_epoch)` last refreshed for
+    /// bindless heap reads in this list.
+    heap_refreshed: Option<(usize, u64, u64)>,
+    /// SRV resources in the bound view heap that may be transitioned between
+    /// draws (a copy leaves its destination in `COPY_DEST`) and need
+    /// `SHADER_RESOURCE` checks on every draw, not only on the sweep.
+    mutable_heap_srvs: Vec<usize>,
 }
 
 impl Drop for State {
@@ -115,8 +167,14 @@ static FRAME: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 /// The draws traced since the last call.
 #[cfg(feature = "diagnostics")]
 pub(crate) fn take_frame() -> Vec<String> {
+    SCISSORS.store(0, Ordering::Relaxed);
     std::mem::take(&mut *FRAME.lock().unwrap_or_else(|e| e.into_inner()))
 }
+
+/// The scissor sets traced this frame (diagnostics builds, see
+/// [`note_scissors`]).
+#[cfg(feature = "diagnostics")]
+static SCISSORS: AtomicU64 = AtomicU64::new(0);
 
 /// Draws, mesh dispatches and dispatches recorded but not run on the host
 /// (no host pipeline) since the last call.
@@ -248,11 +306,13 @@ impl State {
 
     pub(crate) fn set_vertex_buffers(&mut self, start: u32, views: &[VertexView]) {
         for (i, v) in views.iter().enumerate() {
+            note_vertex_view(start + i as u32, v);
             if let Some(slot) = self.vertex.get_mut(start as usize + i) {
                 *slot = *v;
             }
         }
     }
+
 
     pub(crate) fn clear_vertex_buffers(&mut self, start: u32, count: u32) {
         for slot in self.vertex.iter_mut().skip(start as usize).take(count as usize) {
@@ -282,10 +342,19 @@ impl State {
             let Some(texture) = crate::resource::host_resource(record.resource) else {
                 continue;
             };
+            let desc = record.desc();
+            let Some(rtv) = host.rtv(texture, desc.as_ref()) else {
+                // The host texture cannot be rendered to (its flag was
+                // dropped): a null view keeps the later targets in their
+                // slots, as the pipeline expects them.
+                once!("a render target the host texture cannot be rendered to");
+                rtvs.push(host.null_rtv(desc.as_ref()));
+                continue;
+            };
             self.targets.push(record.resource as usize);
             #[cfg(feature = "diagnostics")]
             crate::capture::note_target(record.resource);
-            rtvs.push(host.rtv(texture, record.desc().as_ref()));
+            rtvs.push(rtv);
         }
         self.depth = 0;
         let dsv = crate::descriptor::dsv_record(depth).and_then(|record| {
@@ -473,8 +542,20 @@ impl State {
         }
         #[cfg(feature = "diagnostics")]
         crate::producers::set_reader(&p.name);
+        let uses_heap = p.stages.iter().any(|s| {
+            s.translated()
+                .used
+                .iter()
+                .any(|u| u.root == RootType::ResourceHeap)
+        });
+        if uses_heap {
+            self.refresh_heap(list, compute);
+        }
         for stage in &p.stages {
             let t = stage.translated();
+            for u in t.used.iter().filter(|u| u.root == RootType::ResourceHeap) {
+                self.heap_entry(list, u);
+            }
             self.table_failed = false;
             let made = self.tables(list, &t.used, compute);
             if self.table_failed {
@@ -611,6 +692,13 @@ impl State {
                         // SAFETY: a live buffer.
                         let base = unsafe { s.buffer.GetGPUVirtualAddress() };
                         let offset = s.gpu(*a) - base;
+                        if s.left(*a) < 16 {
+                            note_empty_root_view(
+                                *a,
+                                s.left(*a),
+                                "no bytes left in the title's buffer",
+                            );
+                        }
                         if offset.is_multiple_of(16) {
                             host.raw_at(index, &s.buffer, offset, s.left(*a));
                         } else {
@@ -623,7 +711,12 @@ impl State {
                             host.null_raw_at(index);
                         }
                     }
-                    None => host.null_raw_at(index),
+                    None => {
+                        if let Some(a) = address {
+                            note_empty_root_view(a, 0, "the title's buffer has no host copy");
+                        }
+                        host.null_raw_at(index)
+                    }
                 }
                 index
             }
@@ -891,7 +984,101 @@ impl State {
             return;
         };
         if let Some(view) = host.mirror(index, handle, true) {
+            host.refresh_slot(index, list);
             readable(list, u, &view);
+        }
+    }
+
+    fn heap_entry(&self, list: &HostList, u: &UsedResource) {
+        if self.heaps[0] == 0 {
+            return;
+        }
+        let heap = crate::descriptor::heap(self.heaps[0] as This);
+        let handle = heap.start + u64::from(u.table_offset_dwords) * 4;
+        let (Some(host), Some(index)) = (heap.host(), heap.index(handle)) else {
+            return;
+        };
+        if let Some(view) = host.mirror(index, handle, true) {
+            // An unaligned structured buffer is mirrored into its own upload
+            // resource; refresh that copy at submission like `table_entry`
+            // does, or title writes between now and submit are lost.
+            host.refresh_slot(index, list);
+            readable(list, u, &view);
+        }
+    }
+
+    /// Brings resources in the bound view heap up to date for bindless
+    /// (`ResourceDescriptorHeap[]`) reads. Runs the full sweep once per
+    /// heap generation per list, and keeps mutable SRVs in `SHADER_RESOURCE`.
+    fn refresh_heap(&mut self, list: &HostList, compute: bool) {
+        if self.heaps[0] == 0 {
+            return;
+        }
+        let heap = crate::descriptor::heap(self.heaps[0] as This);
+        let Some(host) = heap.host() else {
+            return;
+        };
+        let host_ptr = host.heap.as_raw() as usize;
+        let generation = host.generation();
+        let forgotten = crate::descriptor::forgotten_epoch();
+        if self.heap_refreshed != Some((host_ptr, generation, forgotten)) {
+            self.mutable_heap_srvs.clear();
+            for index in host.live_slots() {
+                let handle = heap.start + u64::from(index) * 32;
+                let Some(view) = host.mirror(index, handle, true) else {
+                    continue;
+                };
+                // The sweep is the only refresh for slots read through
+                // `ResourceDescriptorHeap[]` with no per-entry bind, so an
+                // unaligned copy needs its submission-time fill queued here
+                // too.
+                host.refresh_slot(index, list);
+                let placed = crate::descriptor::host::placed_texture(&view);
+                let v = placed.as_ref().unwrap_or(&view);
+                // Placed buffer views carry the shadow address themselves;
+                // `buffer_range` returns `None` for placed textures, so they
+                // still produce no shadow work.
+                if !matches!(
+                    v,
+                    View::Shader(..) | View::Unordered(..) | View::Placed(..)
+                ) {
+                    continue;
+                }
+                if let Some((address, len)) = crate::descriptor::host::buffer_range(v)
+                    && len > 0
+                    && let Some(shadow) = crate::shadow::find(address, len)
+                {
+                    shadow.refresh(list, address, len);
+                }
+                if let View::Shader(resource, _) = v
+                    && let Some(t) = crate::resource::host_resource(*resource as This)
+                {
+                    if crate::texture::title_written(t) {
+                        const SHADER_RESOURCE: u32 = 0x40 | 0x80;
+                        crate::texture::upload(list, *resource as This, t);
+                        crate::list::ensure_state(list, *resource as This, SHADER_RESOURCE);
+                    }
+                    // Title-written or not, a copy leaves its destination in
+                    // `COPY_DEST` (`list::copy_resource`) without restoring
+                    // the state, and the sweep is cached by heap generation,
+                    // which a copy does not change. Check the state on every
+                    // draw so a bindless read does not see `COPY_DEST`.
+                    self.mutable_heap_srvs.push(*resource);
+                }
+            }
+            self.mutable_heap_srvs.sort_unstable();
+            self.mutable_heap_srvs.dedup();
+            // The generation captured before the sweep, not one re-read after
+            // it: a title write that registers a slot mid-sweep then leaves a
+            // key mismatch, so the next draw sweeps again instead of trusting
+            // a half-refreshed heap.
+            self.heap_refreshed = Some((host_ptr, generation, forgotten));
+        }
+        const SHADER_RESOURCE: u32 = 0x40 | 0x80;
+        for &resource in &self.mutable_heap_srvs {
+            if compute || (!self.targets.contains(&resource) && self.depth != resource) {
+                crate::list::ensure_state(list, resource as This, SHADER_RESOURCE);
+            }
         }
     }
 
@@ -977,6 +1164,7 @@ impl State {
             if let Some(&first) = self.fresh_tables.get(&key) {
                 for u in entries.iter().filter(|u| u.kind != ResourceType::Cbv) {
                     let handle = table + u64::from(u.table_offset_dwords) * 4;
+                    host.refresh_slot(first + u.table_offset_dwords / 8, list);
                     if let Some(view) = crate::descriptor::view(handle) {
                         readable(list, u, &view);
                     }
@@ -1012,6 +1200,7 @@ impl State {
                     }
                     Some(view) => {
                         host.make_at(index, &view);
+                        host.refresh_slot(index, list);
                         if let Some(u) = used {
                             readable(list, u, &view);
                         }
@@ -1479,16 +1668,125 @@ const LINE_LOOP: u32 = 18;
 const QUADS: u32 = 19;
 const QUAD_STRIP: u32 = 20;
 
-/// Fixed-function state, straight onto the host list.
-pub(crate) fn viewports(list: &HostList, viewports: &[D3D12_VIEWPORT]) {
+/// Fixed-function state, straight onto the host list. The viewports are
+/// kept for `VICTORY_WIDE_SCISSOR`, which widens scissors to them: a new
+/// viewport widens the title's last scissors again, since D3D12 holds the
+/// two apart and the title may set them in either order.
+pub(crate) fn viewports(list: &HostList, state: &mut State, viewports: &[D3D12_VIEWPORT]) {
     // SAFETY: an open list.
     unsafe { list.list.RSSetViewports(viewports) };
+    state.viewports.clear();
+    state.viewports.extend(
+        viewports
+            .iter()
+            .map(|v| [v.TopLeftX, v.TopLeftY, v.Width, v.Height]),
+    );
+    if scissor::wide()
+        && let Some(wide) = scissor::widened(&state.scissors, &state.viewports)
+    {
+        set_scissors(list, &wide);
+    }
 }
 
-pub(crate) fn scissors(list: &HostList, rects: &[RECT]) {
-    // SAFETY: an open list.
-    unsafe { list.list.RSSetScissorRects(rects) };
+/// The title's scissor rects, onto the host list as it gave them (with
+/// `VICTORY_WIDE_SCISSOR`: widened to their viewport, see
+/// [`crate::scissor`]).
+pub(crate) fn scissors(list: &HostList, state: &mut State, rects: &[RECT]) {
+    let title: Vec<scissor::Rect> = rects
+        .iter()
+        .map(|r| [r.left, r.top, r.right, r.bottom])
+        .collect();
+    let wide = scissor::wide()
+        .then(|| scissor::widened(&title, &state.viewports))
+        .flatten();
+    note_scissors(&title, &state.viewports, wide.is_some());
+    match &wide {
+        Some(wide) => set_scissors(list, wide),
+        // SAFETY: an open list.
+        None => unsafe { list.list.RSSetScissorRects(rects) },
+    }
+    if scissor::wide() {
+        state.scissors = title;
+    }
 }
+
+/// `rects` onto the host list.
+fn set_scissors(list: &HostList, rects: &[scissor::Rect]) {
+    let host: Vec<RECT> = rects
+        .iter()
+        .map(|r| RECT {
+            left: r[0],
+            top: r[1],
+            right: r[2],
+            bottom: r[3],
+        })
+        .collect();
+    // SAFETY: an open list.
+    unsafe { list.list.RSSetScissorRects(&host) };
+}
+
+/// What a scissor set is worth saying: with `VICTORY_WIDE_SCISSOR`, each
+/// change it makes (rate-limited); in diagnostics builds, the first pairs
+/// of every frame.
+fn note_scissors(title: &[scissor::Rect], viewports: &[scissor::Viewport], widened: bool) {
+    // The rects of this set that span less than their viewport, as text.
+    let narrow = || -> Vec<String> {
+        title
+            .iter()
+            .enumerate()
+            .filter_map(|(i, r)| {
+                let v = scissor::pair(viewports, i)?;
+                scissor::widens(r, v).then(|| {
+                    format!(
+                        "scissor {} under viewport {}",
+                        scissor::rect_text(r),
+                        scissor::viewport_text(v)
+                    )
+                })
+            })
+            .collect()
+    };
+    if widened {
+        static WIDENED: AtomicU64 = AtomicU64::new(0);
+        let n = WIDENED.fetch_add(1, Ordering::Relaxed);
+        let narrow = narrow();
+        if !narrow.is_empty() && (n < 8 || n.is_multiple_of(512)) {
+            tracing::warn!(
+                n,
+                "{}: widened to the viewport (VICTORY_WIDE_SCISSOR)",
+                narrow.join("; ")
+            );
+        }
+    }
+    #[cfg(feature = "diagnostics")]
+    {
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let n = SCISSORS.fetch_add(1, Ordering::Relaxed);
+            if n < SCISSORS_PER_FRAME {
+                let pairs: Vec<String> = title
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| {
+                        let v = scissor::pair(viewports, i);
+                        format!(
+                            "{} viewport {}",
+                            scissor::rect_text(r),
+                            v.map_or("none".into(), scissor::viewport_text)
+                        )
+                    })
+                    .collect();
+                tracing::debug!(
+                    "scissors {pairs:?}{}",
+                    if widened { " (widened)" } else { "" }
+                );
+            }
+        }
+    }
+}
+
+/// The scissor/viewport pairs a diagnostics frame logs.
+#[cfg(feature = "diagnostics")]
+const SCISSORS_PER_FRAME: u64 = 8;
 
 pub(crate) fn blend_factor(list: &HostList, factor: Option<&[f32; 4]>) {
     // SAFETY: an open list.
