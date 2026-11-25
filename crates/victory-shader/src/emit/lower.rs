@@ -3862,9 +3862,13 @@ impl<'a> Lower<'a> {
                 return Ok(self.s.m.bool(true));
             }
         }
-        // A number: any bit set is some lane's bit; a constant keeps its
-        // own low bit.
+        // A number: with the console lane layout known, the lane's own bit
+        // of it is the mask bit (`s_mov_b32 exec, 2` sets lane 1 alone). A
+        // host that does not know the layout keeps the approximation.
         let x = self.operand(inst, &op)?;
+        if self.console_cf {
+            return Ok(self.lane_bit(0, x, None));
+        }
         let z = self.s.m.i32(0);
         Ok(self.s.m.cmp(c, pred::NE, x, z))
     }
