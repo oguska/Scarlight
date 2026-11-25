@@ -53,7 +53,8 @@ export VICTORY_LOG="${VICTORY_LOG:-info}"
 exec "$PROTON/files/bin/wine" "$EXE" run "$GAME_DIR/$GAME_EXE" --execute
 ```
 
-Make it executable once with `chmod +x play.sh`. Pass switches in front: `VICTORY_PIPELINE_WAIT_MS=24 ./play.sh`. The switches are listed in [the README](../README.md#switches).
+Make it executable once with `chmod +x play.sh`. Pass switches in front: `VICTORY_PIPELINE_WAIT_MS=24 ./play.sh`;
+they are listed under [switches](#switches).
 If you use GE-Proton's own D3D12 DLLs, make sure your prefix has them installed or copy them next
 to the exe.
 
@@ -75,7 +76,7 @@ A gamepad works. Otherwise the keyboard acts as a pad while the title's window h
 |---|---|
 | Crash at world entry | Replace stock vkd3d-proton 3.1 DLLs with master's or GE-Proton11-14's |
 | Very slow, swapping | Close apps that hold RAM or GPU memory (local LLM servers, browsers) |
-| The title quits while waiting for the GPU | `VICTORY_NO_WATCHDOG=1` — only builds that carry the hook; see the [README switches](../README.md#switches) |
+| The title quits while waiting for the GPU | `VICTORY_NO_WATCHDOG=1` — only builds that carry the hook; see [switches](#switches) |
 | Freezes | Unset all experimental switches |
 | `victory` reports no paths | `victory config`; paths must be outside the repository |
 | RenderDoc installed and the title crashes | `VK_LOADER_LAYERS_DISABLE='*renderdoc*'` |
@@ -89,5 +90,15 @@ cargo xwin build --profile diag -p victory --features diagnostics --target x86_6
 ```
 
 Then point `EXE` in `play.sh` at `target/x86_64-pc-windows-msvc/diag/victory.exe`, with the same
-[files next to it](#3-files-next-to-victoryexe). The switches are listed in
-[the README](../README.md#switches).
+[files next to it](#3-files-next-to-victoryexe).
+
+## Switches
+
+| Switch | Effect |
+|---|---|
+| `VICTORY_NO_WATCHDOG=1` | Turns off the title's watchdog (opt-in hook, newer builds only). Use it: slow frames can make the title quit by itself |
+| `VICTORY_PIPELINE_WAIT_MS=<ms>` | Per-frame wait for background pipeline creation, default 500. A lower wait stalls less, but draws are left out until their pipeline is ready |
+| `VICTORY_DEPTH_TWINS=0` / `stencil` / `nodepth` | Depth and stencil twin textures off or limited, for comparing picture problems |
+| `VICTORY_ASYNC_WRITEBACK=1` | **Experimental**, off by default; has hung the title in our tests |
+
+Diagnostics switches, per-frame statistics and the log format are in the diagnostics build above.
