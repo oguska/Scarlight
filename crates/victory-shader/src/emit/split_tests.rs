@@ -99,6 +99,7 @@ fn run(host: &Host, native: &crate::NativeProgram, groups: u32) -> Result<Vec<u3
 
 #[test]
 fn in_half_lane_reads_match_the_console_on_every_adapter() {
+        let _one = super::valu_tests::one_at_a_time();
     let Ok(names) = adapters() else {
         eprintln!("no DXGI; skipped");
         return;
@@ -173,6 +174,7 @@ fn program_3d(threads: [u32; 3]) -> crate::NativeProgram {
 
 #[test]
 fn three_dimensional_groups_keep_the_consoles_lanes() {
+        let _one = super::valu_tests::one_at_a_time();
     let Ok(names) = adapters() else {
         eprintln!("no DXGI; skipped");
         return;
@@ -219,6 +221,7 @@ fn program_case(label: &str, p: &crate::NativeProgram, want: impl Fn(u32) -> u32
         unreachable!()
     };
     let threads = io.threads[0];
+        let _one = super::valu_tests::one_at_a_time();
     let Ok(names) = adapters() else {
         eprintln!("no DXGI; skipped");
         return;
@@ -963,6 +966,7 @@ fn selects_on_masks_held_as_numbers() {
         0xD501_0002,
         0x002A_0101, // v_cndmask_b32 v2, v1, v0, s[10:11]
     ];
+        let _one = super::valu_tests::one_at_a_time();
     let Ok(names) = adapters() else {
         eprintln!("no DXGI; skipped");
         return;

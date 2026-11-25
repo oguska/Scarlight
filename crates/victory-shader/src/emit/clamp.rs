@@ -326,6 +326,7 @@ mod tests {
 
     #[test]
     fn records_are_clamped_in_place() {
+        let _one = crate::emit::valu_tests::one_at_a_time();
         let Ok(host) = Host::new(false) else {
             eprintln!("no SM 6.6 device; skipped");
             return;
@@ -378,6 +379,7 @@ mod tests {
 
     #[test]
     fn records_past_the_budget_run_empty() {
+        let _one = crate::emit::valu_tests::one_at_a_time();
         let Ok(host) = Host::new(false) else {
             eprintln!("no SM 6.6 device; skipped");
             return;

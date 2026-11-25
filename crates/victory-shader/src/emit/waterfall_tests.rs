@@ -114,9 +114,7 @@ fn run(shader: &HostShader, views: &[View]) -> Vec<(&'static str, Vec<u32>)> {
     // One GPU test at a time, with the VALU tests: in parallel on the
     // hardware adapter and WARP the test process sometimes died of an
     // access violation (7 of 24 runs of these four tests).
-    let _one = super::valu_tests::ONE_AT_A_TIME
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let _one = super::valu_tests::one_at_a_time();
     for (label, warp) in [("hardware", false), ("warp", true)] {
         let Ok(host) = Host::new(warp) else {
             eprintln!("no SM 6.6 {label} device; skipped");

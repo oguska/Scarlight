@@ -904,6 +904,7 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn stub_pipeline_is_created() {
+            let _one = super::valu_tests::one_at_a_time();
         let Ok(host) = super::host::Host::new(false) else {
             eprintln!("no SM 6.6 device; skipped");
             return;
@@ -1181,6 +1182,7 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn what_translates_for_the_host_creates_a_pipeline() {
+            let _one = super::valu_tests::one_at_a_time();
         let Ok(host) = super::host::Host::new(false) else {
             eprintln!("no SM 6.6 device; skipped");
             return;
@@ -1218,6 +1220,7 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn each_adapter_gets_what_it_runs() {
+            let _one = super::valu_tests::one_at_a_time();
         let Ok(names) = super::host::adapters() else {
             eprintln!("no DXGI; skipped");
             return;
@@ -1654,12 +1657,11 @@ mod barycentric_tests {
 
     /// Held while a test here dispatches: two GPU tests at once on WARP can
     /// end the test process with an access violation (see
-    /// `valu_tests::ONE_AT_A_TIME`).
+    /// `valu_tests::ONE_AT_A_TIME`). Every GPU test module takes it through
+    /// this one function; `Host::new` refuses a test that forgot it.
     #[cfg(windows)]
-    fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
-        super::valu_tests::ONE_AT_A_TIME
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+    pub(super) fn one_at_a_time() -> super::valu_tests::AtOne {
+        super::valu_tests::one_at_a_time()
     }
 
     /// The hardware adapter and WARP, those there are.

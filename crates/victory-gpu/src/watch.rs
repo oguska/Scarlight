@@ -129,6 +129,7 @@ const BLOCK: usize = PAGE;
 // `writes` reads blocks as pages.
 const _: () = assert!(BLOCK == PAGE);
 
+#[derive(Clone)]
 struct Guards {
     /// Blocks we made read-only.
     protected: BTreeSet<usize>,
@@ -550,10 +551,58 @@ mod tests {
     };
     const MEM_WRITE_WATCH: u32 = 0x20_0000;
 
+    /// The journals are process-wide and keyed by block address, and the
+    /// harness runs tests in parallel: entries one test leaves behind decide
+    /// another's when the allocator hands it the same block. A block left in
+    /// `views` is not queried again; `title_memory_remapped` gives a stale
+    /// `protected` block write access under a job that holds it; `back_begin`
+    /// takes a stale `BACK` entry for an earlier job's hold. These tests
+    /// therefore run one at a time, and put the journals back as they found
+    /// them: this state is theirs only while their memory is.
+    fn serialized() -> Serialized {
+        static LOCK: Mutex<()> = Mutex::new(());
+        let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (asked, written) = {
+            let j = JOURNAL.lock().unwrap_or_else(|e| e.into_inner());
+            (j.asked, j.written.clone())
+        };
+        let guards = guards().clone();
+        let back = back().clone();
+        Serialized {
+            asked,
+            written,
+            guards,
+            back,
+            _lock: lock,
+        }
+    }
+
+    /// What the journals held when a test started; put back when it ends.
+    struct Serialized {
+        asked: u64,
+        written: BTreeMap<usize, u64>,
+        guards: Guards,
+        back: BTreeMap<usize, (u32, Arc<Done>)>,
+        /// Dropped last: the journals are put back still holding it.
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Drop for Serialized {
+        fn drop(&mut self) {
+            let mut j = JOURNAL.lock().unwrap_or_else(|e| e.into_inner());
+            j.asked = self.asked;
+            j.written = self.written.clone();
+            drop(j);
+            *guards() = self.guards.clone();
+            *back() = self.back.clone();
+        }
+    }
+
     /// A write-back job's blocks are inaccessible to the title until the
     /// job released them; a thread that faults there waits for the job.
     #[test]
     fn write_back_blocks_wait_for_their_job() {
+        let _serialized = serialized();
         use std::sync::Arc;
         // SAFETY: two blocks of private memory, freed at the end.
         let at = unsafe {
@@ -583,6 +632,7 @@ mod tests {
     /// copy-back is still queued.
     #[test]
     fn a_held_block_passes_to_the_next_job() {
+        let _serialized = serialized();
         // SAFETY: one block of private memory, freed at the end.
         let at = unsafe {
             VirtualAlloc(
@@ -667,6 +717,7 @@ mod tests {
     /// kernel; a write to it (by the title, or announced) is still seen.
     #[test]
     fn clean_guarded_views_are_answered_from_the_journal() {
+        let _serialized = serialized();
         let v = view(4);
         let (start, end) = (v, v + 4 * BLOCK);
         let first = v / PAGE;
@@ -724,6 +775,7 @@ mod tests {
     /// A range only partly guarded and clean asks the kernel.
     #[test]
     fn partly_clean_ranges_ask_the_kernel() {
+        let _serialized = serialized();
         let v = view(2);
         let asked = kernel_asked();
         // Only block 0 is guarded.
@@ -745,6 +797,7 @@ mod tests {
     /// only after the runtime remapped it; other memory every time.
     #[test]
     fn views_are_queried_once_until_remapped() {
+        let _serialized = serialized();
         use windows_sys::Win32::System::Memory::{
             CreateFileMappingW, FILE_MAP_WRITE, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile,
             UnmapViewOfFile,
@@ -792,6 +845,7 @@ mod tests {
 
     #[test]
     fn written_pages_are_reported_to_every_asker() {
+        let _serialized = serialized();
         // SAFETY: a fresh write-watched allocation, freed at the end.
         let p = unsafe {
             VirtualAlloc(
@@ -830,6 +884,7 @@ mod tests {
     /// lands and the block counts as written.
     #[test]
     fn kernel_reads_into_guarded_blocks_after_opening() {
+        let _serialized = serialized();
         use std::io::{Read, Seek, Write};
         use windows_sys::Win32::System::Memory::{
             CreateFileMappingW, FILE_MAP_WRITE, MapViewOfFile, UnmapViewOfFile,
@@ -887,6 +942,7 @@ mod tests {
     /// to overflow. Up there no test has guarded blocks.
     #[test]
     fn ranges_past_the_address_space_end_do_not_overflow() {
+        let _serialized = serialized();
         let top = usize::MAX - 16;
         writing(top, PAGE);
         title_memory_remapped(top, usize::MAX);
@@ -896,6 +952,7 @@ mod tests {
     /// again (they cannot be guarded) until the runtime maps them.
     #[test]
     fn unmapped_blocks_are_reported_once_until_mapped() {
+        let _serialized = serialized();
         use windows_sys::Win32::System::Memory::{
             CreateFileMappingW, MEM_PRESERVE_PLACEHOLDER, MEM_REPLACE_PLACEHOLDER,
             MEM_RESERVE_PLACEHOLDER, MapViewOfFile3, PAGE_NOACCESS, UnmapViewOfFile2,
@@ -992,6 +1049,7 @@ mod tests {
     /// write to one of them must not find no record.
     #[test]
     fn a_partly_remapped_block_is_writable_again() {
+        let _serialized = serialized();
         use windows_sys::Win32::System::Memory::{PAGE_READONLY, PAGE_READWRITE};
         let v = view(2);
         let pages = |block: usize| (v + block * BLOCK) / PAGE..(v + (block + 1) * BLOCK) / PAGE;
@@ -1010,6 +1068,7 @@ mod tests {
     /// would fault with nothing guarding them.
     #[test]
     fn a_partly_committed_block_is_not_absent() {
+        let _serialized = serialized();
         use windows_sys::Win32::System::Memory::{MEM_COMMIT, PAGE_READWRITE, VirtualAlloc};
         // SAFETY: a fresh reservation of two blocks; we commit one page in
         // the first one's tail and free the rest.

@@ -718,6 +718,9 @@ fn translated_shaders_draw_as_pc_ones() {
         eprintln!("no console or PC compiler; skipped");
         return;
     };
+    // One GPU test at a time, with the other modules' GPU tests: two at
+    // once end the test process with an access violation (#65).
+    let _one = super::valu_tests::one_at_a_time();
     let Ok(host) = Host::new(false) else {
         eprintln!("no SM 6.6 device; skipped");
         return;
@@ -874,6 +877,9 @@ fn translated_mesh_shaders_draw_as_pc_ones() {
         eprintln!("no console or PC compiler; skipped");
         return;
     };
+    // One GPU test at a time, with the other modules' GPU tests: two at
+    // once end the test process with an access violation (#65).
+    let _one = super::valu_tests::one_at_a_time();
     let Ok(host) = Host::new(false) else {
         eprintln!("no SM 6.6 device; skipped");
         return;
@@ -991,6 +997,9 @@ fn float_semantics_are_the_consoles() {
         eprintln!("no console compiler; skipped");
         return;
     };
+    // One GPU test at a time, with the other modules' GPU tests: two at
+    // once end the test process with an access violation (#65).
+    let _one = super::valu_tests::one_at_a_time();
     let Ok(host) = Host::new(false) else {
         eprintln!("no SM 6.6 device; skipped");
         return;
@@ -1080,6 +1089,9 @@ fn translated_compute_matches_pc() {
         eprintln!("no console or PC compiler; skipped");
         return;
     };
+    // One GPU test at a time, with the other modules' GPU tests: two at
+    // once end the test process with an access violation (#65).
+    let _one = super::valu_tests::one_at_a_time();
     let Ok(host) = Host::new(false) else {
         eprintln!("no SM 6.6 device; skipped");
         return;

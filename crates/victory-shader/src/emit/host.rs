@@ -130,6 +130,15 @@ impl Host {
     /// the first hardware adapter whose description holds
     /// `VICTORY_ADAPTER` (ignoring case: `nvidia`, `radeon`...).
     pub fn new(warp: bool) -> Result<Self, Unavailable> {
+        // Two GPU tests at once on WARP end the test process with an access
+        // violation (#65). Every GPU test takes the one-at-a-time lock; one
+        // that forgot it fails here, on every run, instead of now and then.
+        #[cfg(test)]
+        assert!(
+            super::valu_tests::holding_one_at_a_time(),
+            "a GPU test made a device without `one_at_a_time()`: two GPU tests at \
+             once end the test process with an access violation (#65)"
+        );
         let warp = warp || std::env::var("VICTORY_WARP").is_ok_and(|v| v == "1");
         match std::env::var("VICTORY_ADAPTER") {
             Ok(name) if !warp && !name.is_empty() => Self::on(&name),

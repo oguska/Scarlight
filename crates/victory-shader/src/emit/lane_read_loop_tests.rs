@@ -98,15 +98,17 @@ fn program(wave: u32, lane: u32, joined_latch: bool) -> crate::NativeProgram {
     }
 }
 
-/// Every hardware adapter's device that runs SM 6.6, by name. (Without
-/// the Agility SDK, Windows 10 offers none: the test then has nothing to
-/// run on, as in `split_tests`.)
-fn devices() -> Vec<(String, Host)> {
+/// Every hardware adapter's device that runs SM 6.6, by name, and the
+/// one-at-a-time lock the caller holds while it dispatches. (Without the
+/// Agility SDK, Windows 10 offers none: the test then has nothing to run
+/// on, as in `split_tests`.)
+fn devices() -> (super::valu_tests::AtOne, Vec<(String, Host)>) {
+    let one = super::valu_tests::one_at_a_time();
     let Ok(names) = adapters() else {
         eprintln!("no DXGI; skipped");
-        return Vec::new();
+        return (one, Vec::new());
     };
-    names
+    let devices = names
         .into_iter()
         .filter_map(|name| match Host::on(&name) {
             Ok(host) => Some((name, host)),
@@ -115,7 +117,8 @@ fn devices() -> Vec<(String, Host)> {
                 None
             }
         })
-        .collect()
+        .collect();
+    (one, devices)
 }
 
 fn emit(native: &crate::NativeProgram, target: super::Target) -> super::HostShader {
@@ -135,8 +138,9 @@ fn emit(native: &crate::NativeProgram, target: super::Target) -> super::HostShad
 fn lane_reads_in_a_loop_lanes_leave_at_different_iterations() {
     let mut wrong = Vec::new();
     let mut ran = 0;
+    let (_one, devices) = devices();
     for (wave, lane) in [(32, 20), (64, 40)] {
-        for (name, host) in devices() {
+        for (name, host) in &devices {
             // For the host's waves: a wave64 program runs in two halves
             // where there are no 64-lane waves.
             let cs = emit(&program(wave, lane, false), host.target());
@@ -199,7 +203,8 @@ fn lane_read_loop_with_a_joined_exec_back_edge() {
         },
     );
     let want: Vec<u32> = (LANE..LANE + WAVE).collect();
-    for (name, host) in devices() {
+    let (_one, devices) = devices();
+    for (name, host) in devices {
         let mut cs = emit(&native, host.target());
         if let Ok(mut v) = super::validator::Validator::load(
             super::validator::Validator::default_path().as_deref(),
