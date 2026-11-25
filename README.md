@@ -212,8 +212,8 @@ Open an issue, send a test report, or take a roadmap item.
 
 ## Credits
 
-Built on **VIctory** (GPL-3.0) and work from its community — every contributor is named in
-[CREDITS.md](CREDITS.md).
+Built on the project named in [CREDITS.md](CREDITS.md) (GPL-3.0), whose history and authorship this
+tree keeps, plus work from its community — every contributor is named there.
 
 ## Licence
 

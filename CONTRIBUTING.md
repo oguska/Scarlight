@@ -1,6 +1,7 @@
 # Contributing to Scarlight
 
-Thanks for helping. Scarlight is a GPL-3.0 port of [VIctory](https://github.com/Marvisak/VIctory).
+Thanks for helping. Scarlight is GPL-3.0; the project it is built on is named in [CREDITS.md](CREDITS.md), and its
+history, authorship and commit dates are kept in this tree.
 Fixes arrive as merged commits that keep their authors (see [CREDITS.md](CREDITS.md)), plus our own
 work. Contributions of any size are welcome, and a test report is as useful as a patch.
 
@@ -123,7 +124,7 @@ We credit by **merging the real commits**, not by copying code:
   into ours, and do not retype their patch as an unnamed commit.
 * Add the author to [CREDITS.md](CREDITS.md) if the merge brings in a name that is not listed yet
   (the list is read from `git log main`).
-* Fixes that also help Windows or NVIDIA go upstream to VIctory. The point is to make upstream
+* Fixes that also help Windows or NVIDIA go upstream to the project credited in [CREDITS.md](CREDITS.md). The point is to make upstream
   patches mergeable, not to fork forever.
 * Disagreements about a merge go in the pull request, not in commit messages about people.
 

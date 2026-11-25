@@ -28,7 +28,7 @@ In any form (files, string literals, fixtures, snapshots, docs):
 `crates/victory-formats/src/bcpack-tables.bin` (about 78 KB): the constant
 tables of the BCPack format (entropy models, index rank tables, control
 codes, per-format dictionaries). A BCPack stream cannot be decoded without
-exactly these tables and they cannot be derived, so they ship with VIctory
+exactly these tables and they cannot be derived, so they ship here
 by the project owner's decision (2026-11-23), entered as an exception in
 `xtask/src/policy.rs`. They are part of the format, not our work, and the
 repository's licence does not cover them. Nothing else of this kind is
