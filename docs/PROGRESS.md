@@ -38,7 +38,8 @@ Two sets are counted: the 751-program world set used for offline checks, and the
 |---|---|---|---|---|
 | World set, translated to host shader | 751 / 751 | 751 / 751 | ████████████ 100 % | 0 refused, 0 undecodable |
 | World set, translated + validated + real RADV pipeline | 751 / 751 | 751 / 751 | ████████████ 100 % | 0 stop: 751 of 751 reached a real RADV pipeline in the 25 Nov 13:14 run |
-| Whole archive, translated | 26,084 / 26,084 | 26,084 / 26,084 | ████████████ 100 % | 40.6 M IR instructions; 25,889 programs have every resource access traced |
+| Whole archive, translated | 26,084 / 26,084 | — | ████████████ 100 % | 40.6 M IR instructions; 25,889 programs have every resource access traced |
+| Whole archive, host shader emitted: all stages | 25,602 / 25,694 | — | ███████████░ 99 % | vertex + pixel, compute and mesh together; the per-stage rows below add up to this |
 | Whole archive, host shader emitted: vertex + pixel | 14,164 / 14,247 | — | ███████████░ 99 % | 516 stop in the emitter; no pipeline validation has been run on the archive yet |
 | Whole archive, host shader emitted: compute | 2,676 / 2,682 | — | ███████████░ 99 % | 6 stop in the emitter; no pipeline validation has been run on the archive yet |
 | Whole archive, host shader emitted: mesh | 8,762 / 8,765 | — | ███████████░ 99 % | 3 stop in the emitter; no pipeline validation has been run on the archive yet |
@@ -50,13 +51,13 @@ Two sets are counted: the 751-program world set used for offline checks, and the
 
 ## GPU command stream
 
-What the title records per frame and what reaches the card. In the reference world run about 95 % of recorded draws and dispatches run; the rest is dropped by a named reason, and roughly nine tenths of the drops is ray tracing, which is off on purpose.
+What the title records per frame and what reaches the card. The headline row measures one real world frame: the draws and dispatches it recorded, minus the ones dropped, and the drop lines below name every reason. Ray tracing is switched off on purpose, so most of the drops in this build are one intended reason and not a gap in the port — the bar is a record of what ran, not a score.
 
 | Set | Implemented | Verified | Progress | What is counted |
 |---|---|---|---|---|
-| Recorded work that reaches the card | 6,435 / 6,800 | 6,435 / 6,800 | ███████████░ 95 % | midpoints of the measured ranges: 340-390 drops per frame of 6,000-7,600 draws in the reference world run |
+| Recorded work that reaches the card | 4,309 / 4,688 | 4,309 / 4,688 | ███████████░ 92 % | the last world frame (3,000 draws or more) of the newest run that has one; the numbers are the backend's own per-frame lines, and every dropped program is listed below by reason |
 | D3D12 calls the title makes that our backend has | 99 / 128 | 99 / 128 | █████████░░░ 77 % | present in the backend's sources; the rest are enum and helper surfaces, not missing entry points |
-| Drops: ray-tracing hit shading, left out | — | — | off | 631/frame in one measured run; behind a switch until the trace path is correct |
+| Drops: ray-tracing hit shading, left out | — | — | off | 631/frame in the reference world run; behind a switch until the trace path is correct, and the largest single reason for drops |
 | Drops: one stage of the ray-tracing structure builder | — | — | off | 346-361/frame; off with the same switch |
 | Drops: one whole-wave compute step | — | — | 14-28/frame | a section step our wave simulation does not follow yet |
 | Drops: compute and pixel programs while their pipeline is made | — | — | 1-4/frame | each named program appears once and then runs; counted in the pipeline area |
@@ -96,18 +97,20 @@ Status words, not percentages: a feature is either shown working on this machine
 
 - "Partly" means the feature appears in at least one frame and is wrong or incomplete in a way the picture notes name; "broken" means it regressed and is being fixed.
 
-## Mesa reach
+## Mesa reach (compiled offline, not run)
 
-Which open-driver GPU families the pipeline work is checked on. Only the card in this machine has produced a result; the offline matrix that drives Mesa's shim for other families has not opened the driver yet, so five of six families are unmeasured, not passing.
+Whether the world shader set compiles for a GPU family's Mesa driver, without that GPU. Mesa 26.3.1's noop drm-shim fakes each chip, so RADV builds every pipeline with that family's ISA and limits. **All 751 world pipelines compile on 4 of 5 AMD families** (RDNA4, RDNA3, RDNA2, RDNA1); Vega compiles 669 and aborts on the 82 mesh-shader programs. Intel is in progress. This is a compile result: only RDNA4 has actually been run.
 
 | GPU families | Implemented | Verified | Progress | What is counted |
 |---|---|---|---|---|
-| Families with a measured offline pipeline run | 6 / 6 | 1 / 6 | ████████████ 100 % | RDNA4, the card in this machine; RDNA1-3 and Vega are reached through Mesa's noop shim, which failed on 25 Nov |
-| Families where every world program compiles | 1 / 6 | 1 / 6 | ██░░░░░░░░░░ 17 % | RDNA4: 751 of 751 in the 25 Nov 13:14 run; the shim run of 25 Nov could not open the ICD on the other five, so nothing is claimed for them |
-| Families tested end to end with a run | 1 / 1 | 1 / 1 | ████████████ 100 % | RDNA4 only; no other card has been in this machine |
+| AMD families whose whole world set compiles offline | 4 / 5 | — | ██████████░░ 80 % | RDNA4, RDNA3, RDNA2, RDNA1: 751/751 each through the noop shim (Mesa driver, no GPU) |
+| Vega (gfx900): world programs that compile offline | 669 / 751 | — | ███████████░ 89 % | 82 abort the driver: every mesh-shader program, and GFX9 has no mesh shader support in RADV |
+| Intel (ANV) families measured offline | 0 | 1 planned | in progress | no Intel card and no vulkan-intel ICD on this machine; Mesa 26.3.1 ships the Intel noop shim (dg2, bmg) to build |
+| Families with a run, not just a compile | 1 / 6 | — | ██░░░░░░░░░░ 17 % | RDNA4 only; the five shim families have compiled pipelines but no run, and a compiled pipeline is not a working feature |
 
-- The matrix is a five-family offline run (`gfx900 gfx1010 gfx1030 gfx1100 gfx1201`) plus the real card as control; the last two attempts failed at pipeline creation with `cannot_open` on all six columns, which is a shim problem, not a shader result.
-- Until that run is green, every "expected" family in the README stays expected.
+- Source: `family-matrix-20261125-134909-2134785.tsv`, 751 world programs, 4 stages, 8 jobs, 50 s wall for six columns; the shim column for our own family matches the real-GPU column exactly (751/751), so the harness does not change the answer.
+- Compiled offline is not run. On RDNA1 all 82 mesh programs create, yet RADV does not advertise `VK_EXT_mesh_shader` there, so a program that uses mesh, barycentric or ray query at draw time needs the game's own fallback path.
+- Intel: ANV needs `libvulkan_intel.so` plus Mesa's Intel noop shim from the same build; neither is installed here, so nothing is claimed.
 
 ## Performance
 

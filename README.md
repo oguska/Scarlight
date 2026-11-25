@@ -69,24 +69,25 @@ each number means: [docs/PROGRESS.md](docs/PROGRESS.md).
 | Area | Progress | Detail | Where |
 |---|---|---|---|
 | System APIs (HLE) | ████████████ 100 % resolved (0 missing) | ██░░░░░░░░░░ 15 % own HLE | [detail](docs/PROGRESS.md#system-apis-hle) |
-| Shaders | ███████████░ 99 % | █░░░░░░░░░░░ 3 % verified | [detail](docs/PROGRESS.md#shaders) |
-| GPU command stream | ███████████░ 95 % | ███████████░ 95 % verified | [detail](docs/PROGRESS.md#gpu-command-stream) |
-| Pipelines | ██████████░░ 80 % | ████░░░░░░░░ 33 % of the keys the title asks for | [detail](docs/PROGRESS.md#pipelines) |
+| Shaders | ███████████░ 99 % | no pipeline validation yet | [detail](docs/PROGRESS.md#shaders) |
+| GPU command stream | ███████████░ 92 % | ███████████░ 92 % verified | [detail](docs/PROGRESS.md#gpu-command-stream) |
+| Pipelines | ████████░░░░ 69 % | world set 751/751 built offline | [detail](docs/PROGRESS.md#pipelines) |
 | Features | status words | 2 of 10 shown | [detail](docs/PROGRESS.md#features) |
-| Mesa reach | ██░░░░░░░░░░ 17 % | ██░░░░░░░░░░ 17 % of 6 families | [detail](docs/PROGRESS.md#mesa-reach) |
+| Mesa reach (compiled offline, not run) | ██████████░░ 80 % | compiled only, not run | [detail](docs/PROGRESS.md#mesa-reach) |
 | Performance | █░░░░░░░░░░░ 6 % | █░░░░░░░░░░░ 6 % of 30 fps | [detail](docs/PROGRESS.md#performance) |
 
 Measured on 25 Nov 2026, build 5fca579b, RX 9070 XT (RDNA4) / Mesa 26.3.1 RADV. The gaps are the
 honest ones: 88 of 587 imports are our own HLE, whole-archive shaders have no validated pipeline
-column yet, five of six GPU families are unmeasured because the offline matrix cannot open Mesa's
-shim, and speed is a twentieth of the console's 30 fps. Regenerate with
+column yet, and speed is a twentieth of the console's 30 fps. The world pipelines compile offline for
+4 of 5 AMD families through Mesa's shim (RDNA4, RDNA3, RDNA2, RDNA1; Vega 669/751, no mesh shaders);
+Intel is in progress, and only RDNA4 has actually been run. Regenerate with
 `tools/progress/collect.sh` and `tools/progress/render.py`.
 
 ## Hardware
 
 | **Tested** | **Expected** | **Unknown** |
 |---|---|---|
-| **RX 9070 XT (RDNA4) · RADV**<br>Every number on this page comes from this one card | **RDNA1-3 (RX 5000-7000), Vega · RADV**<br>**Arc A/B-series, Xe2 · ANV**<br>Not yet checked | **Older Intel, GCN/Polaris, AMD APUs**<br>Any Mesa older than ours<br>Not yet checked |
+| **RX 9070 XT (RDNA4) · RADV**<br>Every number on this page comes from this one card | **RDNA1-3 (RX 5000-7000), Vega · RADV**<br>World pipelines compile offline for all four (Vega 669/751, no mesh); not yet run<br><br>**Arc A/B-series, Xe2 · ANV**<br>Not yet checked | **Older Intel, GCN/Polaris, AMD APUs**<br>Any Mesa older than ours<br>Not yet checked |
 
 Full table, what "Expected" means and how a card moves: [docs/hardware.md](docs/hardware.md). Native
 Windows and NVIDIA's proprietary driver are unsupported; NVK is a roadmap item, not a target yet.

@@ -101,6 +101,23 @@ if [ -f "$CENSUS" ]; then
     [ "$a_total" -gt 0 ] && fact hle 4 "Kernel and API sets (43 DLLs)" impl "$a_both,$a_total"
     [ "$c_total" -gt 0 ] && fact hle 5 "Console DLLs: memory, audio, input, GPU" impl "$c_both,$c_total"
     [ "$r_total" -gt 0 ] && fact hle 6 "C runtime and OS (msvcp140, vcruntime, ws2_32, winhttp, bcrypt, mfplat)" impl "$r_both,$r_total"
+    # the census cannot tell a title-owned export from an unbound import; the
+    # loader can, so the verified count comes from a run's bound line
+    if [ -z "$RUN" ]; then BOUNDSRC=$(ls -t "$SOURCES"/shots/*/run.txt 2>/dev/null | head -30); else BOUNDSRC=$RUN; fi
+    BOUND=""
+    while IFS= read -r f; do
+      [ -f "$f" ] || continue
+      BOUND=$(grep -hE 'bound .*: [0-9]+ hle, [0-9]+ host, [0-9]+ title, [0-9]+ missing' "$f" 2>/dev/null | tail -1)
+      [ -n "$BOUND" ] && { BOUNDSRC=$f; break; }
+    done <<< "$BOUNDSRC"
+    if [ -n "$BOUND" ]; then
+      missed=$(printf '%s' "$BOUND" | sed -E 's/.* ([0-9]+) missing.*/\1/')
+      bound=$((all_total - missed))
+      fact hle 0 "Imports resolved" verified "$bound,$all_total"
+      say "hle   loader bound $bound/$all_total (missing $missed) in $(basename "$(dirname "$BOUNDSRC")")/run.txt"
+    else
+      skip "hle: no loader bound line to verify the resolved count; verified left as it was"
+    fi
     say "hle   $resolved/$all_total resolved: $hle our HLE, $nhost Wine, $title the title's own, $all_dlls DLLs"
   fi
 else
@@ -116,17 +133,18 @@ if [ -f "${TRANSLATE:-/nonexistent}" ]; then
   cs=$(st "compute programs")
   ms=$(st "mesh programs")
   if [ "$tr_total" -gt 0 ]; then
+    # translation alone is not verification: this row has no verified column
     fact shaders 2 "Whole archive, translated" impl "$tr_done,$tr_total"
-    fact shaders 2 "Whole archive, translated" verified "$tr_done,$tr_total"
     sum_d=0; sum_t=0
     for pair in "$vs" "$cs" "$ms"; do
       [ -z "$pair" ] && continue
       set -- $pair
       sum_d=$((sum_d + ${1:-0})); sum_t=$((sum_t + ${2:-0}))
     done
-    set -- $vs; [ "${2:-0}" -gt 0 ] && fact shaders 3 "Whole archive, host shader emitted: vertex + pixel" impl "$1,$2"
-    set -- $cs; [ "${2:-0}" -gt 0 ] && fact shaders 4 "Whole archive, host shader emitted: compute" impl "$1,$2"
-    set -- $ms; [ "${2:-0}" -gt 0 ] && fact shaders 5 "Whole archive, host shader emitted: mesh" impl "$1,$2"
+    [ "$sum_t" -gt 0 ] && fact shaders 3 "Whole archive, host shader emitted: all stages" impl "$sum_d,$sum_t"
+    set -- $vs; [ "${2:-0}" -gt 0 ] && fact shaders 4 "Whole archive, host shader emitted: vertex + pixel" impl "$1,$2"
+    set -- $cs; [ "${2:-0}" -gt 0 ] && fact shaders 5 "Whole archive, host shader emitted: compute" impl "$1,$2"
+    set -- $ms; [ "${2:-0}" -gt 0 ] && fact shaders 6 "Whole archive, host shader emitted: mesh" impl "$1,$2"
     say "shaders archive $tr_done/$tr_total translated, $sum_d/$sum_t emitted (vs+ps, cs, ms)"
   fi
 else
@@ -134,8 +152,8 @@ else
 fi
 
 # ---- 2b. shaders: the world set, end to end ---------------------------------
-if [ ! -d "$OFF" ]; then
-  skip "shaders world set: no $OFF"
+if [ -z "$REPORT" ] && [ ! -d "$OFF" ]; then
+  skip "shaders world set: no $OFF and no --report"
 else
   if [ -z "$REPORT" ]; then
     while IFS= read -r f; do
@@ -169,7 +187,7 @@ if [ -f "$SH/gfx10/opcodes.rs" ] && [ -d "$SH/emit" ]; then
     grep -rqE "(^|[^a-z0-9_])${op}([^a-z0-9_]|$)" "$SH/emit" 2>/dev/null && used=$((used + 1))
   done <<< "$tbl"
   if [ "$all" -gt 0 ]; then
-    fact shaders 6 "ISA: opcode-table entries the decoder names" impl "$used,$all"
+    fact shaders 7 "ISA: opcode-table entries the decoder names" impl "$used,$all"
     say "isa   $used/$all opcode-table entries named in the decoder"
   fi
 else
@@ -177,13 +195,42 @@ else
 fi
 
 # ---- 3. GPU command stream --------------------------------------------------
-if [ -z "$RUN" ]; then RUN=$(newest "$SOURCES"/shots/*/run.txt); fi
-if [ -f "${RUN:-/nonexistent}" ]; then
-  read -r draws med <<< "$(grep -oE '[0-9]+ draws/frame' "$RUN" 2>/dev/null | awk '{print $1}' | sort -n | awk '{a[NR]=$1} END{print a[NR]+0, a[int(NR/2)]+0}')"
-  drops=$(grep -oE 'dropped [0-9]+\.?[0-9]*/frame' "$RUN" | awk '{s+=$2+0} END{print s+0}')
-  if [ "$draws" -gt 0 ]; then
-    say "stream newest run: max $draws draws/frame, median $med, drops summed over all lines $drops"
-  fi
+# A frame line carries its draws; the "dropped N/frame" lines that follow it,
+# up to the next frame line, belong to that frame. The last world frame of a
+# run gives one honest pair: draws recorded, draws that reached the card.
+runpair() {
+  awk '
+    function flush() { if (cur_d >= 3000) { best_d = cur_d; best_kept = cur_d - drops } }
+    /[0-9]+ draws\/frame/ {
+      flush()
+      d = $0
+      if (match(d, /[0-9]+ draws\/frame/)) {
+        d = substr(d, RSTART, RLENGTH); sub(/ draws.*/, "", d)
+        cur_d = d + 0
+      }
+      drops = 0
+    }
+    /dropped [0-9]+(\.[0-9]+)?\/frame/ {
+      for (i = 2; i <= NF; i++)
+        if ($i ~ /^[0-9]+(\.[0-9]+)?\/frame$/ && $(i-1) == "dropped") drops += $i + 0
+    }
+    END { flush(); if (best_d > 0 && best_kept > 0) print int(best_kept + 0.5), best_d }
+  ' "$1"
+}
+if [ -n "$RUN" ]; then CANDIDATES=$RUN; else CANDIDATES=$(ls -t "$SOURCES"/shots/*/run.txt 2>/dev/null | head -50); fi
+STREAM_DONE=0
+while IFS= read -r f; do
+  [ -f "$f" ] || continue
+  read -r kept draws <<< "$(runpair "$f")"
+  [ -z "${draws:-}" ] && continue
+  fact command_stream 0 "Recorded work that reaches the card" impl "$kept,$draws"
+  fact command_stream 0 "Recorded work that reaches the card" verified "$kept,$draws"
+  say "stream $kept/$draws draws and dispatches reached the card ($(basename "$(dirname "$f")")/run.txt)"
+  STREAM_DONE=1
+  break
+done <<< "$CANDIDATES"
+if [ "$STREAM_DONE" = 0 ]; then
+  skip "stream: no run with a world frame (pass --run)"
 fi
 METHODS="$BASE/tmp/native/methods.txt"
 if [ -f "$METHODS" ] && [ -d "$REPO/crates/victory-gpu/src" ]; then
@@ -203,7 +250,10 @@ fi
 # The early list is the title's own record of the pipelines it will ask for;
 # how many of those keys the saved library can build is printed by the app
 # (pass --warm N to refresh it), not recoverable from the file.
-if [ -z "$CACHE" ]; then
+if [ -n "$CACHE" ]; then
+  EARLY=$(find "$CACHE" -maxdepth 5 -name early-pipelines.txt 2>/dev/null | head -1)
+fi
+if [ -z "$EARLY" ]; then
   for d in "$SOURCES"/victory-run "$SOURCES"/victory-play \
            "$HOME"/.local/share/*/drive_c/users/*/AppData/Local/victory; do
     [ -d "$d" ] || continue
@@ -227,16 +277,34 @@ else
 fi
 
 # ---- 6. mesa reach: the family matrix ---------------------------------------
-if [ -z "$MATRIX" ]; then MATRIX=$(newest "$OFF"/family-matrix-*.txt); fi
+# The tsv is one row per (program, family) with the stage-4 result; families are
+# reached through Mesa's noop drm-shim, so this is "compiles offline", not "runs".
+# A family counts only when every program in the set compiled.
+if [ -z "$MATRIX" ]; then MATRIX=$(newest "$OFF"/family-matrix-*.tsv); fi
 if [ -f "${MATRIX:-/nonexistent}" ]; then
-  fam_done=$(awk '/^(gfx|real)/{t++; if ($3+0 > 0) ok++} END{print ok+0, t+0}' "$MATRIX")
-  read -r f_ok f_tot <<< "$fam_done"
-  if [ "$f_ok" -gt 0 ]; then
-    fact mesa 0 "Families with a measured offline pipeline run" impl "$f_ok,$f_tot"
-    say "mesa  $f_ok/$f_tot families produced a pipeline ($(basename "$MATRIX"))"
+  per=$(awk -F'\t' '$2 != "-" && $2 != "real" {t[$2]++; if ($3=="ok") o[$2]++}
+                     END {for (f in t) print f, o[f]+0, t[f]+0}' "$MATRIX" | sort)
+  if [ -n "$per" ]; then
+    fam_all=0; fam_n=0; vega_ok=0; vega_tot=0
+    while read -r fam ok tot; do
+      [ -z "$fam" ] && continue
+      fam_n=$((fam_n + 1))
+      [ "$ok" -eq "$tot" ] && fam_all=$((fam_all + 1))
+      if [ "$fam" = "gfx900" ]; then vega_ok=$ok; vega_tot=$tot; fi
+      say "mesa  $fam $ok/$tot"
+    done <<< "$per"
+    if [ "$fam_n" -gt 0 ]; then
+      fact mesa 0 "AMD families whose whole world set compiles offline" impl "$fam_all,$fam_n"
+      say "mesa  $fam_all/$fam_n AMD families compile the whole set ($(basename "$MATRIX"))"
+    fi
+    if [ "$vega_tot" -gt 0 ]; then
+      fact mesa 1 "Vega (gfx900): world programs that compile offline" impl "$vega_ok,$vega_tot"
+    fi
   else
-    skip "mesa: $(basename "$MATRIX") has no ok column (shim could not open the ICD)"
+    skip "mesa: $(basename "$MATRIX") has no per-family rows"
   fi
+else
+  skip "mesa: no family-matrix tsv in $OFF"
 fi
 
 # ---- 7. performance: the fixed scene ---------------------------------------

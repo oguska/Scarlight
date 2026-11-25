@@ -114,33 +114,29 @@ def page(doc):
 
 
 def compact(doc, limit=8):
-    """The 6-8 row table the README carries."""
+    """The 6-8 row table the README carries.
+
+    Every cell is derived from the same row of docs/PROGRESS.md that the detail
+    page shows, so the compact table can never quote a different counted set.
+    """
     out = ["| Area | Progress | Detail | Where |", "|---|---|---|---|"]
     for area in doc["areas"]:
         if area.get("readme") is False:
             continue
-        total = area.get("readme_bar")
-        if total:
-            done, whole = total
-            bar_text = bar(done, whole)
-        elif area.get("readme_text"):
-            bar_text = area["readme_text"]
-        else:
-            first = next((r for r in area["rows"] if "impl" in r), None)
-            bar_text = bar(*first["impl"]) if first else "\u2014"
-        dual = area.get("readme_dual")
-        if dual and area.get("readme_bar") and area.get("readme_verified"):
-            left = (bar(*area["readme_bar"]) + " " + dual[0]).strip()
-            right = (bar(*area["readme_verified"]) + " " + dual[1]).strip()
-            out.append("| %s | %s | %s | %s |" % (area["title"], left, right,
-                area.get("readme_where", "[detail](docs/PROGRESS.md)")))
-            if len(out) - 2 >= limit:
-                break
-            continue
-        ver = area.get("readme_verified")
-        ver_text = bar(*ver) if ver else area.get("readme_verified_text", "\u2014")
         where = area.get("readme_where", "[detail](docs/PROGRESS.md)")
-        out.append("| %s | %s | %s | %s |" % (area["title"], bar_text, ver_text, where))
+        src = area.get("readme_from") or {}
+        labels = area.get("readme_labels") or ["", ""]
+        impl_row = area["rows"][src["impl"]] if src.get("impl") is not None else None
+        ver_row = area["rows"][src["verified"]] if src.get("verified") is not None else None
+        if impl_row is None or "impl" not in impl_row:
+            left = area.get("readme_text", "\u2014")
+        else:
+            left = (bar(*impl_row["impl"]) + " " + labels[0]).strip()
+        if ver_row is not None and "impl" in ver_row:
+            right = (bar(*ver_row["impl"]) + " " + labels[1]).strip()
+        else:
+            right = area.get("readme_verified_text", "\u2014")
+        out.append("| %s | %s | %s | %s |" % (area["title"], left, right, where))
         if len(out) - 2 >= limit:
             break
     return "\n".join(out)
