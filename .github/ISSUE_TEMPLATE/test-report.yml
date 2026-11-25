@@ -39,9 +39,9 @@ body:
   - type: input
     id: mesa
     attributes:
-      label: Mesa version and where it came from
-      description: From `vulkaninfo --summary` (driverName, apiVersion). Say if it is the distribution build, mesa-git, or a local build.
-      placeholder: Mesa 26.3.1 RADV, Vulkan 1.4.363, distribution package
+      label: Mesa version (paste driverName, driverVersion and apiVersion)
+      description: The device section of `vulkaninfo --summary`, plus where Mesa came from — distribution package, mesa-git, or a local build. driverVersion identifies the driver release; apiVersion alone does not.
+      placeholder: driverName radv, driverVersion 26.3.1, apiVersion 1.4.363, distribution package
     validations:
       required: true
   - type: input

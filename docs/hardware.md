@@ -7,7 +7,7 @@ actually been run, what we expect, and what nobody has looked at yet.
 
 | **Tested** | **Expected** | **Unknown** |
 |---|---|---|
-| **RX 9070 XT (RDNA4) · RADV**<br>The only hardware this has been run on: every published number comes from it, Mesa 26.3.1 | **RDNA3, RDNA2, RDNA1 (RX 7000 / 6000 / 5000) · RADV**<br>Same driver, older generations. Not yet checked.<br><br>**Arc A-series, Arc B-series, Xe2 · ANV**<br>A second open driver. Not yet checked. | **Intel Gen9 and older integrated · ANV**<br>**GCN/Polaris and older · RADV**<br>**AMD APUs**<br>Any Mesa older than the one we test<br>Not yet checked. |
+| **RX 9070 XT (RDNA4) · RADV**<br>The only hardware this has been run on: every published number comes from it, Mesa 26.3.1 | **RDNA3, RDNA2, RDNA1 (RX 7000 / 6000 / 5000) and Vega · RADV**<br>Same driver, older generations. Not yet checked.<br><br>**Arc A-series, Arc B-series, Xe2 · ANV**<br>A second open driver. Not yet checked. | **Intel Gen9 and older integrated · ANV**<br>**Polaris and older (GCN 4 and earlier) · RADV**<br>**AMD APUs**<br>Any Mesa older than the one we test<br>Not yet checked. |
 
 **Tested** means a full run on the fixed test scene, with the picture looked at, on a named Mesa
 version. **Expected** means the card has a Mesa driver this project is aimed at and no known blocker.

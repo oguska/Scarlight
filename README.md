@@ -34,7 +34,7 @@ project, and the scope here is deliberately different — Mesa is the target pla
 or one proprietary driver.
 
 It is early. It has been built and run with one title so far, and that title's world renders lit and
-textured at a few frames per second on one card; the work now is picture and speed, in that order.
+textured at a few frames per second on one card; the work now is picture and speed.
 
 ## Status
 
@@ -46,8 +46,8 @@ tried.
 | Area | State |
 |---|---|
 | Boot, menus, audio, gamepad | Work; menus at 30 fps |
-| World, fixed test scene | Lit and textured; **1.45-1.6 fps** in current builds, **up to 3.0 fps** in one earlier build |
-| Time to the world | 133-218 s |
+| World, fixed test scene | Lit and textured. **3.0 fps** on tag `keep/best-fx-578d459c` (one run, Microsoft's `d3dcompiler_47` beside the exe); **1.45-1.6 fps** on six builds of the current base (one run each) |
+| Time to the world | 133-218 s (three builds) |
 | Shader translation | **751 / 751** world programs of the test title translate offline |
 | Faces | **Some characters' faces still fail to render** (regressed again on 25 Nov, under investigation) |
 | Picture | Close-up character detail and walls missing in some builds; shadowed areas dark |
@@ -61,7 +61,7 @@ is in [docs/testing.md](docs/testing.md).
 
 | **Tested** | **Expected** | **Unknown** |
 |---|---|---|
-| **RX 9070 XT (RDNA4) · RADV**<br>Every number on this page comes from this one card | **RDNA1-3 (RX 5000-7000), Vega · RADV**<br>**Arc A/B-series, Xe2 · ANV**<br>Not yet checked | **Older Intel, GCN/Polaris, AMD APUs**<br>Any Mesa older than ours<br>Not yet checked |
+| **RX 9070 XT (RDNA4) · RADV**<br>Every number on this page comes from this one card | **RDNA1-3 (RX 5000-7000), Vega · RADV**<br>**Arc A/B-series, Xe2 · ANV**<br>Not yet checked | **Older Intel, Polaris and older, AMD APUs**<br>Any Mesa older than ours<br>Not yet checked |
 
 Full table, what "Expected" means and how a card moves: [docs/hardware.md](docs/hardware.md). Native
 Windows and NVIDIA's proprietary driver are unsupported; NVK is a roadmap item, not a target yet.
@@ -88,20 +88,23 @@ Arch-family Linux, current Mesa. On other distributions install the equivalent p
 Vulkan driver: `vulkan-radeon`, `vulkan-intel` or `mesa-vulkan-drivers`) and the same build tools.
 
 ```bash
-sudo pacman -S --needed mesa vulkan-radeon rustup git clang lld llvm   # vulkan-intel on Intel
+sudo pacman -S --needed mesa vulkan-radeon vulkan-tools rustup git clang lld llvm   # vulkan-intel on Intel
 git clone https://github.com/pablogonz12/Scarlight && cd Scarlight
-rustup toolchain install                                  # version pinned in rust-toolchain.toml
+rustup toolchain install 1.98.1                           # the version pinned in rust-toolchain.toml
 cargo install cargo-xwin                                  # once
 cargo xwin build --release -p victory --features diagnostics --target x86_64-pc-windows-msvc
 ```
 
-That produces a Windows binary; it runs here under Wine. Tags mark builds measured on the scene above
-— `main` moves between them, so a build of `main` can be ahead or behind the latest number. Copy the
-DLLs next to the exe and start it with GE-Proton's `wine` (not the `proton` script); edit the first
-five paths:
+Wine needs a graphical session (`DISPLAY` set; on a headless machine, run it under Xwayland or Xvfb),
+and the first `cargo xwin build` downloads Microsoft's CRT and Windows headers, so it needs network
+once.
+
+That produces a Windows binary; it runs here under Wine. Tags mark builds measured on the scene above,
+so a build of `main` can be ahead or behind the latest number. Copy the DLLs next to the exe and start
+it with GE-Proton's `wine` (not the `proton` script); edit the first five paths:
 
 ```bash
-GE="$HOME/.local/share/Steam/compatibilitytools.d/GE-Proton11-14"   # your folder name
+GE="$HOME/.local/share/Steam/compatibilitytools.d/GE-Proton11-14-x86_64"   # ls this folder: it usually ends in -x86_64
 VKD3D="$HOME/dlls/vkd3d-proton-master"   # d3d12.dll, d3d12core.dll (x64)
 DXC="$HOME/dlls/dxc"                     # dxcompiler.dll, dxil.dll (x64)
 D3DC="$HOME/dlls/d3dcompiler_47.dll"     # x64
@@ -117,10 +120,15 @@ VKD3D_CONFIG=ignore_shared_fence VICTORY_LOG=info \
 "$GE/files/bin/wine" "$OUT/victory.exe" run "$GAME" --execute
 ```
 
-Check the stack first: `vulkaninfo --summary` should name `radv` or `anv` with an `apiVersion` of at
-least 1.3. Play script, keyboard-as-gamepad map, switches and troubleshooting are in
-**[docs/linux.md](docs/linux.md)**. The sequence above has not been run as written on a fresh prefix;
-if it fails, open an issue with the last 50 lines of the log.
+Check the stack first: `vulkaninfo --summary` should show `driverName` `radv`, `Intel open-source Mesa
+driver` (ANV) or `nvk`, with an `apiVersion` of at least 1.3. The first run creates the Wine prefix by
+itself, about 30 s. Play script, keyboard-as-gamepad map, switches and troubleshooting are in
+**[docs/linux.md](docs/linux.md)**.
+
+The build and the bind-only part above were run as written on a fresh clone and an empty prefix: the
+load prints `missing=0` for the title and its DLLs, and without `--execute` it only lists what it would
+load. A full in-game launch on a fresh prefix is still being verified, so treat the numbers above as
+coming from our test machines. If it fails, open an issue with the last 50 lines of the log.
 
 ## How it works
 
@@ -163,13 +171,15 @@ long-term idea, are in [docs/ROADMAP.md](docs/ROADMAP.md).
 It lives in `tools/scarlight-launcher/` and lands in a separate pull request; until then,
 [docs/linux.md](docs/linux.md) has the manual setup.
 
+<a id="help-us-test"></a>
+
 ## Help us test
 
 **A run on another Mesa GPU is as useful as a patch.** AMD (RDNA1-3, Vega) and Intel (Arc, Xe) are
 both wanted; only an RX 9070 XT, with one title, has been tried so far. Send the GPU and driver, the
-Mesa version and where it came from, kernel, distribution and session, Proton build, vkd3d-proton
-version, the commit you built, how far it got with the frame lines, what looked wrong, and the last
-~50 lines of the log — text and logs only.
+Mesa version (`driverName`, `driverVersion`, `apiVersion`) and where it came from, kernel,
+distribution and session, Proton build, vkd3d-proton version, the commit you built, how far it got
+with the frame lines, what looked wrong, and the last ~50 lines of the log — text and logs only.
 
 Use the [test report form](https://github.com/pablogonz12/Scarlight/issues/new?template=test-report.yml)
 or the [bug report form](https://github.com/pablogonz12/Scarlight/issues/new?template=bug-report.yml);
