@@ -14,7 +14,7 @@ behaviour without a major version bump.
   on Mesa's open Vulkan drivers, RADV first.
 - Boot, menus, audio and gamepad input work; menus run at 30 fps.
 - Built and run with one title so far; its world renders lit and textured on an RX 9070 XT with
-  Mesa 26.3.1 RADV: **1.45-1.6 fps** on the
+  Mesa 26.3.1 RADV: **1.45-1.7 fps** on the
   fixed test scene in current builds, **up to 3.0 fps** in one earlier build.
 - Offline shader translation: **751 of 751** world programs translate.
 - Diagnostics build with per-frame statistics on copies, read-back, memory watches and pipelines.

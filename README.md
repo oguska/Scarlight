@@ -46,7 +46,7 @@ tried.
 | Area | State |
 |---|---|
 | Boot, menus, audio, gamepad | Work; menus at 30 fps |
-| World, fixed test scene | Lit and textured. **3.0 fps** on tag `keep/best-fx-578d459c` (one run, Microsoft's `d3dcompiler_47` beside the exe); **1.45-1.6 fps** on six builds of the current base (one run each) |
+| World, fixed test scene | Lit and textured. **3.0 fps** on tag `keep/best-fx-578d459c` (one run, Microsoft's `d3dcompiler_47` beside the exe); **1.45-1.7 fps** on nine builds of the current base (one run each) |
 | Time to the world | 133-218 s (three builds) |
 | Shader translation | **751 / 751** world programs of the test title translate offline |
 | Faces | **Some characters' faces still fail to render** (regressed again on 25 Nov, under investigation) |
