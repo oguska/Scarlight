@@ -8,15 +8,15 @@
 [![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-ff7a3d?style=flat-square&labelColor=14072c)](LICENSE)
 [![Last commit](https://img.shields.io/github/last-commit/pablogonz12/Scarlight?style=flat-square&labelColor=14072c&color=19d8ff)](https://github.com/pablogonz12/Scarlight/commits/main)
 [![Mesa: built for it](https://img.shields.io/badge/Mesa-built%20for%20it-ff2e63?style=flat-square&labelColor=14072c)](https://docs.mesa3d.org/)
-[![Drivers: RADV · ANV · NVK](https://img.shields.io/badge/drivers-RADV%20%C2%B7%20ANV%20%C2%B7%20NVK-ff7a3d?style=flat-square&labelColor=14072c)](https://docs.mesa3d.org/drivers.html)
+[![Drivers: RADV · ANV](https://img.shields.io/badge/drivers-RADV%20%C2%B7%20ANV-ff7a3d?style=flat-square&labelColor=14072c)](https://docs.mesa3d.org/drivers.html)
 [![Vulkan 1.3](https://img.shields.io/badge/Vulkan-1.3%2B-19d8ff?style=flat-square&labelColor=14072c)](https://www.vulkan.org/)
 [![Stars](https://img.shields.io/github/stars/pablogonz12/Scarlight?style=flat-square&labelColor=14072c&color=ffb347)](https://github.com/pablogonz12/Scarlight/stargazers)
 
 # Scarlight: a Linux-first console translation layer, built and tuned for Mesa
 
-**It runs the console build on Linux through Proton — Wine and vkd3d-proton — on Mesa's open Vulkan drivers.<br>RADV (AMD) is the reference, ANV (Intel) is next, NVK (NVIDIA) after that: every AMD and Intel GPU Mesa supports is the target, on any Linux with a recent kernel and Mesa.<br>Mesa is open source, so the driver is ours to read, tune and fix, and every part of this project is developed and measured on that stack.**
+**It runs the console build on Linux through Proton — Wine and vkd3d-proton — on Mesa's open Vulkan drivers.<br>RADV (AMD) is the reference and ANV (Intel) is next: every AMD and Intel GPU Mesa supports is the target, on any Linux with a recent kernel and Mesa.<br>Mesa is open source, so the driver is ours to read, tune and fix, and every part of this project is developed and measured on that stack.**
 
-<sub>[What it is](#what-it-is) · [Why Mesa](#why-mesa) · [Status](#status) · [Hardware](#hardware) · [Requirements](#requirements) · [Quick start](#quick-start) · [How it works](#how-it-works) · [Roadmap](#roadmap) · [Contribute](#contribute) · [Credits](#credits) · [Licence](#licence)</sub>
+<sub>[What it is](#what-it-is) · [Why Mesa](#why-mesa) · [Status](#status) · [Hardware](#hardware) · [Requirements](#requirements) · [Quick start](#quick-start) · [How it works](#how-it-works) · [Roadmap](#roadmap) · [Help us test](#help-us-test) · [Contribute](#contribute) · [Who is behind this](#who-is-behind-this) · [Credits](#credits) · [Licence](#licence)</sub>
 
 </div>
 
@@ -71,7 +71,8 @@ other GPU has been tried.
 | World, fixed test scene | Lit and textured; **1.45-1.6 fps** in current builds, **up to 3.0 fps** in one earlier build (one run each) |
 | Time to the world | 133-218 s |
 | Shader translation | **751 / 751** world programs translate offline |
-| Picture | Faces and close-up character detail missing; walls missing in some builds; shadowed areas dark |
+| Faces | **Some characters' faces still fail to render** (regressed again on 25 Nov, under investigation) |
+| Picture | Close-up character detail missing in some builds; walls missing in some builds; shadowed areas dark |
 | Stability | Some builds hang at boot or at world entry; async write-back is experimental |
 | **Playable** | **No** |
 
@@ -83,7 +84,7 @@ little, and the fastest run above is not the newest build.
 
 | **Tested** | **Expected** | **Unknown** |
 |---|---|---|
-| **RX 9070 XT (RDNA4) · RADV**<br>The only hardware this has been run on: every number on this page comes from it | **RDNA3, RDNA2, RDNA1 (RX 7000 / 6000 / 5000) · RADV**<br>Same driver, older generations. Not yet checked.<br><br>**Arc A-series, Arc B-series, Xe2 · ANV**<br>A second open driver with the same Vulkan 1.3 baseline. Not yet checked. | **GeForce · NVK**<br>Planned after ANV. Not yet checked.<br><br>**Intel Gen9 and older integrated · ANV**, **GCN/Polaris and older · RADV**, **AMD APUs**, any Mesa older than ours<br>Not yet checked. |
+| **RX 9070 XT (RDNA4) · RADV**<br>The only hardware this has been run on: every number on this page comes from it | **RDNA3, RDNA2, RDNA1 (RX 7000 / 6000 / 5000) · RADV**<br>Same driver, older generations. Not yet checked.<br><br>**Arc A-series, Arc B-series, Xe2 · ANV**<br>A second open driver with the same Vulkan 1.3 baseline. Not yet checked. | **Intel Gen9 and older integrated · ANV**, **GCN/Polaris and older · RADV**, **AMD APUs**, any Mesa older than ours<br>Not yet checked. |
 
 A row moves to "Tested" with a run, not an opinion: one report with the details below is enough. If
 your card is in the middle or right column, [tell us what it does](#help-us-test).
@@ -95,7 +96,7 @@ Not supported: native Windows and NVIDIA's proprietary driver.
 | Need | Minimum | Tested here |
 |---|---|---|
 | **Linux kernel** | recent enough to drive your card (`amdgpu`, `i915`/`xe`); a hard minimum **to be confirmed** from test reports | 7.3.6 |
-| **Mesa** | a Mesa whose RADV/ANV/NVK exposes **Vulkan 1.3**; the oldest working version is **to be confirmed** — we test on one version only | 26.3.1 |
+| **Mesa** | a Mesa whose RADV or ANV driver exposes **Vulkan 1.3**; the oldest working version is **to be confirmed** — we test on one version only | 26.3.1 |
 | **Vulkan** | **1.3**, which is what vkd3d-proton needs | 1.4.363, RADV `GFX1201` |
 | **Wine** | a Proton or GE-Proton build, called through its own `wine` binary, not the `proton` script | GE-Proton11-14 |
 | **Direct3D 12** | [vkd3d-proton](https://github.com/HansKristian-Work/vkd3d-proton) **master** — release 3.1 crashed at world entry | master |
@@ -107,7 +108,7 @@ You also need, outside this repository: your own legally obtained copy of the ti
 stop-gap — Microsoft's 64-bit `d3dcompiler_47.dll` from software you are licensed to use, because
 Wine's built-in one rejects some runtime shaders.
 
-Check the stack before you build: `vulkaninfo --summary` should name `radv`, `anv` or `nvk`, with an
+Check the stack before you build: `vulkaninfo --summary` should name `radv` or `anv`, with an
 `apiVersion` of at least 1.3.
 
 ## Quick start
@@ -195,31 +196,53 @@ part of the work.
 These are goals, not results. Picture comes before speed throughout: a speed change that costs
 picture quality is not kept.
 
+## Help us test
+
+**A run on another Mesa GPU is as useful as a patch.** AMD (RDNA1-3, Vega) and Intel (Arc, Xe) are
+both wanted; the only card tested so far is an RX 9070 XT, so every report from another Mesa GPU adds
+something this project does not have yet.
+
+Send exactly this, in text and logs only — never screenshots, game files or dumps of the title's
+data:
+
+1. **GPU** model.
+2. **Mesa version** and where it came from: distribution package, `mesa-git`, a local build — plus
+   the driver name from `vulkaninfo --summary` (`radv` or `anv`).
+3. **Kernel version** (`uname -r`).
+4. **Distribution** and session: Wayland or X11.
+5. **Proton build** (GE-Proton11-14, Proton Experimental, …) and how you call it, plus your
+   **vkd3d-proton** version and how it is selected.
+6. The **Scarlight commit** you built.
+7. How far it got and the numbers: time to the world, menu and world frame rate, the frame lines if
+   your run prints them.
+8. What looked wrong: faces, close-up detail, walls, black or flat-lit areas, colours, intro order.
+9. The **log tail** with `VICTORY_LOG=info` — the last ~50 lines, including `does not translate`,
+   dropped or "being made" pipelines, device-removed and crash lines.
+
+The [test report form](https://github.com/pablogonz12/Scarlight/issues/new?template=test-report.yml)
+asks for all of it; use the [bug report form](https://github.com/pablogonz12/Scarlight/issues/new?template=bug-report.yml)
+for a crash or a wrong picture. If Scarlight breaks on your card that is our bug, and if the fault is
+in the driver we take it to Mesa.
+
 ## Contribute
 
-**A test report from another Mesa GPU is as useful as a patch.** AMD (RDNA1-3, Vega), Intel (Arc,
-Xe) and NVIDIA (NVK, later) are all wanted.
+Pull requests target `main` and go in after CI and review. [CONTRIBUTING.md](CONTRIBUTING.md) has the
+build, test, naming and asset rules. Docs, commits and PRs never name the title or its developer; no
+game files, screenshots or dumps are ever committed ([asset policy](docs/asset-policy.md)). Parts of
+the project, this page included, are written with AI coding tools.
 
-What makes a useful report, in **text and logs only** — never screenshots, game files or dumps of
-the title's data:
+If you want a Linux-first project to keep moving, star the repository and tell us what your card does.
 
-1. GPU, driver (`radv`, `anv`, `nvk`), Mesa version and where it came from (distribution,
-   `mesa-git`, a local build).
-2. Kernel version, distribution, Wayland or X11.
-3. The Scarlight commit you built, and your GE-Proton and vkd3d-proton versions.
-4. Did it reach the world? Time to the world, and the frame lines if your run prints them.
-5. What looked wrong: missing walls or faces, black or flat-lit areas, wrong colours, out-of-order
-   intro frames.
-6. The log with `VICTORY_LOG=info`: `does not translate`, dropped or "being made" pipelines,
-   device-removed and crash lines.
+## Who is behind this
 
-Issue forms ask for exactly that. Pull requests target `main` and go in after CI and review:
-[CONTRIBUTING.md](CONTRIBUTING.md) has the build, test, naming and asset rules. Docs, commits and
-PRs never name the title or its developer; game files are never committed
-([asset policy](docs/asset-policy.md)). Parts of the project, this page included, are written with
-AI coding tools.
+Scarlight is currently a one-person project. I write it and test it on one machine — the RX 9070 XT
+above — and I lean heavily on AI coding assistants for the code. Nothing goes in on trust: every
+change is checked by the test suite, an offline shader check of the whole 751-program world set, and
+runs on real hardware, with the picture looked at before the frame rate.
 
-If you want a Linux + Mesa port to keep moving, star the repository and tell us what your card does.
+I cannot cover this alone, and the missing pieces are specific: people who know Mesa (RADV or ANV),
+Vulkan, vkd3d-proton, Wine or Rust, and people who own another Mesa GPU and can say what it does.
+Open an issue, send a test report, or take a roadmap item.
 
 ## Credits
 
