@@ -121,7 +121,9 @@ VKD3D_CONFIG=ignore_shared_fence VICTORY_LOG=info \
 The tag was built from a clean checkout on 25 Nov. The runs above used the maintainer's test
 scripts; this shortened command sequence has not been run as written on a fresh prefix. If it fails,
 please [open an issue](https://github.com/pablogonz12/Scarlight/issues/new/choose). A play script,
-controls and troubleshooting are in [docs/linux.md](docs/linux.md).
+controls and troubleshooting are in
+[docs/linux.md on `main`](https://github.com/pablogonz12/Scarlight/blob/main/docs/linux.md): the tag
+does not carry the guide, so read it there (the checkout replaces this page too).
 
 ## What's different
 

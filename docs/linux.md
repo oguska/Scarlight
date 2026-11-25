@@ -75,7 +75,7 @@ A gamepad works. Otherwise the keyboard acts as a pad while the title's window h
 |---|---|
 | Crash at world entry | Replace stock vkd3d-proton 3.1 DLLs with master's or GE-Proton11-14's |
 | Very slow, swapping | Close apps that hold RAM or GPU memory (local LLM servers, browsers) |
-| The title quits while waiting for the GPU | `VICTORY_NO_WATCHDOG=1` |
+| The title quits while waiting for the GPU | `VICTORY_NO_WATCHDOG=1` — builds with the watchdog hook only; `keep/good-0257-live2` has no such hook |
 | Freezes | Unset all experimental switches |
 | `victory` reports no paths | `victory config`; paths must be outside the repository |
 | RenderDoc installed and the title crashes | `VK_LOADER_LAYERS_DISABLE='*renderdoc*'` |
