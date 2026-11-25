@@ -8,6 +8,11 @@
 //! would have written (its unordered-access views and render targets), forgets
 //! a range again when work that runs writes it, and logs once per pair
 //! a reader that runs reading one of them, with the shader that was dropped.
+//!
+//! The call sites in `draw.rs` were upstream's since the 940d32f6 sync (they
+//! rewrote the draw path), so nothing calls this module: it stays compiled
+//! and unwired until the `VICTORY_PRODUCERS` diagnostics are wired back in.
+#![allow(dead_code)]
 
 use std::collections::{HashSet, VecDeque};
 use std::sync::Mutex;

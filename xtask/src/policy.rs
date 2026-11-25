@@ -28,37 +28,10 @@ const ALLOWED_NAMES: &[&str] = &[
 ];
 
 /// Paths explicitly exempted, with a reason. Keep this empty if at all possible.
-const EXCEPTIONS: &[(&str, &str)] = &[
-    (
-        "crates/victory-formats/src/bcpack-tables.bin",
-        "the BCPack format's constant tables: nothing decodes without them and they cannot be derived (owner's decision, 2026-11-23; docs/asset-policy.md)",
-    ),
-];
-
-/// Files whose type is not on the allowlist but which still get every other
-/// check (size, forbidden signatures, NUL bytes, encoded-data runs).
-const EXTENSION_EXCEPTIONS: &[(&str, &str)] = &[
-    (
-        "docs/brand/banner.svg",
-        "the README banner: a vector drawing of our own (wordmark strokes, tagline glyph outlines), text only",
-    ),
-    (
-        "docs/brand/logo.svg",
-        "the project logo: a hand-written vector drawing of our own, text only",
-    ),
-    (
-        "docs/brand/logo-mark.svg",
-        "the project mark: a hand-written vector drawing of our own, text only",
-    ),
-    (
-        "docs/brand/status.svg",
-        "the README pipeline-status graphic: a vector drawing of our own (label glyph outlines), text only",
-    ),
-    (
-        "docs/brand/divider.svg",
-        "the README section divider: a hand-written vector drawing of our own, text only",
-    ),
-];
+const EXCEPTIONS: &[(&str, &str)] = &[(
+    "crates/victory-formats/src/bcpack-tables.bin",
+    "the BCPack format's constant tables: nothing decodes without them and they cannot be derived (owner's decision, 2026-11-23; docs/asset-policy.md)",
+)];
 
 /// Signatures of formats that must never be committed.
 const FORBIDDEN_MAGIC: &[(&[u8], &str)] = &[
@@ -97,8 +70,7 @@ pub fn run(root: &Path, staged: bool) -> Result<()> {
                 Err(_) => continue,
             }
         };
-        let skip_extension = EXTENSION_EXCEPTIONS.iter().any(|(p, _)| p == path);
-        for problem in check_with(path, &content, skip_extension) {
+        for problem in check(path, &content) {
             violations.push(format!("{path}: {problem}"));
         }
     }
@@ -171,14 +143,7 @@ fn list_files(root: &Path, staged: bool) -> Result<Vec<String>> {
 }
 
 /// All problems with one file. Pure, for testing.
-#[cfg(test)]
 pub fn check(path: &str, content: &[u8]) -> Vec<String> {
-    check_with(path, content, false)
-}
-
-/// `check`, optionally skipping only the file-type allowlist (see
-/// `EXTENSION_EXCEPTIONS`).
-fn check_with(path: &str, content: &[u8], skip_extension: bool) -> Vec<String> {
     let mut problems = Vec::new();
     let name = path.rsplit('/').next().unwrap_or(path);
     let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
@@ -186,7 +151,7 @@ fn check_with(path: &str, content: &[u8], skip_extension: bool) -> Vec<String> {
         || ext
             .as_deref()
             .is_some_and(|e| ALLOWED_EXTENSIONS.contains(&e));
-    if !allowed && !skip_extension {
+    if !allowed {
         problems.push("file type not on the allowlist".to_owned());
     }
     if content.len() > MAX_FILE_SIZE {
@@ -206,6 +171,13 @@ fn check_with(path: &str, content: &[u8], skip_extension: bool) -> Vec<String> {
         && run > MAX_ENCODED_RUN
     {
         problems.push(format!("{run}-character hex/base64 run (embedded data?)"));
+    } else {
+        let digits = longest_hex_literal_run(content);
+        if digits > MAX_ENCODED_RUN {
+            problems.push(format!(
+                "{digits} hex digits in one run of \\x/0x literals (embedded data?)"
+            ));
+        }
     }
     problems
 }
@@ -216,9 +188,41 @@ fn longest_encoded_run(content: &[u8]) -> Option<usize> {
     content.split(|b| !is_payload(b)).map(<[u8]>::len).max()
 }
 
+/// Most hex digits in `\xNN` escapes or `0x` literals with only commas,
+/// whitespace or backslashes between them: a byte string or `xxd -i` array,
+/// which `longest_encoded_run` sees as many 3- or 4-character runs.
+/// shortcut: decimal arrays (`[77, 90, ...]`) still pass, add a literal count if one shows up.
+fn longest_hex_literal_run(content: &[u8]) -> usize {
+    let (mut i, mut run, mut longest) = (0, 0, 0);
+    while i < content.len() {
+        match &content[i..] {
+            [b'\\' | b'0', b'x' | b'X', rest @ ..] => {
+                let len = rest
+                    .iter()
+                    .take_while(|b| b.is_ascii_hexdigit() || **b == b'_')
+                    .count();
+                run += rest[..len].iter().filter(|b| b.is_ascii_hexdigit()).count();
+                longest = longest.max(run);
+                // Skip a type suffix such as `u8` or `u32`.
+                let suffix = rest[len..]
+                    .iter()
+                    .take_while(|b| b.is_ascii_alphanumeric())
+                    .count();
+                i += 2 + len + suffix;
+            }
+            [b, ..] if matches!(b, b',' | b'\\') || b.is_ascii_whitespace() => i += 1,
+            _ => {
+                run = 0;
+                i += 1;
+            }
+        }
+    }
+    longest
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{check, check_with};
+    use super::check;
 
     /// Enforces the policy wherever tests run, even in clones without the hook.
     #[test]
@@ -256,13 +260,40 @@ mod tests {
         assert!(!check("src/blob.rs", blob.as_bytes()).is_empty());
     }
 
+    /// Synthetic bytes, never game data.
+    fn synthetic(n: u32) -> impl Iterator<Item = u32> {
+        (0..n).map(|i| (i * 37 + 11) % 256)
+    }
+
     #[test]
-    fn extension_exception_still_runs_other_checks() {
-        let svg = b"<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>";
-        assert!(check_with("docs/brand/logo.svg", svg, true).is_empty());
-        let embedded = format!("<svg><image href=\"data:image/png;base64,{}\"/></svg>", "A1".repeat(400));
-        assert!(!check_with("docs/brand/logo.svg", embedded.as_bytes(), true).is_empty());
-        assert!(!check_with("docs/brand/logo.svg", &vec![b'a'; 600 * 1024], true).is_empty());
-        assert!(!check_with("docs/brand/logo.svg", b"MZ\x90\0", true).is_empty());
+    fn rejects_data_smuggled_as_an_escaped_byte_string() {
+        // 4096 bytes as one unbroken `\xNN` hex run, the shape a byte-string
+        // literal of copied data takes.
+        let esc: String = synthetic(4096).map(|b| format!("\\x{b:02x}")).collect();
+        let src = format!("pub const DATA: &[u8] = b\"{esc}\";\n");
+        assert!(
+            !check("src/data.rs", src.as_bytes()).is_empty(),
+            "{} bytes of \\x-escaped hex passed",
+            src.len()
+        );
+    }
+
+    #[test]
+    fn rejects_data_smuggled_as_a_hex_byte_array() {
+        // `xxd -i` style: 4096 bytes as hex literals.
+        let lits: Vec<String> = synthetic(4096).map(|b| format!("0x{b:02x}")).collect();
+        let src = format!("pub const DATA: [u8; 4096] = [{}];\n", lits.join(", "));
+        assert!(
+            !check("src/data.rs", src.as_bytes()).is_empty(),
+            "{} bytes of hex array passed",
+            src.len()
+        );
+        // A short constant table, like the 16-entry ones in the tree, stays legal.
+        let table: Vec<String> = synthetic(16).map(|w| format!("0x{w:08x}_u32")).collect();
+        let src = format!(
+            "const T: [u32; 16] = [\n    {},\n];\n",
+            table.join(",\n    ")
+        );
+        assert!(check("src/table.rs", src.as_bytes()).is_empty());
     }
 }
