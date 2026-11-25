@@ -60,6 +60,25 @@ A row moves when a report shows the build reaching the world and the picture bei
 look at. A card that fails is at least as useful: a failure on a gated path is our bug, and a failure
 in the driver goes to Mesa with the report attached.
 
+The first question about any report is which optional features the driver actually gave us: a run
+that quietly takes the non-mesh or non-ray path looks like a picture bug. So the build says it, once,
+before the first frame: one `info` line named `host device features`, in the same shape on every
+card —
+
+```
+features=adapter=<name> vendor=0x1002 device=0x7550 revision=0xc0 subsystem=0x0000
+  shader_model=6.6 mesh_tier=0 raytracing_tier=11 int64_atomics=true int16_ops=true
+  upload_heaps=false waves=32-64 mesh=false
+```
+
+— pasted as it comes out (one line). It carries the adapter name, the vendor and device ids (which
+name the chip, and so the driver generation), the highest shader model, the mesh-shader and
+ray-tracing tiers, 64-bit integer atomics, 16-bit shader ops, CPU-accessible upload heaps (the
+D3D12 query behind a host-memory import path) and the wave sizes. A feature at its lowest value is
+the answer to "why did this path not run": `mesh_tier=0` or `mesh=false` means every mesh program was
+refused, `raytracing_tier=0` that ray work took the fallback. DXGI does not carry the driver's own
+version, so the Mesa version still comes from `vulkaninfo` as the form asks.
+
 ## Known driver-side questions
 
 These are open questions, not conclusions. Each one is written down so a report can settle it:

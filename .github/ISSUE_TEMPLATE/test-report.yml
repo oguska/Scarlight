@@ -110,8 +110,11 @@ body:
     attributes:
       label: Log tail
       description: |
-        The last ~50 lines with `VICTORY_LOG=info`, including `does not translate`, dropped or
-        "being made" pipelines, device-removed and crash lines. Trim anything that is game content.
+        The `host device features` line (an `info` line, logged once at startup: adapter, vendor and
+        device id, shader model, mesh and ray-tracing tiers, 64-bit atomics, 16-bit ops, upload heaps,
+        wave sizes), then the last ~50 lines with `VICTORY_LOG=info`, including `does not translate`,
+        dropped or "being made" pipelines, device-removed and crash lines. Trim anything that is game
+        content.
       render: shell
     validations:
       required: true

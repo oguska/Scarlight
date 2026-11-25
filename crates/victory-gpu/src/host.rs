@@ -215,7 +215,7 @@ fn create() -> windows::core::Result<Host> {
             })?;
         let dsv_size = device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
         tracing::info!("host D3D12 device ready");
-        Ok(Host {
+        let host = Host {
             device,
             queue,
             fence,
@@ -229,7 +229,11 @@ fn create() -> windows::core::Result<Host> {
             messages,
             next_rtv: AtomicU32::new(0),
             presenter: Mutex::new(None),
-        })
+        };
+        // The one feature line of the process, before the first frame: the
+        // rest of the run decides on it, and a report needs it.
+        let _ = host.features();
+        Ok(host)
     }
 }
 
@@ -258,6 +262,71 @@ fn warp_adapter() -> windows::core::Result<IDXGIAdapter> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The one line a report pastes carries every field, in the same order
+    /// on every card (`docs/hardware.md` shows the shape).
+    #[test]
+    fn the_feature_line_names_every_field() {
+        let features = Features {
+            adapter: Some(Adapter {
+                name: "Test GPU".to_owned(),
+                vendor: 0x1002,
+                device: 0x7550,
+                revision: 0xc0,
+                subsystem: 0,
+            }),
+            shader_model: 0x66,
+            mesh_tier: 10,
+            raytracing_tier: Some(11),
+            int64_shader_ops: true,
+            int16_shader_ops: true,
+            upload_heaps: false,
+            waves_min: 32,
+            waves_max: 64,
+            mesh: true,
+        };
+        let line = features.to_string();
+        for field in [
+            "adapter=Test GPU",
+            "vendor=0x1002",
+            "device=0x7550",
+            "revision=0xc0",
+            "shader_model=6.6",
+            "mesh_tier=10",
+            "raytracing_tier=11",
+            "int64_atomics=true",
+            "int16_ops=true",
+            "upload_heaps=false",
+            "waves=32-64",
+            "mesh=true",
+        ] {
+            assert!(line.contains(field), "{field} missing from {line}");
+        }
+        // A device that names no adapter and answers no tier still gives a
+        // line a report can carry, never a panic or a missing value.
+        let bare = Features {
+            adapter: None,
+            shader_model: 0,
+            raytracing_tier: None,
+            mesh: false,
+            ..features
+        };
+        let text = bare.to_string();
+        assert!(text.contains("adapter=(unnamed adapter)"), "{text}");
+        assert!(text.contains("shader_model=-"), "{text}");
+        assert!(text.contains("raytracing_tier=-"), "{text}");
+    }
+
+    /// The device this runs on answers the line, and the mesh answer the
+    /// pipeline check uses is the one in it.
+    #[test]
+    fn the_device_answers_the_feature_line() {
+        let Some(host) = host() else { return };
+        let features = host.features();
+        println!("host device features: {features}");
+        assert_eq!(host.mesh_shaders(), features.mesh);
+        assert_eq!(host.mesh_shaders(), features.mesh_tier != 0 && features.shader_model >= 0x66);
+    }
 
     #[test]
     fn list_scratch_reclaims_chunks_unused_by_two_recordings() {
@@ -589,40 +658,198 @@ struct Deferred {
     budget_zeroed: bool,
 }
 
-impl Host {
-    /// Whether the host runs mesh shaders at shader model 6.6 (translated
-    /// mesh shaders need both); logged once.
-    pub(crate) fn mesh_shaders(&self) -> bool {
-        static MESH: OnceLock<bool> = OnceLock::new();
-        *MESH.get_or_init(|| {
-            let mut options = D3D12_FEATURE_DATA_D3D12_OPTIONS7::default();
-            let mut model = D3D12_FEATURE_DATA_SHADER_MODEL {
-                HighestShaderModel: D3D_SHADER_MODEL_6_6,
-            };
-            // SAFETY: each query writes its own structure of the given size.
-            let ok = unsafe {
-                self.device
+/// The adapter a host device runs on, as DXGI describes it. The ids name
+/// the chip (and so the driver generation: RADV, ANV, NVK), which is what a
+/// report is sorted by; DXGI does not carry the driver's own version.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Adapter {
+    pub(crate) name: String,
+    pub(crate) vendor: u32,
+    pub(crate) device: u32,
+    pub(crate) revision: u32,
+    pub(crate) subsystem: u32,
+}
+
+/// What the host device gives us of the optional features the translation
+/// and the pipeline cache care about, asked once (see [`Host::features`]).
+#[derive(Debug)]
+pub(crate) struct Features {
+    /// `None` when DXGI does not name the adapter (the host still runs).
+    pub(crate) adapter: Option<Adapter>,
+    /// The highest shader model the device reports (`0x66` = 6.6), or 0.
+    pub(crate) shader_model: i32,
+    /// `D3D12_MESH_SHADER_TIER` (`0` = not supported).
+    pub(crate) mesh_tier: i32,
+    /// `D3D12_RAYTRACING_TIER` (`0` = not supported); `None` if the device
+    /// does not answer for it.
+    pub(crate) raytracing_tier: Option<i32>,
+    /// 64-bit integer operations in shaders (`D3D12_OPTIONS1`).
+    pub(crate) int64_shader_ops: bool,
+    /// 16-bit shader operations (`D3D12_OPTIONS4`).
+    pub(crate) int16_shader_ops: bool,
+    /// CPU-accessible device-local heaps (GPU upload heaps,
+    /// `D3D12_OPTIONS16`): the D3D12 query behind a host-memory import
+    /// path, so a driver without it takes the copy path.
+    pub(crate) upload_heaps: bool,
+    /// The wave sizes the device runs (`D3D12_OPTIONS1`).
+    pub(crate) waves_min: u32,
+    pub(crate) waves_max: u32,
+    /// Mesh shaders at shader model 6.6: what a translated mesh shader
+    /// needs ([`Host::mesh_shaders`]).
+    pub(crate) mesh: bool,
+}
+
+impl Features {
+    /// The highest shader model as `major.minor` (`6.6`), or `-` when the
+    /// device did not say.
+    fn shader_model_text(&self) -> String {
+        match self.shader_model {
+            0 => "-".to_owned(),
+            sm => format!("{}.{}", sm >> 4, sm & 0xf),
+        }
+    }
+}
+
+impl std::fmt::Display for Features {
+    /// One line, the shape a test report pastes: adapter, driver ids, then
+    /// every optional feature that changes which path a run takes.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (name, vendor, device, revision, subsystem) = match &self.adapter {
+            Some(a) => (
+                a.name.clone(),
+                format!("{:#06x}", a.vendor),
+                format!("{:#06x}", a.device),
+                format!("{:#04x}", a.revision),
+                format!("{:#06x}", a.subsystem),
+            ),
+            None => ("(unnamed adapter)".to_owned(), "-".to_owned(), "-".to_owned(),
+                     "-".to_owned(), "-".to_owned()),
+        };
+        write!(
+            f,
+            "adapter={name} vendor={vendor} device={device} revision={revision} \
+             subsystem={subsystem} shader_model={} mesh_tier={} raytracing_tier={} \
+             int64_atomics={} int16_ops={} upload_heaps={} waves={}-{} mesh={}",
+            self.shader_model_text(),
+            self.mesh_tier,
+            self.raytracing_tier
+                .map_or_else(|| "-".to_owned(), |t| t.to_string()),
+            self.int64_shader_ops,
+            self.int16_shader_ops,
+            self.upload_heaps,
+            self.waves_min,
+            self.waves_max,
+            self.mesh,
+        )
+    }
+}
+
+/// The adapter behind `device`, from its LUID (DXGI lists the same
+/// adapters D3D12 makes devices on).
+fn adapter_of(device: &ID3D12Device) -> Option<Adapter> {
+    // SAFETY: plain DXGI calls; a `None` is a device from another process.
+    unsafe {
+        let luid = device.GetAdapterLuid();
+        let factory: IDXGIFactory1 = CreateDXGIFactory1().ok()?;
+        let mut i = 0;
+        while let Ok(adapter) = factory.EnumAdapters1(i) {
+            let desc = adapter.cast::<IDXGIAdapter1>().ok()?.GetDesc1().ok()?;
+            let same = desc.AdapterLuid.LowPart == luid.LowPart
+                && desc.AdapterLuid.HighPart == luid.HighPart;
+            if same {
+                let end = desc
+                    .Description
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(desc.Description.len());
+                return Some(Adapter {
+                    name: String::from_utf16_lossy(&desc.Description[..end]),
+                    vendor: desc.VendorId,
+                    device: desc.DeviceId,
+                    revision: desc.Revision,
+                    subsystem: desc.SubSysId,
+                });
+            }
+            i += 1;
+        }
+        None
+    }
+}
+
+/// Asks the device for the optional features ([`Features`]) and logs them
+/// as one line; `waves` is [`Host::target`]'s answer, from the same
+/// `D3D12_OPTIONS1` query.
+fn features_of(device: &ID3D12Device, waves: victory_shader::emit::Target) -> Features {
+    /// `device.CheckFeatureSupport` for one structure, false when the
+    /// device does not answer for that feature.
+    macro_rules! ask {
+        ($feature:expr, $data:expr) => {{
+            let data = &mut $data;
+            // SAFETY: the query writes the structure it is given, of the
+            // size given.
+            unsafe {
+                device
                     .CheckFeatureSupport(
-                        D3D12_FEATURE_D3D12_OPTIONS7,
-                        (&raw mut options).cast(),
-                        size_of_val(&options) as u32,
+                        $feature,
+                        std::ptr::from_mut(data).cast(),
+                        size_of_val(data) as u32,
                     )
                     .is_ok()
-                    && self
-                        .device
-                        .CheckFeatureSupport(
-                            D3D12_FEATURE_SHADER_MODEL,
-                            (&raw mut model).cast(),
-                            size_of_val(&model) as u32,
-                        )
-                        .is_ok()
-            };
-            let mesh = ok
-                && options.MeshShaderTier != D3D12_MESH_SHADER_TIER_NOT_SUPPORTED
-                && model.HighestShaderModel.0 >= D3D_SHADER_MODEL_6_6.0;
-            tracing::info!(mesh, "host mesh shader support");
-            mesh
-        })
+            }
+        }};
+    }
+    let mut options1 = D3D12_FEATURE_DATA_D3D12_OPTIONS1::default();
+    let mut options4 = D3D12_FEATURE_DATA_D3D12_OPTIONS4::default();
+    let mut options5 = D3D12_FEATURE_DATA_D3D12_OPTIONS5::default();
+    let mut options7 = D3D12_FEATURE_DATA_D3D12_OPTIONS7::default();
+    let mut options16 = D3D12_FEATURE_DATA_D3D12_OPTIONS16::default();
+    let mut model = D3D12_FEATURE_DATA_SHADER_MODEL {
+        HighestShaderModel: D3D_SHADER_MODEL_6_6,
+    };
+    let ok1 = ask!(D3D12_FEATURE_D3D12_OPTIONS1, options1);
+    let ok4 = ask!(D3D12_FEATURE_D3D12_OPTIONS4, options4);
+    let ok5 = ask!(D3D12_FEATURE_D3D12_OPTIONS5, options5);
+    let ok7 = ask!(D3D12_FEATURE_D3D12_OPTIONS7, options7);
+    let ok16 = ask!(D3D12_FEATURE_D3D12_OPTIONS16, options16);
+    let ok_model = ask!(D3D12_FEATURE_SHADER_MODEL, model);
+    let features = Features {
+        adapter: adapter_of(device),
+        shader_model: if ok_model {
+            model.HighestShaderModel.0
+        } else {
+            0
+        },
+        mesh_tier: if ok7 { options7.MeshShaderTier.0 } else { 0 },
+        raytracing_tier: ok5.then_some(options5.RaytracingTier.0),
+        int64_shader_ops: ok1 && options1.Int64ShaderOps.as_bool(),
+        int16_shader_ops: ok4 && options4.Native16BitShaderOpsSupported.as_bool(),
+        upload_heaps: ok16 && options16.GPUUploadHeapSupported.as_bool(),
+        waves_min: waves.lanes_min,
+        waves_max: waves.lanes_max,
+        mesh: ok7
+            && ok_model
+            && options7.MeshShaderTier != D3D12_MESH_SHADER_TIER_NOT_SUPPORTED
+            && model.HighestShaderModel.0 >= D3D_SHADER_MODEL_6_6.0,
+    };
+    tracing::info!(features = %features, "host device features");
+    features
+}
+
+impl Host {
+    /// The host device's optional features, asked once per process and
+    /// logged as one line at [`Host::create`] (the first use of the host):
+    /// a run that quietly takes the non-mesh or non-ray path is then
+    /// visible in the log instead of looking like a picture bug.
+    /// `mesh_shaders` and `target` answer from here.
+    pub(crate) fn features(&self) -> &'static Features {
+        static FEATURES: OnceLock<Features> = OnceLock::new();
+        FEATURES.get_or_init(|| features_of(&self.device, self.target()))
+    }
+
+    /// Whether the host runs mesh shaders at shader model 6.6 (translated
+    /// mesh shaders need both).
+    pub(crate) fn mesh_shaders(&self) -> bool {
+        self.features().mesh
     }
 
     /// The wave sizes the host runs (D3D12 options 1), which translated
