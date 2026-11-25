@@ -15,7 +15,15 @@ const MAX_ENCODED_RUN: usize = 512;
 
 const ALLOWED_EXTENSIONS: &[&str] = &[
     "rs", "toml", "md", "txt", "lock", "yml", "yaml", "json", "hlsl", "hlsli", "ps1", "cmd", "sh",
+    "env",
 ];
+/// Two-part extensions, matched as a suffix of the name (`x.desktop.in` is not
+/// an `.in` file we can judge by extension alone).
+const ALLOWED_NAME_SUFFIXES: &[&str] = &["desktop.in"];
+/// Extensionless files are accepted only here, and only when they are scripts:
+/// a `#!` first line is a text file we wrote, not a blob.
+const SCRIPT_DIR_PREFIX: &str = "tools/";
+const SCRIPT_SHEBANG: &[u8] = b"#!";
 const ALLOWED_NAMES: &[&str] = &[
     ".gitignore",
     ".gitattributes",
@@ -181,7 +189,9 @@ fn check_with(path: &str, content: &[u8], skip_extension: bool) -> Vec<String> {
     let allowed = ALLOWED_NAMES.contains(&name)
         || ext
             .as_deref()
-            .is_some_and(|e| ALLOWED_EXTENSIONS.contains(&e));
+            .is_some_and(|e| ALLOWED_EXTENSIONS.contains(&e))
+        || ALLOWED_NAME_SUFFIXES.iter().any(|s| name.ends_with(s))
+        || (ext.is_none() && is_tool_script(path, content));
     if !allowed && !skip_extension {
         problems.push("file type not on the allowlist".to_owned());
     }
@@ -204,6 +214,13 @@ fn check_with(path: &str, content: &[u8], skip_extension: bool) -> Vec<String> {
         problems.push(format!("{run}-character hex/base64 run (embedded data?)"));
     }
     problems
+}
+
+/// An extensionless file is allowed only under `tools/` and only when it starts
+/// with a `#!` line: the launcher scripts we ship there are text, but the name
+/// carries no extension the allowlist could judge.
+fn is_tool_script(path: &str, content: &[u8]) -> bool {
+    path.starts_with(SCRIPT_DIR_PREFIX) && content.starts_with(SCRIPT_SHEBANG)
 }
 
 /// Longest run of characters that could be hex or base64 payload.
@@ -250,6 +267,29 @@ mod tests {
     fn rejects_data_smuggled_into_text() {
         let blob = format!("const DATA: &str = \"{}\";", "A1".repeat(400));
         assert!(!check("src/blob.rs", blob.as_bytes()).is_empty());
+    }
+
+    #[test]
+    fn accepts_tool_scripts() {
+        assert!(check("tools/scarlight-launcher/scarlight", b"#!/usr/bin/env bash\n").is_empty());
+        assert!(
+            !check("tools/scarlight-launcher/scarlight", b"no shebang here\n").is_empty(),
+            "an extensionless file under tools/ must be a script"
+        );
+        assert!(
+            !check("scripts/thing", b"#!/bin/sh\n").is_empty(),
+            "extensionless scripts outside tools/ stay refused"
+        );
+    }
+
+    #[test]
+    fn accepts_env_profiles_and_desktop_templates() {
+        assert!(check("tools/x/examples/profile.env", b"PRESET='play'\n").is_empty());
+        assert!(check("tools/x/scarlight.desktop.in", b"[Desktop Entry]\n").is_empty());
+        assert!(
+            !check("tools/x/scarlight.desktop.in", b"MZ\x90\0").is_empty(),
+            "magic still wins"
+        );
     }
 
     #[test]
