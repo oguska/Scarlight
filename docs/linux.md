@@ -46,7 +46,7 @@ GAME_EXE="<the title's exe>"
 export WINEPREFIX="$HOME/.local/share/scarlight-prefix"
 export WINEDLLOVERRIDES="d3d12,d3d12core,dxgi,d3d11,d3d10core,d3dcompiler_47=n,b"
 export VKD3D_CONFIG=ignore_shared_fence
-export VICTORY_NO_WATCHDOG=1   # only on the title build it was written for; see switches below
+export VICTORY_HOOKS=1   # place the patches your build's profile lists; see title-profiles.md
 export VICTORY_GAME_DIR="$GAME_DIR"
 export VICTORY_LOG="${VICTORY_LOG:-info}"
 
@@ -75,7 +75,7 @@ A gamepad works. Otherwise the keyboard acts as a pad while the title's window h
 |---|---|
 | Crash at world entry | Replace stock vkd3d-proton 3.1 DLLs with master's or GE-Proton11-14's |
 | Very slow, swapping | Close apps that hold RAM or GPU memory (local LLM servers, browsers) |
-| The title quits while waiting for the GPU | `VICTORY_NO_WATCHDOG=1` — only on the title build the hook was written for; see [switches](#switches) |
+| The title quits while waiting for the GPU | `VICTORY_HOOKS=1` with a profile for that build (see [title profiles](title-profiles.md)); without one, nothing is patched |
 | Freezes | Unset all experimental switches |
 | `victory` reports no paths | `victory config`; paths must be outside the repository |
 | RenderDoc installed and the title crashes | `VK_LOADER_LAYERS_DISABLE='*renderdoc*'` |
@@ -95,7 +95,7 @@ Then point `EXE` in `play.sh` at `target/x86_64-pc-windows-msvc/diag/victory.exe
 
 | Switch | Effect |
 |---|---|
-| `VICTORY_NO_WATCHDOG=1` | Turns off the title's watchdog. Only the title build the hook was written for is patched: it checks the executable, and on any other build it changes nothing |
+| `VICTORY_HOOKS=1` | Places the code patches the profile for this build lists (see [title profiles](title-profiles.md)). Nothing is patched without a profile, and a patch whose bytes do not match is skipped. `VICTORY_NO_WATCHDOG=1`, the old name, still works |
 | `VICTORY_ASYNC_WRITEBACK=1` | **Experimental**, off by default; has hung the title in our tests |
 | `VICTORY_LOG=info` | Normal per-frame log; `VICTORY_LOG=<target>=debug` for debug output from one area |
 | `VICTORY_GPU_TIMING=1` | Diagnostics builds only: runs and waits for each command list on its own, and logs any list over 50 ms with its slowest commands. Serialising the submission changes what you measure; the per-frame copy statistics are logged without it |
@@ -114,8 +114,8 @@ detail to act on.
 | `VICTORY_CAPTURE=<dir>` | Saves presented frames (powers of two by default, or the list in `VICTORY_CAPTURE_FRAMES`) |
 | `VICTORY_DUMP_TARGETS=1` | With capture on, also saves every render target of those frames, in first-use order |
 | `VICTORY_CRASH_SAVE=<rva>:<len>,...` | Saves title memory to the cache folder on a crash |
-| `VICTORY_SKIP_PIPELINES=<hash>,...` | Omits draws and dispatches, indirect ones included, whose pipeline has a listed 16-digit shader hash |
-| `VICTORY_SKIP_WAVE64=mesh,compute` | Omits draws and dispatches whose pipeline has a 64-lane program in a listed stage (diagnostic on 32-lane hosts) |
+| `VICTORY_SKIP_PIPELINES=<hash>,...` | Omits draws and dispatches, indirect ones included, whose pipeline has a listed 16-digit shader hash; the profile's `skip.shaders` is used when this is unset |
+| `VICTORY_SKIP_WAVE64=mesh,compute` | Omits draws and dispatches whose pipeline has a 64-lane program in a listed stage (diagnostic on 32-lane hosts); the profile's `skip.stages` is used when this is unset |
 | `VICTORY_SHADER_LOOP_LIMIT=<n>` | Stops translated shader loops after `n` iterations per lane instead of 2^20; a real loop longer than `n` is cut short too, so 32 is a diagnostic value and 256-1024 a safer probe |
 | `VICTORY_D3D12_DEBUG=1` | Host D3D12 debug layer; `VICTORY_D3D12_GBV=1` adds GPU-based validation (slow) |
 | `VICTORY_D3D12_DRED=1` | On a GPU failure, logs the allocation hit and the commands in flight |

@@ -375,7 +375,7 @@ const PAGE: u64 = 64 << 10;
 /// `CopyPageMappingsBatchX(count, batches, pool, pool pages, flags)`: maps
 /// pages of a pool (memory the title mapped physical pages into) at the
 /// batches' addresses. The title streams textures into pool pages
-/// and maps them into its tiled heap this way (title+0xf2c470, ranges of
+/// and maps them into its tiled heap this way (ranges of
 /// one constant page or of unmapped pages). Done at once: every earlier
 /// submission has run.
 extern "system" fn copy_page_mappings(
@@ -457,9 +457,9 @@ const METHODS: [(usize, *const ()); 15] = [
 /// from 0x70 to 0x80: every slot from 0x70 on is two later (taken here as
 /// starting exactly at 0x70, the methods before it kept in place).
 /// Inferred from the title's calls: Signal 0x80 `(fence,
-/// value)`, timestamp frequency 0x90 (title+0x24841a6), suspend and resume
+/// value)`, timestamp frequency 0x90, suspend and resume
 /// 0xb8/0xc0, PresentX 0x100, the frame-token submission 0x118 `(count,
-/// lists, token, flags)` (title+0x24821dd).
+/// lists, token, flags)`.
 const fn newer_slot(slot: usize) -> usize {
     if slot >= 14 { slot + 2 } else { slot }
 }

@@ -17,3 +17,8 @@ game_dir = 'D:\victory-data\game'
 # Other Xbox Series titles used to test platform-level code.
 # env: VICTORY_TEST_TITLES (separated by ';')
 test_titles = []
+
+# Per-title profiles: what one title's build needs on this layer (code
+# hooks, shaders to skip). Default: 'titles' next to this file, else the
+# user's data directory. env: VICTORY_TITLES_DIR. See docs/title-profiles.md.
+# titles_dir = 'D:\victory-data\titles'

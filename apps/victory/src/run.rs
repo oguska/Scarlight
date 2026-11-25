@@ -22,10 +22,15 @@ pub fn run(
     let original = std::fs::read(exe).with_context(|| format!("reading {}", exe.display()))?;
     let prepared = victory_loader::prepare(&original)?;
     let hash = prepared.original_hash.to_hex();
-    match victory_game::identify(&hash) {
-        Some(build) => println!("build          {} ({hash})", build.label),
+    // The user's profile for this build, if there is one: it decides which
+    // hooks are placed and which work the GPU layer leaves out. Selected by
+    // the image's own hash, before any title code runs.
+    let profile = cfg.title_profile(&hash);
+    match &profile {
+        Some(found) => println!("build          {} ({hash})", found.label()),
         None => println!("build          unknown ({hash})"),
     }
+    victory_core::profile::set_current(profile);
 
     let images = cfg.cache_subdir("images")?;
     victory_hle::modules::d3d12x::use_shader_cache(cfg.cache_subdir("shaders")?);

@@ -281,7 +281,7 @@ impl Shadow {
     /// title's threads write the same buffers while the GPU runs (its
     /// command memory shares the big GPU heap with what shaders write), and
     /// putting back the copy's older bytes there broke the title's own
-    /// records (a fence list read as -1, title+0x4e9b54a). Returns the bytes
+    /// records (a fence list read as -1). Returns the bytes
     /// written.
     pub(crate) fn copy_back(&self, address: usize, len: usize, submission: u64) -> usize {
         let mut before = self.before.lock().unwrap_or_else(|e| e.into_inner());

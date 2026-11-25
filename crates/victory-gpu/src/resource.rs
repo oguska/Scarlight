@@ -1080,7 +1080,7 @@ pub(crate) extern "system" fn create_committed(
 }
 
 /// Device method 0x3f8, inferred from the title's calls
-/// (title+0x193e1b4: its back buffers, heap flag "allow display"): the
+/// (its back buffers, heap flag "allow display"): the
 /// committed resource creation of the enhanced-barrier interfaces,
 /// `(heap, heap flags, desc1, initial layout, clear value, protected
 /// session, castable format count, castable formats, iid, out)`. The host

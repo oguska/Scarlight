@@ -3,6 +3,10 @@
 //! Resolution order for each value: environment variable, then the config
 //! file (`VICTORY_CONFIG`, else `./victory.toml`), then the default.
 //! See `victory.example.toml` at the repository root.
+//!
+//! Per-title profiles (see [`crate::profile`]) live in a directory that is
+//! decided the same way: `VICTORY_TITLES_DIR`, else `[paths].titles_dir`,
+//! else `titles/` next to the config file, else the user's data directory.
 
 use std::path::{Path, PathBuf};
 
@@ -10,6 +14,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 
 use crate::policy::ensure_outside_repo;
+use crate::profile::Profile;
 
 #[derive(Debug, Default, Clone)]
 pub struct Config {
@@ -22,6 +27,8 @@ pub struct Config {
     pub data_dir: PathBuf,
     /// Other titles used to exercise platform-level code.
     pub test_titles: Vec<PathBuf>,
+    /// Where per-title profiles are read from (never the repository).
+    pub titles_dir: PathBuf,
     /// The config file that was read, if any.
     pub source: Option<PathBuf>,
 }
@@ -41,6 +48,7 @@ struct FilePaths {
     data_dir: Option<PathBuf>,
     #[serde(default)]
     test_titles: Vec<PathBuf>,
+    titles_dir: Option<PathBuf>,
 }
 
 impl Config {
@@ -91,11 +99,21 @@ impl Config {
         let data_dir = env_path("VICTORY_DATA_DIR")
             .or(file.data_dir)
             .map_or_else(|| default_dir("data"), Ok)?;
+        let titles_dir = env_path(crate::profile::DIR_ENV)
+            .or(file.titles_dir)
+            .or_else(|| {
+                source
+                    .as_deref()
+                    .and_then(|p| p.parent())
+                    .map(|dir| dir.join("titles"))
+            })
+            .map_or_else(|| default_dir("titles"), Ok)?;
         Ok(Config {
             game_dir: env_path("VICTORY_GAME_DIR").or(file.game_dir),
             cache_dir,
             data_dir,
             test_titles,
+            titles_dir,
             source,
         })
     }
@@ -106,6 +124,12 @@ impl Config {
             "no game directory configured: set VICTORY_GAME_DIR or [paths].game_dir in \
              victory.toml (see victory.example.toml)",
         )
+    }
+
+    /// The profile for an image whose BLAKE3 is `blake3_hex`, if the user
+    /// keeps one in [`Config::titles_dir`].
+    pub fn title_profile(&self, blake3_hex: &str) -> Option<Profile> {
+        crate::profile::for_build(&self.titles_dir, blake3_hex)
     }
 
     /// Returns `<cache>/<sub>`, creating it, after checking the asset policy.
@@ -174,6 +198,32 @@ mod tests {
         let env = |k: &str| (k == "VICTORY_TEST_TITLES").then(OsString::new);
         let cfg = Config::resolve(file, None, env).unwrap();
         assert_eq!(cfg.test_titles, vec![PathBuf::from("from-file")]);
+    }
+
+    #[test]
+    fn titles_dir_sits_next_to_the_config_file() {
+        let file = FilePaths::default();
+        let env = |_: &str| None;
+        let cfg = Config::resolve(file, Some("cfg/victory.toml".into()), env).unwrap();
+        assert_eq!(cfg.titles_dir, Path::new("cfg").join("titles"));
+    }
+
+    #[test]
+    fn titles_dir_env_and_file_win_in_that_order() {
+        let file = FilePaths {
+            titles_dir: Some("from-file".into()),
+            ..Default::default()
+        };
+        let env = |_: &str| None;
+        let cfg = Config::resolve(file, None, env).unwrap();
+        assert_eq!(cfg.titles_dir, PathBuf::from("from-file"));
+        let file = FilePaths {
+            titles_dir: Some("from-file".into()),
+            ..Default::default()
+        };
+        let env = |k: &str| (k == "VICTORY_TITLES_DIR").then(|| OsString::from("from-env"));
+        let cfg = Config::resolve(file, None, env).unwrap();
+        assert_eq!(cfg.titles_dir, PathBuf::from("from-env"));
     }
 
     #[test]

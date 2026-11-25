@@ -18,8 +18,10 @@ behaviour without a major version bump.
   fixed test scene in current builds, **up to 3.0 fps** in one earlier build.
 - Offline shader translation: **751 of 751** world programs translate.
 - Diagnostics build with per-frame statistics on copies, read-back, memory watches and pipelines.
-- Switches for the title's watchdog, logging, GPU timing and frame capture, plus experimental async
-  write-back.
+- Title profiles: what one build needs (code hooks, shaders to skip) is read at launch from the
+  user's config directory, selected by the image's own hash, so no title is known to the code. See
+  `docs/title-profiles.md`.
+- Switches for logging, GPU timing and frame capture, plus experimental async write-back.
 - Documentation: Linux setup, architecture, testing method, hardware status and roadmap in `docs/`.
 
 ### Known limitations

@@ -106,8 +106,8 @@ struct List {
     graphics_root_headers: [u32; 128],
     compute_root_headers: [u32; 128],
     pipeline_shadow: [u32; 8],
-    /// Newer titles' lists are larger: the title's state flush
-    /// (title+0x32786) copies a pipeline's 32 bytes to +0x544..+0x564 and
+    /// Newer titles' lists are larger: the state flush copies a pipeline's
+    /// 32 bytes to +0x544..+0x564 and
     /// tests +0x548, so its layout runs past 0x560. Its size is unknown;
     /// this keeps our fields clear of whatever the title writes there.
     newer: [u32; 256],
@@ -1143,8 +1143,7 @@ extern "system" fn draw(_: This) {
 }
 
 /// `ExecuteIndirect(signature, max count, arguments, offset, count buffer,
-/// offset)`. The title's signatures (title+0x2479466, 2026-11-24)
-/// hold one argument each: draw (stride 16), indexed draw (20), dispatch
+/// offset)`. The signatures we have met hold one argument each: draw (stride 16), indexed draw (20), dispatch
 /// (12), mesh dispatch (12), and the console's single-pass dispatch, type
 /// 105 (stride 12: the three group counts; its flags live in the
 /// signature, the title passes none), run as a plain dispatch. They run
@@ -1367,7 +1366,7 @@ const fn newer_slot(slot: usize) -> usize {
 
 /// Methods only newer titles' lists have. 0x490: the enhanced barrier
 /// `(group count, groups)`, with 16-byte groups `(type, count, barriers)`
-/// and 40-byte buffer barriers (title+0x95e0 builds them). 0x470 `(u64)`,
+/// and 40-byte buffer barriers, which the state flush builds. 0x470 `(u64)`,
 /// called from the title's state flush with its result unused.
 /// shortcut: 0x470's purpose is unknown; ignored until a title shows it
 /// matters.
