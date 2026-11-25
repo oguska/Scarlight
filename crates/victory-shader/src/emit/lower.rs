@@ -3867,7 +3867,7 @@ impl<'a> Lower<'a> {
         // host that does not know the layout keeps the approximation.
         let x = self.operand(inst, &op)?;
         if self.console_cf {
-            return Ok(self.lane_bit(0, x, None));
+            return Ok(self.lane_bit(c, x, None));
         }
         let z = self.s.m.i32(0);
         Ok(self.s.m.cmp(c, pred::NE, x, z))
