@@ -27,8 +27,30 @@ pub fn run(
     // the image's own hash, before any title code runs.
     let profile = cfg.title_profile(&hash);
     match &profile {
-        Some(found) => println!("build          {} ({hash})", found.label()),
-        None => println!("build          unknown ({hash})"),
+        Some(found) => {
+            let file = found.file().map_or_else(
+                || "<inline>".to_owned(),
+                |path| path.display().to_string(),
+            );
+            println!("build          {} ({hash})", found.label());
+            tracing::info!(
+                "title profile: {file} matched, {} hooks",
+                found.hooks.len()
+            );
+        }
+        None => {
+            println!("build          unknown ({hash})");
+            let dirs: Vec<String> = cfg
+                .profile_dirs
+                .iter()
+                .map(|dir| dir.display().to_string())
+                .collect();
+            tracing::info!(
+                "title profile: none matched (image {}) [searched {}]",
+                &hash.as_str()[..12.min(hash.len())],
+                dirs.join(", ")
+            );
+        }
     }
     victory_core::profile::set_current(profile);
 

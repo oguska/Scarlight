@@ -11,16 +11,23 @@ title means no profile, and the generic path runs unchanged.
 
 ## Where profiles live
 
-In order of precedence:
+The first of these directories that exists and holds a profile for the image is used:
 
-1. `VICTORY_TITLES_DIR` if set;
-2. `[paths].titles_dir` in `victory.toml`;
-3. `titles/` next to the `victory.toml` that was read;
-4. the user's data directory: `%LOCALAPPDATA%\victory\titles` (`$XDG_DATA_HOME` or
-   `~/.local/share/victory/titles` elsewhere).
+| Order | Directory | Notes |
+|---|---|---|
+| 1 | `VICTORY_PROFILE_DIR` | any directory; a Windows build under Wine needs a Windows path (`Z:\home\you\.config\victory\titles`) |
+| 2 | `%APPDATA%\victory\titles` | the roaming AppData inside the prefix: `~/.local/share/<prefix>/drive_c/users/<you>/AppData/Roaming/victory/titles` |
+| 3 | `$XDG_CONFIG_HOME/victory/titles`, else `~/.config/victory/titles` | tried through Wine's `Z:` drive when this is a Windows build, before the plain path; some Proton wrappers drop `XDG_CONFIG_HOME`, so use 1 or 2 if it is not found |
 
-Every `*.toml` in that directory is read. A file that does not parse is logged and skipped;
-one bad profile must not keep a title from running.
+Every `*.toml` in a directory is read. A file that does not parse is logged and skipped; one bad
+profile must not keep a title from running. When nothing matches, the log says so, with the
+short hash of the image and the directories searched:
+
+```
+title profile: Z:\home\you\.config\victory\titles\build.toml matched, 2 hooks
+title profile: 2 hooks applied
+title profile: none matched (image 0123456789ab) [searched C:\users\you\AppData\Roaming\victory\titles]
+```
 
 **A profile is user data, never repository data.** It may name hashes of the title's files,
 per-build offsets and shader hashes — all of which `docs/asset-policy.md` keeps out of the
@@ -36,13 +43,16 @@ build = ["<hex>"]                   # BLAKE3 of the image, 16+ digits, matched a
 [[hooks]]                           # optional; place code patches after mapping
 what   = "our words for the patch"  # logged
 rva    = 0x1000                     # offset from the start of the mapped image
-expect = "488b0500000000"           # bytes that must be there first (hex, no spaces)
+expect = "488b0500000000"           # bytes that must be there first (hex, spaces allowed)
 new    = "eb18909090909090"         # bytes to write (same length as expect)
 
 [skip]                              # optional; work the GPU layer leaves out
 shaders = ["<16 hex digits>"]       # skip a pipeline containing one of these shaders
 stages  = ["mesh", "compute"]       # skip 64-lane programs of these stages
 ```
+
+Every value above is made up. The launch line prints `build unknown (<hash>)` when no profile
+matches, so the hash to paste is the one from a run without a profile.
 
 A hook is only applied when `expect` matches exactly, so a profile that names the wrong
 build changes nothing. Hooks need `VICTORY_HOOKS=1` (formerly `VICTORY_NO_WATCHDOG=1`,

@@ -88,7 +88,11 @@ pub fn load(prepared: &PreparedImage, dir: &Path) -> Result<LoadedImage> {
         // SAFETY: just mapped, and no title code has run.
         let applied =
             unsafe { crate::hooks::apply_profile(loaded.base(), &prepared.original_hash) };
-        tracing::info!(applied, "profile hooks ({})", crate::hooks::HOOKS_ENV);
+        if applied > 0 {
+            tracing::info!("title profile: {applied} hooks applied");
+        } else {
+            tracing::debug!("title profile: no hooks for this image");
+        }
     }
     tracing::info!(
         base = format_args!("{:#x}", loaded.base()),

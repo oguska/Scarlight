@@ -18,7 +18,7 @@ game_dir = 'D:\victory-data\game'
 # env: VICTORY_TEST_TITLES (separated by ';')
 test_titles = []
 
-# Per-title profiles: what one title's build needs on this layer (code
-# hooks, shaders to skip). Default: 'titles' next to this file, else the
-# user's data directory. env: VICTORY_TITLES_DIR. See docs/title-profiles.md.
-# titles_dir = 'D:\victory-data\titles'
+# Per-title profiles (what one build needs: code hooks, shaders to skip) are
+# not configured here: they are read from VICTORY_PROFILE_DIR, else
+# %APPDATA%\victory\titles, else $XDG_CONFIG_HOME/victory/titles. See
+# docs/title-profiles.md.

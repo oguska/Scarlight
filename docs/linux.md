@@ -57,7 +57,59 @@ Make it executable once with `chmod +x play.sh`. Pass switches in front: `VICTOR
 they are listed under [switches](#switches). If you use GE-Proton's own D3D12 DLLs, make sure your
 prefix has them installed or copy them next to the exe.
 
-## 5. Controls
+## 5. Title profiles (optional)
+
+A **title profile** tells the layer what *one build of one title* needs beyond the generic path: a
+code patch to place, shaders to leave out, the name it prints. Nothing of this kind is built into
+the code and none ships with the repository (see `docs/asset-policy.md`), so **without a profile the
+layer runs with no title patches at all** — that is the normal state, and every generic path works.
+
+A profile is a TOML file you write, selected at launch by the BLAKE3 of the executable. It is read
+from the first of these that exists:
+
+| Order | Directory | Notes |
+|---|---|---|
+| 1 | `VICTORY_PROFILE_DIR` | any directory; under Wine give a Windows path, e.g. `Z:\home\you\.config\victory\titles` |
+| 2 | `%APPDATA%\victory\titles` | inside the prefix, e.g. `~/.local/share/scarlight-prefix/drive_c/users/<you>/AppData/Roaming/victory/titles` |
+| 3 | `$XDG_CONFIG_HOME/victory/titles`, else `~/.config/victory/titles` | reached through Wine's `Z:` drive; some Proton wrappers drop `XDG_CONFIG_HOME`, so set `VICTORY_PROFILE_DIR` if it is not found |
+
+Every `*.toml` in that directory is read; a file that does not parse is logged and skipped. Hooks
+need `VICTORY_HOOKS=1` as well (patches are never automatic). The launch log says which file won:
+
+```
+title profile: Z:\home\you\.config\victory\titles\<file>.toml matched, 2 hooks
+title profile: 2 hooks applied
+```
+
+or, with nothing found (the normal case):
+
+```
+title profile: none matched (image 0123456789ab) [searched %APPDATA%\victory\titles]
+```
+
+A profile to copy, with every value made up — replace it with your own build's:
+
+```toml
+name  = "my build"                       # what the launch line prints
+build = ["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"]
+                                         # BLAKE3 of the executable; the layer prints it as
+                                         # "build unknown (<hash>)" when no profile matches
+
+[[hooks]]                                # optional: a code patch, applied only if the bytes match
+what   = "example patch"                 # your words, logged
+rva    = 0x12345                         # offset from the start of the mapped image
+expect = "488b0500000000"                # bytes that must be there first (hex, spaces allowed)
+new    = "eb18909090909090"              # what to write instead (same length)
+
+[skip]                                   # optional: work the GPU layer leaves out
+shaders = ["0011223344556677"]           # 16-digit host shader hashes
+stages  = ["mesh"]                       # or whole stages written for 64-lane waves
+```
+
+`VICTORY_NO_WATCHDOG=1`, the name `VICTORY_HOOKS` had before profiles existed, still turns the
+hooks on, so older launch scripts and queue lines keep working.
+
+## 6. Controls
 
 A gamepad works. Otherwise the keyboard acts as a pad while the title's window has focus:
 

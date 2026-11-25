@@ -20,7 +20,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 
 /// Environment variable naming the directory profiles are read from.
-pub const DIR_ENV: &str = "VICTORY_TITLES_DIR";
+pub const DIR_ENV: &str = "VICTORY_PROFILE_DIR";
 
 /// One title build's profile.
 #[derive(Debug, Default, Clone, Deserialize)]
@@ -38,6 +38,9 @@ pub struct Profile {
     /// Work the GPU layer should not run.
     #[serde(default)]
     pub skip: Skip,
+    /// The file this profile was read from (not part of the file).
+    #[serde(skip)]
+    pub source: Option<PathBuf>,
 }
 
 /// One code patch: the bytes at `rva` must be exactly `expect` before `new`
@@ -83,6 +86,11 @@ pub fn current() -> Option<&'static Profile> {
 }
 
 impl Profile {
+    /// The file this profile was read from, if it came from one.
+    pub fn file(&self) -> Option<&Path> {
+        self.source.as_deref()
+    }
+
     /// The label to print for this build: `name`, else the hash it matched.
     pub fn label(&self) -> &str {
         self.name.as_deref().unwrap_or("profile")
@@ -130,7 +138,10 @@ pub fn load_dir(dir: &Path) -> Vec<Profile> {
             .map_err(anyhow::Error::from)
             .and_then(|text| Ok(toml::from_str::<Profile>(&text)?));
         match loaded {
-            Ok(profile) => profiles.push(profile),
+            Ok(mut profile) => {
+                profile.source = Some(path);
+                profiles.push(profile);
+            }
             Err(e) => tracing::warn!(path = %path.display(), "title profile not read: {e:#}"),
         }
     }
@@ -257,6 +268,7 @@ mod tests {
         std::fs::write(dir.path().join("notes.txt"), "ignored").unwrap();
         let found = for_build(dir.path(), IMAGE).unwrap();
         assert_eq!(found.label(), "ours");
+        assert_eq!(found.file(), Some(dir.path().join("b.toml").as_path()));
         assert!(found.skip.shaders.is_empty() && found.hooks.is_empty());
     }
 }

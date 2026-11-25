@@ -4,9 +4,13 @@
 //! file (`VICTORY_CONFIG`, else `./victory.toml`), then the default.
 //! See `victory.example.toml` at the repository root.
 //!
-//! Per-title profiles (see [`crate::profile`]) live in a directory that is
-//! decided the same way: `VICTORY_TITLES_DIR`, else `[paths].titles_dir`,
-//! else `titles/` next to the config file, else the user's data directory.
+//! Per-title profiles (see [`crate::profile`]) are read from the first of
+//! these that holds one for the image being run:
+//! `VICTORY_PROFILE_DIR`, `%APPDATA%\victory\titles`,
+//! `$XDG_CONFIG_HOME/victory/titles` (or `~/.config/victory/titles`), else
+//! the data directory's `titles/`. A Windows build under Wine reaches the
+//! last two through the `Z:` drive; the `Z:` form of a POSIX path is tried
+//! before the path itself, so both spellings work.
 
 use std::path::{Path, PathBuf};
 
@@ -27,8 +31,9 @@ pub struct Config {
     pub data_dir: PathBuf,
     /// Other titles used to exercise platform-level code.
     pub test_titles: Vec<PathBuf>,
-    /// Where per-title profiles are read from (never the repository).
-    pub titles_dir: PathBuf,
+    /// Where per-title profiles are read from, in priority order (never the
+    /// repository).
+    pub profile_dirs: Vec<PathBuf>,
     /// The config file that was read, if any.
     pub source: Option<PathBuf>,
 }
@@ -48,7 +53,6 @@ struct FilePaths {
     data_dir: Option<PathBuf>,
     #[serde(default)]
     test_titles: Vec<PathBuf>,
-    titles_dir: Option<PathBuf>,
 }
 
 impl Config {
@@ -99,21 +103,15 @@ impl Config {
         let data_dir = env_path("VICTORY_DATA_DIR")
             .or(file.data_dir)
             .map_or_else(|| default_dir("data"), Ok)?;
-        let titles_dir = env_path(crate::profile::DIR_ENV)
-            .or(file.titles_dir)
-            .or_else(|| {
-                source
-                    .as_deref()
-                    .and_then(|p| p.parent())
-                    .map(|dir| dir.join("titles"))
-            })
-            .map_or_else(|| default_dir("titles"), Ok)?;
+        // Profiles are found through the user's shell environment or inside
+        // the Wine prefix, not beside whichever victory.toml was passed.
+        let profile_dirs = profile_dirs(&env)?;
         Ok(Config {
             game_dir: env_path("VICTORY_GAME_DIR").or(file.game_dir),
             cache_dir,
             data_dir,
             test_titles,
-            titles_dir,
+            profile_dirs,
             source,
         })
     }
@@ -126,10 +124,12 @@ impl Config {
         )
     }
 
-    /// The profile for an image whose BLAKE3 is `blake3_hex`, if the user
-    /// keeps one in [`Config::titles_dir`].
+    /// The profile for an image whose BLAKE3 is `blake3_hex`: the first one
+    /// found in [`Config::profile_dirs`], in priority order.
     pub fn title_profile(&self, blake3_hex: &str) -> Option<Profile> {
-        crate::profile::for_build(&self.titles_dir, blake3_hex)
+        self.profile_dirs
+            .iter()
+            .find_map(|dir| crate::profile::for_build(dir, blake3_hex))
     }
 
     /// Returns `<cache>/<sub>`, creating it, after checking the asset policy.
@@ -141,6 +141,40 @@ impl Config {
     pub fn data_subdir(&self, sub: &str) -> Result<PathBuf> {
         subdir(&self.data_dir, sub)
     }
+}
+
+/// The directories profiles are read from, in priority order: the
+/// environment, the roaming AppData, then the user's config directory.
+fn profile_dirs(env: &impl Fn(&str) -> Option<std::ffi::OsString>) -> Result<Vec<PathBuf>> {
+    let env_path = |k: &str| env(k).filter(|v| !v.is_empty()).map(PathBuf::from);
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Some(dir) = env_path(crate::profile::DIR_ENV) {
+        dirs.push(dir);
+    }
+    if let Some(appdata) = env_path("APPDATA") {
+        dirs.push(appdata.join("victory").join("titles"));
+    }
+    let config_home = env_path("XDG_CONFIG_HOME")
+        .or_else(|| env_path("HOME").map(|home| home.join(".config")));
+    if let Some(config_home) = config_home {
+        dirs.extend(dir_aliases(&config_home.join("victory").join("titles")));
+    }
+    if dirs.is_empty() {
+        dirs.push(default_dir("titles")?);
+    }
+    Ok(dirs)
+}
+
+/// `dir`, plus how a Windows build reaches it under Wine: the same absolute
+/// POSIX path through the `Z:` drive, tried first.
+fn dir_aliases(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    #[cfg(windows)]
+    if let Some(rest) = dir.to_string_lossy().strip_prefix('/') {
+        out.push(PathBuf::from(format!("Z:\\{}", rest.replace('/', "\\"))));
+    }
+    out.push(dir.to_owned());
+    out
 }
 
 fn subdir(root: &Path, sub: &str) -> Result<PathBuf> {
@@ -201,29 +235,45 @@ mod tests {
     }
 
     #[test]
-    fn titles_dir_sits_next_to_the_config_file() {
-        let file = FilePaths::default();
-        let env = |_: &str| None;
-        let cfg = Config::resolve(file, Some("cfg/victory.toml".into()), env).unwrap();
-        assert_eq!(cfg.titles_dir, Path::new("cfg").join("titles"));
+    fn profile_dirs_are_env_then_appdata_then_xdg_config() {
+        let env = |k: &str| match k {
+            "VICTORY_PROFILE_DIR" => Some(OsString::from("from-env")),
+            "APPDATA" => Some(OsString::from("appdata")),
+            "XDG_CONFIG_HOME" => Some(OsString::from("xdg")),
+            _ => None,
+        };
+        let cfg = Config::resolve(FilePaths::default(), None, env).unwrap();
+        assert_eq!(cfg.profile_dirs[0], PathBuf::from("from-env"));
+        let appdata = Path::new("appdata").join("victory").join("titles");
+        let xdg = Path::new("xdg").join("victory").join("titles");
+        let at = |dir: &Path| cfg.profile_dirs.iter().position(|d| d == dir);
+        assert!(at(&appdata) > Some(0));
+        assert!(at(&xdg) > at(&appdata));
     }
 
     #[test]
-    fn titles_dir_env_and_file_win_in_that_order() {
-        let file = FilePaths {
-            titles_dir: Some("from-file".into()),
-            ..Default::default()
-        };
-        let env = |_: &str| None;
-        let cfg = Config::resolve(file, None, env).unwrap();
-        assert_eq!(cfg.titles_dir, PathBuf::from("from-file"));
-        let file = FilePaths {
-            titles_dir: Some("from-file".into()),
-            ..Default::default()
-        };
-        let env = |k: &str| (k == "VICTORY_TITLES_DIR").then(|| OsString::from("from-env"));
-        let cfg = Config::resolve(file, None, env).unwrap();
-        assert_eq!(cfg.titles_dir, PathBuf::from("from-env"));
+    fn profile_dirs_fall_back_to_the_home_config_directory() {
+        let env = |k: &str| (k == "HOME").then(|| OsString::from("home"));
+        let cfg = Config::resolve(FilePaths::default(), None, env).unwrap();
+        let want = Path::new("home")
+            .join(".config")
+            .join("victory")
+            .join("titles");
+        assert!(cfg.profile_dirs.iter().any(|d| d == &want));
+        assert!(cfg.profile_dirs.len() <= 2);
+    }
+
+    #[test]
+    fn a_windows_build_also_tries_the_z_drive_form() {
+        // Only a Windows build can use `Z:`; elsewhere the plain path is all
+        // there is, and both spellings must not be searched twice.
+        let env = |k: &str| (k == "XDG_CONFIG_HOME").then(|| OsString::from("/home/x/.config"));
+        let cfg = Config::resolve(FilePaths::default(), None, env).unwrap();
+        let z = cfg
+            .profile_dirs
+            .iter()
+            .any(|d| d.to_string_lossy().starts_with("Z:"));
+        assert_eq!(z, cfg!(windows));
     }
 
     #[test]
