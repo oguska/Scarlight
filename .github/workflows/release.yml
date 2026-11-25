@@ -88,10 +88,15 @@ jobs:
             | jq -r '[.assets[].browser_download_url | select(endswith(".tar.zst"))] | first')"
           curl -fsSL -o "$tmp/vkd3d.tar.zst" "$vkd3d_url"
           # LGPL-2.1 section 6: the corresponding source is the tag's source tree,
-          # not the release asset (that one is binaries only).
-          curl -fsSL -o vkd3d-proton-"$VKD3D_TAG"-source.tar.gz \
-            "https://github.com/HansKristian-Work/vkd3d-proton/archive/refs/tags/$VKD3D_TAG.tar.gz"
-          tar -tzf vkd3d-proton-"$VKD3D_TAG"-source.tar.gz | head -5
+          # not the release asset (that one is binaries only) - and that tree needs
+          # its submodules (dxil-spirv, Vulkan-Headers, SPIRV-Headers), which a
+          # GitHub tag archive leaves empty. So clone the tag with them and pack it.
+          git clone --quiet --depth 1 --branch "$VKD3D_TAG" \
+            https://github.com/HansKristian-Work/vkd3d-proton.git vkd3d-src
+          git -C vkd3d-src submodule update --init --recursive --depth 1 --quiet
+          tar --exclude-vcs -czf vkd3d-proton-"$VKD3D_TAG"-source.tar.gz vkd3d-src
+          tar -tzf vkd3d-proton-"$VKD3D_TAG"-source.tar.gz > /dev/null
+          ls -l vkd3d-proton-"$VKD3D_TAG"-source.tar.gz
           mkdir -p "$tmp/vkd3d" dlls-vkd3d
           zstd -d --stdout "$tmp/vkd3d.tar.zst" | tar -x -C "$tmp/vkd3d"
           # vkd3d-proton puts x64/d3d12*.dll in its tarball.

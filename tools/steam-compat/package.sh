@@ -200,8 +200,9 @@ Scarlight $VERSION
 
 vkd3d-proton ${VKD3D_VERSION:-unknown}
   files/d3d12.dll, files/d3d12core.dll, unmodified release binaries, LGPL-2.1-or-later.
-  Corresponding source for that exact version: the source archive of that tag,
-  https://github.com/HansKristian-Work/vkd3d-proton/archive/refs/tags/${VKD3D_VERSION:-unknown}.tar.gz,
+  Corresponding source for that exact version: the tag's source tree, cloned with
+  its submodules (dxil-spirv, Vulkan-Headers, SPIRV-Headers),
+  https://github.com/HansKristian-Work/vkd3d-proton/tree/${VKD3D_VERSION:-unknown},
   which this release also attaches as vkd3d-proton-<tag>-source.tar.gz. If it is
   missing, write to the project's issue tracker and we will send it; the offer is
   good for three years after the release date.

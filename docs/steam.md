@@ -68,8 +68,9 @@ tarball instead.
 
 ### The DLLs
 
-Everything except `d3dcompiler_47.dll` is redistributable and is packed into a release tarball; from a
-source checkout, get the same files yourself:
+vkd3d-proton's two DLLs are redistributable and are packed into a release tarball; DXC's and
+Microsoft's are not, so a release leaves them to you (see "DXC, which a release does not carry" above).
+From a source checkout, get all four yourself:
 
 | File | Where it comes from |
 |---|---|

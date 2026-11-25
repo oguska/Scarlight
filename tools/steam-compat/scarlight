@@ -132,7 +132,12 @@ done
 # A copy this script put there is marked, so clearing D3DCOMPILER actually goes
 # back to Wine's built-in compiler instead of leaving the old file behind. A
 # copy you put there yourself is not ours to delete and stays.
+# Order: what install.sh put in files/ first, then an explicit D3DCOMPILER from
+# the conf wins over it, then clearing the setting falls back to the files/ copy
+# (or to Wine's built-in compiler when there is none).
 MARK="$RUN/.d3dcompiler_47.by-scarlight"
+FILES_DC="$HERE/files/d3dcompiler_47.dll"
+if [ -f "$FILES_DC" ]; then stage "$FILES_DC" "$RUN/d3dcompiler_47.dll"; fi
 if [ -n "$D3DCOMPILER" ]; then
   if [ -f "$D3DCOMPILER" ]; then
     stage "$D3DCOMPILER" "$RUN/d3dcompiler_47.dll"
@@ -142,7 +147,12 @@ if [ -n "$D3DCOMPILER" ]; then
   fi
 elif [ -f "$MARK" ]; then
   rm -f -- "$RUN/d3dcompiler_47.dll" "$MARK"
-  log "D3DCOMPILER cleared: using Wine's built-in d3dcompiler"
+  if [ -f "$FILES_DC" ]; then
+    stage "$FILES_DC" "$RUN/d3dcompiler_47.dll"
+    log "D3DCOMPILER cleared: back to the copy in files/"
+  else
+    log "D3DCOMPILER cleared: using Wine's built-in d3dcompiler"
+  fi
 fi
 
 # Title profiles live outside the repo; Wine's HOME is the prefix, so reach the
