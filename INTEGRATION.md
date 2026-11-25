@@ -46,3 +46,16 @@ Maintained by @pablogonz12. Tested on Linux (RX 9070 XT, RADV, GE-Proton / vkd3d
 ## Measured
 
 751 shaders dumped from a run into the world, re-translated offline: `main` 666 translate; this branch 677, all valid SPIR-V under vkd3d-proton master.
+
+## Hub fixes restored after the origin/main sync
+
+The sync took upstream's side in rewritten files and dropped these hub fixes. They are ported back onto upstream's code:
+no blending on integer render targets; the indirect-argument clamp from our own DXIL writer when `D3DCompile` fails;
+the root-signature retry without the heap-directly-indexed flags; unsupported UAV and render-target flags dropped on host
+textures; `clwb` across a page end; `VICTORY_SHADER_LOOP_LIMIT` in every build; quad gradients for implicit-level samples
+in compute (only programs with console lanes); barrier sync after a reconverged per-lane branch; 16-bit compares ignoring
+`op_sel`; SCC of signed add/subtract and `s_lshlN_add_u32`.
+
+Measured on the merged head: offline 728/751 before and after, no row lost or gained; no new test failure by name.
+No game run. Not restored: async write-back, the producers diagnostic wiring, the debug environment switches.
+Rows the audit left uncertain are not checked.
