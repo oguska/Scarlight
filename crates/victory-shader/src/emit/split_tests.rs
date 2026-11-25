@@ -1095,10 +1095,14 @@ fn a_mask_built_in_sgprs_is_counted() {
             Ok(shader) => assert!(!shader.dxil.is_empty()),
             // A host that cannot run the console wave may still refuse the
             // whole-wave form; it must not be the lane-mask refusal.
-            Err(e) => assert!(
-                !e.to_string().contains("lane mask read as data"),
-                "{lanes_min}..{lanes_max}: {e}"
-            ),
+            Err(e) => {
+                // A host that runs a full wave64 has no reason to refuse.
+                assert!(lanes_max != 64, "{lanes_min}..{lanes_max}: {e}");
+                assert!(
+                    !e.to_string().contains("lane mask read as data"),
+                    "{lanes_min}..{lanes_max}: {e}"
+                );
+            }
         }
     }
 }

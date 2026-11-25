@@ -3785,7 +3785,16 @@ impl<'a> Lower<'a> {
         // lane its own bit, false for a lane that was not in it); EXEC and a
         // wrexec destination hold the op's result.
         let exec_write = inst.write(Reg::S(EXEC));
+        let scc_write = inst.write(Reg::Scc);
         for &(_, v) in &inst.writes {
+            if Some(v) == scc_write {
+                // SCC holds the wave-wide "the result is nonzero", not this
+                // lane's bit of it: keeping a lane bit here let SCC be read
+                // as a per-lane mask, or as its own ballot. Refuse instead.
+                self.lane_bits.remove(&v);
+                self.vals.insert(v, Val::Missing(LANE_MASK));
+                continue;
+            }
             let bit = if Some(v) == exec_write || !saveexec {
                 x
             } else if let Some(e) = old_exec {
