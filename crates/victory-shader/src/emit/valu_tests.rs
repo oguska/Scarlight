@@ -235,6 +235,39 @@ fn build_cs(body: &[u32], lds_blocks: u32) -> HostShader {
 /// modules take this lock too.
 pub(super) static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+thread_local! {
+    /// Whether this thread is inside a GPU test (holds [`ONE_AT_A_TIME`]).
+    static AT_ONE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A GPU test's guard: the one-at-a-time lock, with this thread marked as
+/// holding it until the test ends.
+pub(super) struct AtOne {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+impl Drop for AtOne {
+    fn drop(&mut self) {
+        AT_ONE.with(|me| me.set(false));
+    }
+}
+
+/// Takes the one-at-a-time lock for a GPU test. Every test that creates a
+/// device does it through here: [`super::host::Host::new`] refuses a thread
+/// that did not, so a module that forgets the lock fails the same way on
+/// every run instead of now and then ending the test process with an access
+/// violation (`0xc0000005`).
+pub(super) fn one_at_a_time() -> AtOne {
+    let lock = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    AT_ONE.with(|me| me.set(true));
+    AtOne { _lock: lock }
+}
+
+/// Whether this thread is inside a GPU test (test builds: `Host::new` asks).
+pub(super) fn holding_one_at_a_time() -> bool {
+    AT_ONE.with(|me| me.get())
+}
+
 /// Runs `shader` on every available SM 6.6 host (hardware GPU and WARP) for
 /// each 4-dword input set and invokes `check(backend, case_index, inputs, result_dword)`.
 fn run_cases(
@@ -253,7 +286,7 @@ fn run_cases_on(
     backends: &[(&str, bool)],
     mut check: impl FnMut(&str, usize, [u32; 4], u32),
 ) {
-    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let _one = one_at_a_time();
     let mut ran = 0;
     for &(label, warp) in backends {
         // Only a missing adapter (a runner without a GPU, or a platform
@@ -1167,7 +1200,7 @@ fn run_wave_cs(wave64: bool, body: &[u32], mut check: impl FnMut(&str, &[u32])) 
         v.validate(&mut copy).expect("DXIL validation failed");
     }
 
-    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let _one = one_at_a_time();
     let mut ran = 0;
     for (label, warp) in [("hardware", false), ("warp", true)] {
         let host = match Host::new(warp) {
@@ -1601,7 +1634,7 @@ fn run_root_srv_cases(
     cases: &[[u32; 4]],
     mut check: impl FnMut(&str, usize, [u32; 4], u32),
 ) {
-    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let _one = one_at_a_time();
     let mut ran = 0;
     for (label, warp) in [("hardware", false), ("warp", true)] {
         // Same rule as `run_cases_on`: only a missing adapter or a device

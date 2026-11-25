@@ -190,6 +190,10 @@ fn texels() -> Vec<[f32; 4]> {
 /// returns the stored value per device.
 fn run(shader: &HostShader) -> Vec<(&'static str, f32)> {
     let texels = texels();
+    // One GPU test at a time, with the VALU and waterfall tests: two at once
+    // on WARP end the test process with an access violation (`0xc0000005`,
+    // #65). This module had the lock and lost it in a rework.
+    let _one = super::valu_tests::one_at_a_time();
     let sampler = D3D12_SAMPLER_DESC {
         Filter: D3D12_FILTER_MIN_MAG_MIP_POINT,
         AddressU: D3D12_TEXTURE_ADDRESS_MODE_CLAMP,

@@ -102,6 +102,7 @@ fn program(wave: u32, lane: u32, joined_latch: bool) -> crate::NativeProgram {
 /// the Agility SDK, Windows 10 offers none: the test then has nothing to
 /// run on, as in `split_tests`.)
 fn devices() -> Vec<(String, Host)> {
+        let _one = super::valu_tests::one_at_a_time();
     let Ok(names) = adapters() else {
         eprintln!("no DXGI; skipped");
         return Vec::new();
