@@ -5893,6 +5893,45 @@ impl<'a> Lower<'a> {
                 let r = self.s.m.bin(c, Bin::Or, lo, hi);
                 int(self, r)
             }
+            "v_cvt_pknorm_i16_f32"
+            | "v_cvt_pknorm_u16_f32"
+            | "v_cvt_pknorm_i16_f16"
+            | "v_cvt_pknorm_u16_f16" => {
+                // Both source formats scale in f32 before rounding to integers.
+                let half = name.ends_with("_f16");
+                let signed = matches!(name, "v_cvt_pknorm_i16_f32" | "v_cvt_pknorm_i16_f16");
+                let (min, scale, cast) = if signed {
+                    (-1.0f32, 32767.0f32, Cast::FpToSi)
+                } else {
+                    (0.0, 65535.0, Cast::FpToUi)
+                };
+                let min = self.s.m.f32(min.to_bits());
+                let max = self.s.m.f32(1.0f32.to_bits());
+                let zero = self.s.m.f32(0);
+                let scale = self.s.m.f32(scale.to_bits());
+                let mask = self.s.m.i32(0xFFFF);
+                let convert = |l: &mut Self, k| {
+                    let x = if half {
+                        l.half_fsrc(inst, k)?
+                    } else {
+                        let x = f(l, k)?;
+                        l.ftz(x)
+                    };
+                    let nan = l.s.m.cmp(c, pred::UNO, x, x);
+                    let x = l.s.m.select(c, nan, zero, x);
+                    let x = l.binary(35, x, min);
+                    let x = l.binary(36, x, max);
+                    let x = l.s.m.bin(c, Bin::Mul, x, scale);
+                    let x = l.unary(26, x);
+                    let x = l.s.m.cast(c, cast, x, l.s.t.i32);
+                    Ok(l.s.m.bin(c, Bin::And, x, mask))
+                };
+                let (lo, hi) = (convert(self, 0)?, convert(self, 1)?);
+                let sh = self.s.m.i32(16);
+                let hi = self.s.m.bin(c, Bin::Shl, hi, sh);
+                let r = self.s.m.bin(c, Bin::Or, lo, hi);
+                int(self, r)
+            }
             "v_cvt_f16_f32" if v.opsel == 0 => {
                 // Rounded as MODE says (nearest even by default) into the low half.
                 let a = f(self, 0)?;
