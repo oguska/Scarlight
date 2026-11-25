@@ -175,20 +175,33 @@ flowchart LR
 The title's code runs under Wine, started through Proton. Its console kernel calls are answered in
 user space; its GPU commands are re-emitted as Direct3D 12, with the console's shaders recompiled and
 pipelines rebuilt for the host. vkd3d-proton turns those calls into Vulkan, and Mesa submits them to
-the kernel. Four translations between the console's code and the GPU, and most of a measured frame is
-spent before the GPU draws at all: the title waits on pipelines that are still being compiled (457 ms
-of a 602 ms median frame). Crates and call flow: [docs/architecture.md](docs/architecture.md).
+the kernel.
+
+**Scarlight is a combination, and stays one**: Proton/Wine for the OS side, Scarlight talking to Mesa
+directly for the GPU side, taken over step by step.
+
+| Layer | Who does it today | Direction |
+|---|---|---|
+| The game's code (x86-64, CPU) | native on the CPU | stays |
+| OS side: C/C++ runtime, files, threads, windowing, Steam/Deck | Proton (Wine) | stays |
+| Console system functions (the console DLLs the title imports) | Scarlight | stays, and grows |
+| GPU: commands, shaders, memory, pipelines | Scarlight → Direct3D 12 → vkd3d-proton → Vulkan → Mesa | **moving to Scarlight → Vulkan → Mesa** |
+
+One measured profile (`layers-perf-1`, one 603 s run, 2.2 fps median) sets the order: memory
+handoff is about **60 %** of a 446 ms frame and the card is busy only **32-33 %** of the time, while
+removing vkd3d-proton's replay is bounded at an estimated 60-120 ms/frame. Crates and call flow:
+[docs/architecture.md](docs/architecture.md).
 
 ## Roadmap
 
-| Stage | Goal |
-|---|---|
-| **1. Now** | Picture parity on the fixed scene; every world pipeline pre-built like the console; cache keys that survive a rebuild; Mesa cache sizing; fewer copies per frame |
-| **2. Next** | A native Vulkan backend: copies and memory on Vulkan, then zero-copy title memory through Mesa's host-memory import, then SPIR-V straight from the console's shaders |
-| **Idea, not planned** | A native Linux host without Wine: most of the title's imports are the C/C++ runtime Wine provides today |
+**Proton stays underneath for the OS side; the GPU side moves to Mesa step by step, and a step is
+kept only when the fixed scene shows it helps.** In order: zero-copy title memory through
+vkd3d-proton (if it works), the storage read fix, a backend seam, copies and memory on Vulkan, SPIR-V
+straight from the console's shaders, and then vkd3d-proton optional behind a launcher backend switch.
+A host without Wine is not planned: 8-13 months of work, and no measurement yet separates Wine's
+share of the frame.
 
-No dates, and targets are goals rather than results. Each stage's measured motivation, and the
-long-term idea, are in [docs/ROADMAP.md](docs/ROADMAP.md).
+No dates. Each step's measured motivation and what it has to prove: [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Launcher
 

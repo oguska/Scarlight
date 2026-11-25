@@ -23,6 +23,8 @@ behaviour without a major version bump.
   `docs/title-profiles.md`.
 - Switches for logging, GPU timing and frame capture, plus experimental async write-back.
 - Documentation: Linux setup, architecture, testing method, hardware status and roadmap in `docs/`,
+  including the architecture decision (Proton for the OS side, Scarlight taking the GPU side to Mesa
+  step by step) and the measured frame split behind it,
   and a progress page whose numbers are generated from counted sets by `tools/progress/`.
 - The world shader set is compiled into real pipelines, not just translated: 749 of 751 on RADV here,
   and through Mesa's noop shims for RDNA1-3, Vega and three Intel ANV families (see
