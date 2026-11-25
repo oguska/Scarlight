@@ -58,6 +58,13 @@ tried.
 The frame rate is the median at one fixed scene, the only figure compared between builds; the method
 is in [docs/testing.md](docs/testing.md).
 
+<!-- progress:start -->
+[![Shader instruction coverage](docs/progress/shaders.svg)](https://pablogonz12.github.io/Scarlight/progress/)
+
+Counted from the source on every change: which GPU instructions Scarlight can read and translate.
+Live page with history: [pablogonz12.github.io/Scarlight/progress](https://pablogonz12.github.io/Scarlight/progress/).
+<!-- progress:end -->
+
 ## Progress
 
 Each row is a share of a set that was **counted on this machine** — an import table, a shader archive,

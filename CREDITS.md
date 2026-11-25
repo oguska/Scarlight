@@ -34,6 +34,11 @@ BlueKaiman.
   wave-pairing approach and the NVIDIA wave lane-assignment report used in
   [docs/wave64-on-wave32.md](docs/wave64-on-wave32.md). No code taken.
 
+- **AnyPS5** ([boykopovar/AnyPS5](https://github.com/boykopovar/AnyPS5)): the format of the
+  source-counted progress page (reference instruction forms, history chart). No code taken.
+- **Mesa** ([aco_opcodes.py](https://gitlab.freedesktop.org/mesa/mesa)), MIT: the reference list of
+  RDNA2 instruction forms in `tools/progress/rdna2_isa_forms.txt` is generated from it.
+
 ## Tools
 
 Some commits were made with AI coding tools (Claude, Codex, Devin, Gemini, GPT). A contributor is
