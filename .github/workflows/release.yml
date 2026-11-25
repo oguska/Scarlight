@@ -51,3 +51,70 @@ jobs:
         with:
           name: Scarlight-windows-x64
           path: dist/Scarlight-windows-x64.zip
+      # The Steam compatibility tool ships the same exe, packed by the job below.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: victory-exe
+          path: target/release/victory.exe
+          retention-days: 3
+
+  # The Steam compatibility tool: Scarlight-<version>.tar.gz, whose top folder is
+  # Scarlight/ - the layout a ProtonUp-Qt-style installer expects to extract into
+  # Steam's compatibilitytools.d. Packed from the exe the windows job built plus
+  # vkd3d-proton's and DXC's own release DLLs (both redistributable, both licences
+  # travel in the tarball). Microsoft's d3dcompiler_47.dll is deliberately absent.
+  steam-tool:
+    needs: windows
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v6
+        with:
+          name: victory-exe
+          path: exe
+      - name: Fetch the redistributable DLLs
+        run: |
+          set -euo pipefail
+          command -v zstd >/dev/null || (sudo apt-get update && sudo apt-get install -y --no-install-recommends zstd)
+          tmp="$(mktemp -d)"
+          vkd3d_url="$(curl -fsSL https://api.github.com/repos/HansKristian-Work/vkd3d-proton/releases/latest \
+            | jq -r '[.assets[].browser_download_url | select(endswith(".tar.zst"))] | first')"
+          dxc_url="$(curl -fsSL https://api.github.com/repos/microsoft/DirectXShaderCompiler/releases/latest \
+            | jq -r '[.assets[].browser_download_url | select(test("/dxc_[0-9_]+\\.zip$"))] | first')"
+          curl -fsSL -o "$tmp/vkd3d.tar.zst" "$vkd3d_url"
+          curl -fsSL -o "$tmp/dxc.zip" "$dxc_url"
+          mkdir -p "$tmp/vkd3d" "$tmp/dxc"
+          zstd -d --stdout "$tmp/vkd3d.tar.zst" | tar -x -C "$tmp/vkd3d"
+          unzip -q -o "$tmp/dxc.zip" -d "$tmp/dxc"
+          # vkd3d-proton puts x64/d3d12*.dll in its tarball; DXC's zip has bin/x64/*.dll.
+          mkdir -p dlls-vkd3d dlls-dxc
+          find "$tmp/vkd3d" -type f -path '*/x64/d3d12*.dll' -exec cp {} dlls-vkd3d/ \;
+          find "$tmp/dxc" -type f \( -name dxil.dll -o -name dxcompiler.dll \) -path '*/x64/*' -exec cp {} dlls-dxc/ \;
+          ls -l dlls-vkd3d dlls-dxc
+      - name: Build the tarball
+        run: |
+          set -euo pipefail
+          version="${{ github.ref_name }}"
+          if [ "${{ github.event_name }}" = workflow_dispatch ]; then version="dev-${{ github.run_number }}"; fi
+          tools/steam-compat/package.sh --vkd3d dlls-vkd3d --dxc dlls-dxc \
+            --exe exe/victory.exe --version "$version" --out dist
+          tar -tzf dist/Scarlight-*.tar.gz
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ github.ref_name }}"
+          if [ "${{ github.event_name }}" = workflow_dispatch ]; then tag="dev-${{ github.run_number }}"; fi
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/Scarlight-*.tar.gz --clobber
+          else
+            gh release create "$tag" dist/Scarlight-*.tar.gz --generate-notes --title "$tag" \
+              --target "$GITHUB_SHA" \
+              --notes "Steam compatibility tool from $tag: extract Scarlight/ into Steam's compatibilitytools.d. Reads files you supply; no game files are included or needed to build."
+          fi
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Scarlight-steam-tool
+          path: dist/Scarlight-*.tar.gz

@@ -1,0 +1,144 @@
+# Scarlight as a Steam compatibility tool
+
+Scarlight ships as one thing: a custom compatibility tool for Steam on Linux. Install it once,
+restart Steam, and pick **Scarlight (Xbox Series)** under the title's *Properties → Compatibility*.
+Play then runs the title through Scarlight on top of a Proton you already have.
+
+```
+Steam  ──▶  Scarlight (compatibility tool)  ──▶  victory.exe (the title's console APIs, GPU
+                                                  command streams, RDNA2 shaders)
+                                                 │
+                                                 ├─ Wine .......... from your installed Proton
+                                                 └─ D3D12 ──▶ vkd3d-proton ──▶ Vulkan ──▶ Mesa (RADV/ANV)
+```
+
+We do not ship or fork Proton. The tool uses the Wine in an installed GE-Proton or Valve Proton
+for the operating-system side, and its own Windows DLLs for the GPU side.
+
+## 1. Install
+
+### Option A: from a release tarball (no build)
+
+1. Download `Scarlight-<version>.tar.gz` from the [releases page](https://github.com/pablogonz12/Scarlight/releases).
+2. Extract the `Scarlight/` folder into Steam's compatibility tools folder:
+
+   ```bash
+   tar -xzf Scarlight-*.tar.gz -C ~/.local/share/Steam/compatibilitytools.d/
+   ```
+
+   Flatpak Steam: `~/.var/app/com.valvesoftware.Steam/data/Steam/compatibilitytools.d/`.
+3. Open `Scarlight/scarlight.conf` and set `PROTON` to a Proton you have installed (the folder name
+   under `compatibilitytools.d/`, or a full path). That is the only setting you must touch.
+4. Restart Steam.
+
+A ProtonUp-Qt-style installer that extracts a tarball into `compatibilitytools.d/` produces the same
+layout, so the release works there too.
+
+### Option B: from a source checkout
+
+```bash
+tools/steam-compat/install.sh --dlls DIR        # see "The DLLs" below
+```
+
+`install.sh` builds nothing: it copies the tool, an already-built `victory.exe` and the DLLs into
+Steam's `compatibilitytools.d/` (native Steam, or Flatpak Steam's if that is what you have),
+detects your installed Proton, and writes a `scarlight.conf` for you.
+
+| Option | Meaning |
+|---|---|
+| `--exe PATH` | the built `victory.exe` (default `target/x86_64-pc-windows-msvc/release/victory.exe`) |
+| `--dlls DIR` | folder with `d3d12.dll`, `d3d12core.dll`, `dxil.dll`, `dxcompiler.dll` (64-bit) |
+| `--d3dcompiler PATH` | optional: Microsoft's `d3dcompiler_47.dll`, if you have one you are licensed to use |
+| `--proton NAME\|PATH` | the Proton whose Wine to run on (default: newest GE-Proton in `compatibilitytools.d`) |
+| `--dest DIR` | the `compatibilitytools.d` to install into (default: Steam's own) |
+| `--uninstall` | remove the installed tool |
+
+Build the exe first (see [the README](../README.md#install)), or use a release tarball instead.
+
+### The DLLs
+
+Everything except `d3dcompiler_47.dll` is redistributable and is packed into a release tarball; from a
+source checkout, get the same files yourself:
+
+| File | Where it comes from |
+|---|---|
+| `d3d12.dll`, `d3d12core.dll` | [vkd3d-proton](https://github.com/HansKristian-Work/vkd3d-proton) release or build, 64-bit |
+| `dxil.dll`, `dxcompiler.dll` | [DirectXShaderCompiler](https://github.com/microsoft/DirectXShaderCompiler) release, `bin/x64` |
+| `d3dcompiler_47.dll` | **optional.** Microsoft's, not redistributable. From software you are licensed to use |
+| `dxgi.dll`, `d3d11.dll`, `d3d10core.dll` | copied out of your own Proton by `install.sh` |
+
+`d3dcompiler_47.dll` is **not** required: without it Wine's built-in compiler is used and the title
+still starts. If you have a licensed copy, `install.sh --d3dcompiler PATH` picks it up (it also looks
+in `~/.cache/winetricks/d3dcompiler_47/` and in existing game prefixes), or point `D3DCOMPILER` in
+`scarlight.conf` at it later.
+
+## 2. Pick it in Steam
+
+*Library → right-click the title → Properties → Compatibility →* tick **Force the use of a specific
+Steam Play compatibility tool**, then choose **Scarlight (Xbox Series)**. Press Play.
+
+Each game gets its own Wine prefix and its own Mesa shader cache, both under Steam's
+`steamapps/compatdata/<appid>/`, so titles do not share state. Untick the box to go back to your
+previous tool.
+
+## 3. `scarlight.conf`
+
+One `KEY=value` per line, next to the tool (`compatibilitytools.d/Scarlight/scarlight.conf`). Edit it,
+then press Play again; changes apply on the next launch. An empty value means "the default".
+
+| Key | Default | What it does |
+|---|---|---|
+| `BUILD` | `default` | which build to run: `files/victory-<BUILD>.exe` |
+| `PROTON` | `GE-Proton11-14-x86_64` | the Proton whose Wine to run on: a folder name in the same `compatibilitytools.d`, or a full path to a Proton folder |
+| `D3DCOMPILER` | empty | path to Microsoft's `d3dcompiler_47.dll` you are licensed to use; empty uses Wine's built-in compiler |
+| `PROFILE_DIR` | `~/.config/victory/titles` | where the title profiles are read from (`~` is expanded) |
+| `MESA_CACHE_MAX_SIZE` | `16G` | cap for the per-game Mesa shader cache |
+| `VKD3D_CONFIG` | `ignore_shared_fence` | options handed to vkd3d-proton |
+| `EXTRA_ENV` | empty | extra environment for the run, space separated, e.g. `VICTORY_LOG=debug RUST_LOG=info` |
+
+Environment variables set on the Steam launch (`VAR=1 %command%` in Launch Options) also reach the
+tool and win over the conf for `VICTORY_LOG`, `WINEDEBUG` and `SCARLIGHT_DRY_RUN`.
+
+## 4. Logs
+
+Everything goes to one file, in the game's own prefix:
+
+```
+$STEAM_COMPAT_DATA_PATH/scarlight.log      # e.g. ~/.local/share/Steam/steamapps/compatdata/<appid>/scarlight.log
+```
+
+The tool's own lines (verb, build, Proton, game, exit code) and the whole run's output are appended
+there; the Mesa shader cache sits beside it in `mesa_cache/`. For a bug report, the last ~50 lines of
+that file plus `vulkaninfo --summary` are what we need.
+
+`SCARLIGHT_DRY_RUN=1` runs the tool without `--execute`: it resolves and binds the title's imports and
+stops, without touching the GPU. That is the quickest way to check that a prefix, a Proton and the
+DLLs are wired up:
+
+```bash
+SCARLIGHT_DRY_RUN=1 %command%        # in the game's Launch Options, after clearing them again afterwards
+```
+
+## 5. Uninstall
+
+```bash
+tools/steam-compat/install.sh --uninstall      # or: rm -rf ~/.local/share/Steam/compatibilitytools.d/Scarlight
+```
+
+Nothing else is needed: Scarlight keeps no service, no system package and no file outside the tool
+folder and the game's `compatdata/<appid>/`. Delete that folder to reclaim the prefix and the shader
+cache. In Steam, the game's Compatibility setting falls back to its previous tool after a restart.
+
+## 6. Troubleshooting
+
+| Symptom | What to do |
+|---|---|
+| Scarlight is not in the Compatibility list | the folder must be `compatibilitytools.d/Scarlight/` with `compatibilitytool.vdf` directly inside it, and Steam needs a restart |
+| `notify-send: Proton not found` / log says "no Wine at …" | `PROTON` names a folder your Steam does not have, or a path without `files/bin/wine` |
+| Nothing happens, no log | Steam never got as far as starting the tool: check the game is set to *Force the use of a specific Steam Play compatibility tool* |
+| The log says `game exe not found` | the title was launched with an argument the tool cannot resolve; clear Launch Options and try again |
+| Crash or black window at world entry | check `vulkaninfo --summary` shows a Mesa driver (`radv`, `Intel … Mesa`, `nvk`) with Vulkan 1.3+; a proprietary driver is not a supported target |
+| Dark picture, missing detail, single-digit fps | expected today: see the status in the [README](../README.md#status) |
+| A run left a stuck prefix | the tool clears a leftover wineserver itself at the start of `waitforexitandrun`; if a title still hangs, `files/bin/wineserver -k` in your Proton folder, or delete the game's `compatdata/<appid>/pfx` |
+| Title builds its shaders again every launch | the Mesa cache is per game under `compatdata/<appid>/mesa_cache`; delete it if it is stale, and keep `MESA_CACHE_MAX_SIZE` large enough |
+| Flatpak Steam | all paths move to `~/.var/app/com.valvesoftware.Steam/data/Steam/`; `install.sh` detects that folder by itself |

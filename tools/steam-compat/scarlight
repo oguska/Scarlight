@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+# Scarlight: Steam compatibility tool for Xbox Series (GDK) titles.
+# Steam calls: scarlight <verb> <game exe> [args]
+#
+# Runs the title's exe through Scarlight (victory.exe) on top of an installed
+# Proton's Wine, inside the prefix Steam created for this game. Settings live in
+# scarlight.conf next to this script; the log is $STEAM_COMPAT_DATA_PATH/scarlight.log.
+# Set SCARLIGHT_DRY_RUN=1 to bind imports without running (no GPU work).
+set -u
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+verb="${1:-}"
+shift || true
+
+# ---- settings (scarlight.conf overrides these defaults) --------------------
+BUILD=default
+PROTON=GE-Proton11-14-x86_64
+D3DCOMPILER=
+PROFILE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/victory/titles"
+MESA_CACHE_MAX_SIZE=16G
+VKD3D_CONFIG=ignore_shared_fence
+EXTRA_ENV=
+if [ -f "$HERE/scarlight.conf" ]; then . "$HERE/scarlight.conf"; fi
+# Empty settings mean "the default" (the installed conf ships them empty).
+[ -n "${PROTON:-}" ] || PROTON=GE-Proton11-14-x86_64
+[ -n "${BUILD:-}" ] || BUILD=default
+[ -n "${PROFILE_DIR:-}" ] || PROFILE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/victory/titles"
+[ -n "${MESA_CACHE_MAX_SIZE:-}" ] || MESA_CACHE_MAX_SIZE=16G
+[ -n "${VKD3D_CONFIG:-}" ] || VKD3D_CONFIG=ignore_shared_fence
+
+DATA="${STEAM_COMPAT_DATA_PATH:-$HOME/.local/share/scarlight}"
+LOG="$DATA/scarlight.log"
+mkdir -p "$DATA"
+
+case "$PROTON" in
+  /*) PDIR="$PROTON" ;;
+  *) PDIR="$(dirname "$HERE")/$PROTON" ;;
+esac
+WINE="$PDIR/files/bin/wine"
+WSRV="$PDIR/files/bin/wineserver"
+export WINEPREFIX="$DATA/pfx"
+
+log() { printf '%s %s\n' "$(date +%T)" "$*" >> "$LOG"; }
+
+case "$verb" in
+  getcompatpath) "$WINE" winepath -w "$1" 2>/dev/null; exit ;;
+  getnativepath) "$WINE" winepath -u "$1" 2>/dev/null; exit ;;
+  waitforexitandrun | run | runinprefix) ;;
+  waitforexit) "$WSRV" -w 2>/dev/null; exit 0 ;;
+  *)
+    echo "scarlight: unknown verb '$verb'" >&2
+    exit 1
+    ;;
+esac
+
+GAME="${1:-}"
+shift || true
+
+log "---- $verb build=$BUILD proton=$PROTON game=$GAME"
+if [ ! -x "$WINE" ]; then
+  log "no Wine at $WINE (set PROTON in scarlight.conf)"
+  notify-send "Scarlight" "Proton not found: $PROTON (edit scarlight.conf)" 2>/dev/null
+  exit 1
+fi
+if [ ! -f "$GAME" ]; then
+  log "game exe not found: $GAME"
+  exit 1
+fi
+mkdir -p "$WINEPREFIX"
+# A run killed by Steam leaves its wineserver holding the prefix: clear it first.
+[ "$verb" = waitforexitandrun ] && "$WSRV" -w 2>/dev/null
+[ "$verb" = waitforexitandrun ] && "$WSRV" -k 2>/dev/null
+
+# Scarlight runs from its own folder in the prefix so its DLLs (vkd3d-proton,
+# DXC) win over anything else on the search path.
+RUN="$WINEPREFIX/drive_c/scarlight"
+mkdir -p "$RUN"
+for f in "$HERE"/files/*.dll; do
+  [ -e "$f" ] || continue
+  cmp -s "$f" "$RUN/$(basename "$f")" || cp "$f" "$RUN/"
+done
+EXE="$HERE/files/victory-$BUILD.exe"
+if [ ! -f "$EXE" ]; then
+  log "no build at $EXE (set BUILD in scarlight.conf)"
+  exit 1
+fi
+cmp -s "$EXE" "$RUN/victory.exe" || cp "$EXE" "$RUN/victory.exe"
+
+# Microsoft's d3dcompiler_47 is optional: it is not redistributable, so it is
+# never shipped. If you have one and are licensed to use it, point D3DCOMPILER
+# at it (or install it in the prefix with winetricks) and it is used; without
+# it Wine's built-in compiler is used instead and most titles still start.
+if [ -n "$D3DCOMPILER" ] && [ -f "$D3DCOMPILER" ]; then
+  cmp -s "$D3DCOMPILER" "$RUN/d3dcompiler_47.dll" ||
+    cp "$D3DCOMPILER" "$RUN/d3dcompiler_47.dll"
+fi
+
+# Title profiles live outside the repo; Wine's HOME is the prefix, so reach the
+# Linux config dir through the Z: drive. Without them the hooks that keep the
+# title alive are absent.
+P="${PROFILE_DIR/#\~/$HOME}"
+export VICTORY_PROFILE_DIR="Z:${P//\//\\}"
+
+cd "$RUN" || {
+  log "cannot enter $RUN"
+  exit 1
+}
+WGAME="Z:$(printf '%s' "$GAME" | sed 's#/#\\#g')"
+
+export WINEDEBUG="${WINEDEBUG:--all}"
+OVERRIDES="d3d12,d3d12core,dxgi,d3d11,d3d10core"
+[ -f "$RUN/d3dcompiler_47.dll" ] && OVERRIDES="$OVERRIDES,d3dcompiler_47"
+export WINEDLLOVERRIDES="$OVERRIDES=n,b"
+export VKD3D_CONFIG
+export VK_LOADER_LAYERS_DISABLE="${VK_LOADER_LAYERS_DISABLE-*renderdoc*}"
+export NO_COLOR=1 RUST_LOG_STYLE=never
+export VICTORY_NO_WATCHDOG=1 VICTORY_LOG="${VICTORY_LOG:-info}"
+export MESA_SHADER_CACHE_DIR="$DATA/mesa_cache"
+export MESA_SHADER_CACHE_MAX_SIZE="$MESA_CACHE_MAX_SIZE"
+for kv in $EXTRA_ENV; do export "${kv?}"; done
+
+if [ -n "${SCARLIGHT_DRY_RUN:-}" ]; then
+  log "start (dry run): $RUN/victory.exe run $WGAME (imports only, no --execute)"
+  "$WINE" "$RUN/victory.exe" run "$WGAME" "$@" >> "$LOG" 2>&1
+else
+  log "start: $RUN/victory.exe run $WGAME --execute"
+  "$WINE" "$RUN/victory.exe" run "$WGAME" --execute "$@" >> "$LOG" 2>&1
+fi
+rc=$?
+log "exit $rc"
+[ "$verb" = waitforexitandrun ] && "$WSRV" -w 2>/dev/null
+exit $rc
