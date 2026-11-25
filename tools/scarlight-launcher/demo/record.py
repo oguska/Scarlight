@@ -15,6 +15,7 @@ asciinema's `agg`. It also needs `fzf` or `whiptail` for the menu front end; fzf
 is what the shipped recording used.
 """
 
+import codecs
 import fcntl
 import json
 import os
@@ -70,11 +71,33 @@ def fake_machine(root):
         f.write(PROFILE.format(root=root))
 
 
+MARKER_PREFIX = "\x1b[?2026"  # synchronized-output markers, "[?2026h" and "[?2026l"
+
+
+def strip_markers(text, carry):
+    """Drop synchronized-output markers; keep a marker split across reads.
+
+    agg (the cast-to-GIF renderer) drops whatever fzf draws between these
+    markers, so a menu recorded as-is renders as empty frames. They only say
+    "this redraw is atomic"; dropping them changes nothing a viewer sees.
+    """
+    text = carry + text
+    for marker in (MARKER_PREFIX + "h", MARKER_PREFIX + "l"):
+        text = text.replace(marker, "")
+    for cut in range(min(len(MARKER_PREFIX), len(text)), 0, -1):
+        if text.endswith(MARKER_PREFIX[:cut]):
+            return text[:-cut], text[-cut:]
+    return text, ""
+
+
 def record(path, root, launcher_dir):
     env = dict(os.environ)
     env.update(
         HOME=os.path.join(root, "home"),
         XDG_CONFIG_HOME=os.path.join(root, "config"),
+        # The launcher prefers SCARLIGHT_CONFIG_DIR over XDG; an ambient one
+        # would put a real profile in the recording.
+        SCARLIGHT_CONFIG_DIR=os.path.join(root, "config", "scarlight"),
         XDG_STATE_HOME=os.path.join(root, "home", "state"),
         XDG_DATA_HOME=os.path.join(root, "home", "share"),
         PATH=launcher_dir + os.pathsep + env.get("PATH", ""),
@@ -88,8 +111,12 @@ def record(path, root, launcher_dir):
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
 
     events, start = [], time.monotonic()
+    # A 700-byte read can end inside a UTF-8 sequence or inside a marker.
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    carry = ""
 
     def pump(seconds):
+        nonlocal carry
         deadline = time.monotonic() + seconds
         while True:
             left = deadline - time.monotonic()
@@ -104,7 +131,9 @@ def record(path, root, launcher_dir):
                 return False
             if not data:
                 return False
-            events.append([round(time.monotonic() - start, 4), "o", data.decode("utf-8", "replace")])
+            text, carry = strip_markers(decoder.decode(data), carry)
+            if text:
+                events.append([round(time.monotonic() - start, 4), "o", text])
 
     for keys, wait in STEPS:
         if not pump(wait):
@@ -112,13 +141,9 @@ def record(path, root, launcher_dir):
         if keys:
             os.write(fd, keys.encode())
     pump(0.6)
-
-    # agg (the cast-to-GIF renderer) drops what fzf draws between synchronized
-    # output markers, so a menu recorded as-is renders as empty frames. The
-    # markers only say "this redraw is atomic"; dropping them changes nothing
-    # a viewer sees.
-    for event in events:
-        event[2] = event[2].replace("\x1b[?2026h", "").replace("\x1b[?2026l", "")
+    text, _ = strip_markers(decoder.decode(b"", True), carry)
+    if text:
+        events.append([round(time.monotonic() - start, 4), "o", text])
 
     with open(path, "w") as f:
         f.write(json.dumps({"version": 2, "width": COLS, "height": ROWS,
