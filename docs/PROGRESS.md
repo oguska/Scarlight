@@ -37,12 +37,12 @@ Two sets are counted: the 751-program world set used for offline checks, and the
 | Set | Implemented | Verified | Progress | What is counted |
 |---|---|---|---|---|
 | World set, translated to host shader | 751 / 751 | 751 / 751 | ████████████ 100 % | 0 refused, 0 undecodable |
-| World set, translated + validated + real RADV pipeline | 751 / 751 | 751 / 751 | ████████████ 100 % | 0 stop: 751 of 751 reached a real RADV pipeline in the 25 Nov 13:14 run |
+| World set, translated + validated + real RADV pipeline | 749 / 751 | 749 / 751 | ███████████░ 99 % | 0 stop: 751 of 751 reached a real RADV pipeline in the 25 Nov 13:14 run |
 | Whole archive, translated | 26,084 / 26,084 | — | ████████████ 100 % | 40.6 M IR instructions; 25,889 programs have every resource access traced |
 | Whole archive, host shader emitted: all stages | 25,602 / 25,694 | — | ███████████░ 99 % | vertex + pixel, compute and mesh together; the per-stage rows below add up to this |
-| Whole archive, host shader emitted: vertex + pixel | 14,164 / 14,247 | — | ███████████░ 99 % | 516 stop in the emitter; no pipeline validation has been run on the archive yet |
-| Whole archive, host shader emitted: compute | 2,676 / 2,682 | — | ███████████░ 99 % | 6 stop in the emitter; no pipeline validation has been run on the archive yet |
-| Whole archive, host shader emitted: mesh | 8,762 / 8,765 | — | ███████████░ 99 % | 3 stop in the emitter; no pipeline validation has been run on the archive yet |
+| Whole archive, host shader emitted: vertex + pixel | 14,164 / 14,247 | — | ███████████░ 99 % | 83 programs of this stage are not emitted; no pipeline validation has been run on the archive yet |
+| Whole archive, host shader emitted: compute | 2,676 / 2,682 | — | ███████████░ 99 % | 6 programs of this stage are not emitted; no pipeline validation has been run on the archive yet |
+| Whole archive, host shader emitted: mesh | 8,762 / 8,765 | — | ███████████░ 99 % | 3 programs of this stage are not emitted; no pipeline validation has been run on the archive yet |
 | ISA: opcode-table entries the decoder names | 313 / 1,232 | — | ███░░░░░░░░░ 25 % | the table is the full RDNA2 opcode list (1,232 entries across 20 encodings); 313 are named in the decoder, and the title uses far fewer than that. A per-program opcode census is not taken yet, so this row is a source count, not a decode census |
 
 - Emitted per stage is 25,602 of 25,694 programs the archive classifies as vertex/pixel, compute or mesh; the further 390 are programs the console structure puts in none of those stages.
@@ -51,19 +51,19 @@ Two sets are counted: the 751-program world set used for offline checks, and the
 
 ## GPU command stream
 
-What the title records per frame and what reaches the card. The headline row measures one real world frame: the draws and dispatches it recorded, minus the ones dropped, and the drop lines below name every reason. Ray tracing is switched off on purpose, so most of the drops in this build are one intended reason and not a gap in the port — the bar is a record of what ran, not a score.
+What the title records per frame and what reaches the card. The headline row measures one real world frame: the draws and dispatches it recorded, minus the ones dropped. The reasons listed below come from a separate reference run and are **not** an accounting of that frame — they are the reasons drops have been seen, with the count each reached in the run that showed it. Ray tracing is off on purpose, so most drops are one intended reason and not a gap in the port.
 
 | Set | Implemented | Verified | Progress | What is counted |
 |---|---|---|---|---|
-| Recorded work that reaches the card | 4,309 / 4,688 | 4,309 / 4,688 | ███████████░ 92 % | the last world frame (3,000 draws or more) of the newest run that has one; the numbers are the backend's own per-frame lines, and every dropped program is listed below by reason |
+| Recorded work that reaches the card | 4,309 / 4,688 | 4,309 / 4,688 | ███████████░ 92 % | the last world frame (3,000 draws or more) of the newest run that has one: the backend's own per-frame lines |
 | D3D12 calls the title makes that our backend has | 99 / 128 | 99 / 128 | █████████░░░ 77 % | present in the backend's sources; the rest are enum and helper surfaces, not missing entry points |
-| Drops: ray-tracing hit shading, left out | — | — | off | 631/frame in the reference world run; behind a switch until the trace path is correct, and the largest single reason for drops |
-| Drops: one stage of the ray-tracing structure builder | — | — | off | 346-361/frame; off with the same switch |
-| Drops: one whole-wave compute step | — | — | 14-28/frame | a section step our wave simulation does not follow yet |
-| Drops: compute and pixel programs while their pipeline is made | — | — | 1-4/frame | each named program appears once and then runs; counted in the pipeline area |
+| Drops: ray-tracing hit shading, left out | — | — | off | 631/frame in the reference run of 24 Nov, which is a different run from the headline frame; behind a switch until the trace path is correct |
+| Drops: one stage of the ray-tracing structure builder | — | — | off | 346-361/frame in that same reference run; off with the same switch |
+| Drops: one whole-wave compute step | — | — | 14-28/frame | 14-28/frame in that same reference run: a section step our wave simulation does not follow yet |
+| Drops: compute and pixel programs while their pipeline is made | — | — | 1-4/frame | 1-4/frame in that same reference run: each named program appears once and then runs, which is the pipeline area's business |
 
-- The reference run records 168 world frames at 2.04 fps; drop reasons are the backend's own log lines, summed per frame.
-- Nothing is dropped as "no host pipeline": every drop above is a named, deliberate or known gap.
+- The reference run records 168 world frames at 2.04 fps; drop reasons are the backend's own log lines, summed per frame in that run.
+- Nothing is dropped as "no host pipeline": every drop is a named, deliberate or known gap.
 
 ## Pipelines
 
@@ -71,7 +71,7 @@ A draw cannot run until its pipeline exists on the host. The world set can be bu
 
 | Set | Implemented | Verified | Progress | What is counted |
 |---|---|---|---|---|
-| World set: pipelines that build offline | 751 / 751 | 751 / 751 | ████████████ 100 % | 0 refused by RADV; 8.7 MB of Mesa cache, 37.7 s of CPU on 8 workers |
+| World set: pipelines that build offline | 749 / 751 | 749 / 751 | ███████████░ 99 % | 2 of 751 do not reach a pipeline in this run |
 | Pipelines the title asks for, covered by the pre-bake list | 1,785 / 2,601 | — | ████████░░░░ 69 % | 2,252 keys known ahead from the title's own early list, 1,785 of them buildable from the saved library |
 | Late creates per frame in a world run | ~38 | measured | late | 63,794 drops over 1,673 frames of one run; they are the 1-4/frame rows above |
 
@@ -99,18 +99,18 @@ Status words, not percentages: a feature is either shown working on this machine
 
 ## Mesa reach (compiled offline, not run)
 
-Whether the world shader set compiles for a GPU family's Mesa driver, without that GPU. Mesa 26.3.1's noop drm-shim fakes each chip, so RADV builds every pipeline with that family's ISA and limits. **All 751 world pipelines compile on 4 of 5 AMD families** (RDNA4, RDNA3, RDNA2, RDNA1); Vega compiles 669 and aborts on the 82 mesh-shader programs. Intel is in progress. This is a compile result: only RDNA4 has actually been run.
+Whether the world shader set compiles for a GPU family's Mesa driver, without that GPU. Mesa 26.3.1's noop drm-shim fakes each chip, so RADV and ANV build every pipeline with that family's ISA and limits. All 751 world pipelines compile on **4 of 5 AMD families** (RDNA4, RDNA3, RDNA2, RDNA1); Vega compiles 669 and aborts on the 82 mesh-shader programs. Three Intel families were measured (dg2, mtl, bmg) and all but one or two programs compile on each. This is a compile result: only RDNA4 has actually been run.
 
 | GPU families | Implemented | Verified | Progress | What is counted |
 |---|---|---|---|---|
 | AMD families whose whole world set compiles offline | 4 / 5 | — | ██████████░░ 80 % | RDNA4, RDNA3, RDNA2, RDNA1: 751/751 each through the noop shim (Mesa driver, no GPU) |
+| Intel (ANV) families measured offline | 3 / 3 | — | ████████████ 100 % | dg2 750/751, mtl 750/751, bmg 751/751 through Mesa's Intel noop shim; one program fails on two of the three, and there is no Intel card here to run on |
 | Vega (gfx900): world programs that compile offline | 669 / 751 | — | ███████████░ 89 % | 82 abort the driver: every mesh-shader program, and GFX9 has no mesh shader support in RADV |
-| Intel (ANV) families measured offline | 0 | 1 planned | in progress | no Intel card and no vulkan-intel ICD on this machine; Mesa 26.3.1 ships the Intel noop shim (dg2, bmg) to build |
-| Families with a run, not just a compile | 1 / 6 | — | ██░░░░░░░░░░ 17 % | RDNA4 only; the five shim families have compiled pipelines but no run, and a compiled pipeline is not a working feature |
+| Families with a run, not just a compile | 1 / 8 | — | ██░░░░░░░░░░ 12 % | RDNA4 only: 5 AMD and 3 Intel families have compiled pipelines, none of them has been run |
 
-- Source: `family-matrix-20261125-134909-2134785.tsv`, 751 world programs, 4 stages, 8 jobs, 50 s wall for six columns; the shim column for our own family matches the real-GPU column exactly (751/751), so the harness does not change the answer.
+- Sources: `family-matrix-20261125-134909-2134785.tsv` (AMD, five families + the real card as control) and `family-matrix-20261125-140636-2410746.tsv` (Intel, three shim devices, 750-751 of 751 each); the shim column for our own family matches the real-GPU column exactly, so the harness does not change the answer.
 - Compiled offline is not run. On RDNA1 all 82 mesh programs create, yet RADV does not advertise `VK_EXT_mesh_shader` there, so a program that uses mesh, barycentric or ray query at draw time needs the game's own fallback path.
-- Intel: ANV needs `libvulkan_intel.so` plus Mesa's Intel noop shim from the same build; neither is installed here, so nothing is claimed.
+- Intel: ANV needs `libvulkan_intel.so` plus Mesa's Intel noop shim from the same build; both were built for this run. The one program that fails on dg2 and mtl is the same class, and nothing Intel has been run.
 
 ## Performance
 
@@ -118,7 +118,7 @@ Speed is measured at one fixed scene, the only figure compared between builds. T
 
 | Measure | Implemented | Verified | Progress | What is counted |
 |---|---|---|---|---|
-| Fixed test scene vs the 30 fps console target | 1.95 / 30 | 1.95 / 30 | █░░░░░░░░░░░ 6 % | median 1.95 fps at the window scene in the last recorded row; 1.45-2.30 across the 25 Nov rows, 3.0 in one earlier build |
+| Fixed test scene vs the 30 fps console target | 1.6 / 30 | 1.6 / 30 | █░░░░░░░░░░░ 5 % | median 1.95 fps at the window scene in the last recorded row; 1.45-2.30 across the 25 Nov rows, 3.0 in one earlier build |
 | Card busy share of the frame | 30 / 100 | 30 / 100 | ████░░░░░░░░ 30 % | 24-38 % by our own clock count; the rest is the title's CPU work and our copies |
 | Time to the world | 133-218 s | measured | no target set | from launch to the first world frame; the pre-bake should cut it |
 

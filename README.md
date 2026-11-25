@@ -71,17 +71,17 @@ each number means: [docs/PROGRESS.md](docs/PROGRESS.md).
 | System APIs (HLE) | ████████████ 100 % resolved (0 missing) | ██░░░░░░░░░░ 15 % own HLE | [detail](docs/PROGRESS.md#system-apis-hle) |
 | Shaders | ███████████░ 99 % | no pipeline validation yet | [detail](docs/PROGRESS.md#shaders) |
 | GPU command stream | ███████████░ 92 % | ███████████░ 92 % verified | [detail](docs/PROGRESS.md#gpu-command-stream) |
-| Pipelines | ████████░░░░ 69 % | world set 751/751 built offline | [detail](docs/PROGRESS.md#pipelines) |
+| Pipelines | ████████░░░░ 69 % | ███████████░ 99 % built offline | [detail](docs/PROGRESS.md#pipelines) |
 | Features | status words | 2 of 10 shown | [detail](docs/PROGRESS.md#features) |
 | Mesa reach (compiled offline, not run) | ██████████░░ 80 % | compiled only, not run | [detail](docs/PROGRESS.md#mesa-reach) |
-| Performance | █░░░░░░░░░░░ 6 % | █░░░░░░░░░░░ 6 % of 30 fps | [detail](docs/PROGRESS.md#performance) |
+| Performance | █░░░░░░░░░░░ 5 % | █░░░░░░░░░░░ 5 % of 30 fps | [detail](docs/PROGRESS.md#performance) |
 
 Measured on 25 Nov 2026, build 5fca579b, RX 9070 XT (RDNA4) / Mesa 26.3.1 RADV. The gaps are the
 honest ones: 88 of 587 imports are our own HLE, whole-archive shaders have no validated pipeline
 column yet, and speed is a twentieth of the console's 30 fps. The world pipelines compile offline for
-4 of 5 AMD families through Mesa's shim (RDNA4, RDNA3, RDNA2, RDNA1; Vega 669/751, no mesh shaders);
-Intel is in progress, and only RDNA4 has actually been run. Regenerate with
-`tools/progress/collect.sh` and `tools/progress/render.py`.
+4 of 5 AMD families through Mesa's shim (RDNA4, RDNA3, RDNA2, RDNA1; Vega 669/751, no mesh shaders)
+and for three Intel families (dg2, mtl, bmg: all but one or two programs); only RDNA4 has actually
+been run. Regenerate with `tools/progress/collect.sh` and `tools/progress/render.py`.
 
 ## Hardware
 

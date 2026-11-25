@@ -128,10 +128,15 @@ def compact(doc, limit=8):
         labels = area.get("readme_labels") or ["", ""]
         impl_row = area["rows"][src["impl"]] if src.get("impl") is not None else None
         ver_row = area["rows"][src["verified"]] if src.get("verified") is not None else None
-        if impl_row is None or "impl" not in impl_row:
+        impl_col = src.get("impl_column", "impl")
+        if impl_row is None or impl_col not in impl_row or impl_row[impl_col] is None:
             left = area.get("readme_text", "\u2014")
         else:
-            left = (bar(*impl_row["impl"]) + " " + labels[0]).strip()
+            pair = impl_row[impl_col]
+            label = labels[0]
+            if area.get("readme_resolved"):
+                label = "resolved (%d missing)" % (pair[1] - pair[0])
+            left = (bar(*pair) + " " + label).strip()
         if ver_row is not None and "impl" in ver_row:
             right = (bar(*ver_row["impl"]) + " " + labels[1]).strip()
         else:

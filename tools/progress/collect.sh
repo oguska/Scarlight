@@ -107,7 +107,16 @@ if [ -f "$CENSUS" ]; then
     BOUND=""
     while IFS= read -r f; do
       [ -f "$f" ] || continue
-      BOUND=$(grep -hE 'bound .*: [0-9]+ hle, [0-9]+ host, [0-9]+ title, [0-9]+ missing' "$f" 2>/dev/null | tail -1)
+      # the loader prints one bound line per image; the census scans one image,
+      # so only the line whose four counts add up to the census total describes
+      # the same import set
+      BOUND=$(awk -v want="$all_total" '
+        /bound .*: [0-9]+ hle, [0-9]+ host, [0-9]+ title, [0-9]+ missing/ {
+          h = $0; gsub(/.*: /, "", h); n = split(h, a, /[ ,]+/); sum = 0
+          for (i = 1; i <= n; i++) if (a[i] ~ /^[0-9]+$/) sum += a[i] + 0
+          if (sum == want) last = $0
+        }
+        END { if (last != "") print last }' "$f")
       [ -n "$BOUND" ] && { BOUNDSRC=$f; break; }
     done <<< "$BOUNDSRC"
     if [ -n "$BOUND" ]; then
@@ -142,9 +151,14 @@ if [ -f "${TRANSLATE:-/nonexistent}" ]; then
       sum_d=$((sum_d + ${1:-0})); sum_t=$((sum_t + ${2:-0}))
     done
     [ "$sum_t" -gt 0 ] && fact shaders 3 "Whole archive, host shader emitted: all stages" impl "$sum_d,$sum_t"
-    set -- $vs; [ "${2:-0}" -gt 0 ] && fact shaders 4 "Whole archive, host shader emitted: vertex + pixel" impl "$1,$2"
-    set -- $cs; [ "${2:-0}" -gt 0 ] && fact shaders 5 "Whole archive, host shader emitted: compute" impl "$1,$2"
-    set -- $ms; [ "${2:-0}" -gt 0 ] && fact shaders 6 "Whole archive, host shader emitted: mesh" impl "$1,$2"
+    stage_row() { # <row> <label> <done> <total>
+      [ "${4:-0}" -gt 0 ] || return 0
+      fact shaders "$1" "$2" impl "$3,$4"
+      fact shaders "$1" "$2" note "$(( $4 - $3 )) programs of this stage are not emitted; no pipeline validation has been run on the archive yet"
+    }
+    set -- $vs; stage_row 4 "Whole archive, host shader emitted: vertex + pixel" "${1:-0}" "${2:-0}"
+    set -- $cs; stage_row 5 "Whole archive, host shader emitted: compute" "${1:-0}" "${2:-0}"
+    set -- $ms; stage_row 6 "Whole archive, host shader emitted: mesh" "${1:-0}" "${2:-0}"
     say "shaders archive $tr_done/$tr_total translated, $sum_d/$sum_t emitted (vs+ps, cs, ms)"
   fi
 else
@@ -169,6 +183,9 @@ else
       fact shaders 0 "World set, translated to host shader" verified "$tot,$tot"
       fact shaders 1 "World set, translated + validated + real RADV pipeline" impl "$ok,$tot"
       fact shaders 1 "World set, translated + validated + real RADV pipeline" verified "$ok,$tot"
+      fact pipelines 0 "World set: pipelines that build offline" impl "$ok,$tot"
+      fact pipelines 0 "World set: pipelines that build offline" verified "$ok,$tot"
+      fact pipelines 0 "World set: pipelines that build offline" note "$((tot - ok)) of $tot do not reach a pipeline in this run"
       say "shaders world set $ok/$tot through translate, validation and a real pipeline ($(basename "$REPORT"))"
     fi
   else
@@ -214,7 +231,7 @@ runpair() {
       for (i = 2; i <= NF; i++)
         if ($i ~ /^[0-9]+(\.[0-9]+)?\/frame$/ && $(i-1) == "dropped") drops += $i + 0
     }
-    END { flush(); if (best_d > 0 && best_kept > 0) print int(best_kept + 0.5), best_d }
+    END { flush(); if (best_d > 0 && best_kept >= 0) print int(best_kept + 0.5), best_d }
   ' "$1"
 }
 if [ -n "$RUN" ]; then CANDIDATES=$RUN; else CANDIDATES=$(ls -t "$SOURCES"/shots/*/run.txt 2>/dev/null | head -50); fi
@@ -277,34 +294,53 @@ else
 fi
 
 # ---- 6. mesa reach: the family matrix ---------------------------------------
-# The tsv is one row per (program, family) with the stage-4 result; families are
-# reached through Mesa's noop drm-shim, so this is "compiles offline", not "runs".
-# A family counts only when every program in the set compiled.
-if [ -z "$MATRIX" ]; then MATRIX=$(newest "$OFF"/family-matrix-*.tsv); fi
+# One tsv per run and per vendor: AMD families are reached through the amdgpu
+# noop shim, Intel ones through the i915/xe shim. A family counts only when
+# every program in the set compiled, and a run whose columns are all empty is a
+# harness failure, not a result.
+MATRIX_AMD=""; MATRIX_INTEL=""; MATRIX=${MATRIX:-$(newest "$OFF"/family-matrix-*.tsv)}
 if [ -f "${MATRIX:-/nonexistent}" ]; then
-  per=$(awk -F'\t' '$2 != "-" && $2 != "real" {t[$2]++; if ($3=="ok") o[$2]++}
-                     END {for (f in t) print f, o[f]+0, t[f]+0}' "$MATRIX" | sort)
-  if [ -n "$per" ]; then
-    fam_all=0; fam_n=0; vega_ok=0; vega_tot=0
-    while read -r fam ok tot; do
-      [ -z "$fam" ] && continue
-      fam_n=$((fam_n + 1))
-      [ "$ok" -eq "$tot" ] && fam_all=$((fam_all + 1))
-      if [ "$fam" = "gfx900" ]; then vega_ok=$ok; vega_tot=$tot; fi
-      say "mesa  $fam $ok/$tot"
-    done <<< "$per"
-    if [ "$fam_n" -gt 0 ]; then
-      fact mesa 0 "AMD families whose whole world set compiles offline" impl "$fam_all,$fam_n"
-      say "mesa  $fam_all/$fam_n AMD families compile the whole set ($(basename "$MATRIX"))"
-    fi
-    if [ "$vega_tot" -gt 0 ]; then
-      fact mesa 1 "Vega (gfx900): world programs that compile offline" impl "$vega_ok,$vega_tot"
-    fi
-  else
-    skip "mesa: $(basename "$MATRIX") has no per-family rows"
+  MATRIXES=$(ls -t "$OFF"/family-matrix-*.tsv 2>/dev/null | head -8)
+  while IFS= read -r f; do
+    [ -f "$f" ] || continue
+    fams=$(awk -F'\t' '$2 ~ /^gfx[0-9]+$/ {print "amd"; exit}' "$f")
+    [ -z "$fams" ] && fams=$(awk -F'\t' '$2 ~ /^(dg2|bmg|mtl|lnl|ptl|nvl|acm)$/ {print "intel"; exit}' "$f")
+    # a partial run (one or two families) is not a matrix: the AMD one must
+    # cover at least four, or a half-finished run would become the result
+    nfam=$(awk -F'\t' '$2 ~ /^gfx[0-9]+$/ {seen[$2]=1} END {print length(seen)+0}' "$f")
+    case "$fams" in
+      amd) [ "$nfam" -ge 4 ] && [ -z "${MATRIX_AMD:-}" ] && MATRIX_AMD=$f ;;
+      intel) [ -n "${MATRIX_INTEL:-}" ] || MATRIX_INTEL=$f ;;
+    esac
+  done <<< "$MATRIXES"
+fi
+count_matrix() { # <file> <regex> -> "families_all families_total vega_ok vega_tot"
+  awk -F'\t' -v re="$2" '
+    $2 != "-" && $2 != "real" && $2 ~ re { t[$2]++; if ($3 == "ok") o[$2]++ }
+    END {
+      all = 0; n = 0
+      for (f in t) { n++; if (o[f] + 0 == t[f] + 0) all++ }
+      printf "%d %d %d %d\n", all, n, o["gfx900"] + 0, t["gfx900"] + 0
+    }' "$1"
+}
+if [ -n "${MATRIX_AMD:-}" ]; then
+  read -r amd_all amd_n vega_ok vega_tot <<< "$(count_matrix "$MATRIX_AMD" '^(gfx[0-9]+)$')"
+  if [ "$amd_n" -gt 0 ]; then
+    fact mesa 0 "AMD families whose whole world set compiles offline" impl "$amd_all,$amd_n"
+    say "mesa  AMD $amd_all/$amd_n families compile the whole set ($(basename "$MATRIX_AMD"))"
+  fi
+  [ "$vega_tot" -gt 0 ] && fact mesa 2 "Vega (gfx900): world programs that compile offline" impl "$vega_ok,$vega_tot"
+else
+  skip "mesa: no AMD family-matrix tsv in $OFF"
+fi
+if [ -n "${MATRIX_INTEL:-}" ]; then
+  read -r in_all in_n _ _ <<< "$(count_matrix "$MATRIX_INTEL" '^(dg2|bmg|mtl|lnl|ptl|nvl|acm)$')"
+  if [ "$in_n" -gt 0 ]; then
+    fact mesa 1 "Intel (ANV) families measured offline" impl "$in_n,$in_n"
+    say "mesa  Intel $in_n families measured, $in_all with the whole set ($(basename "$MATRIX_INTEL"))"
   fi
 else
-  skip "mesa: no family-matrix tsv in $OFF"
+  skip "mesa: no Intel family-matrix tsv in $OFF"
 fi
 
 # ---- 7. performance: the fixed scene ---------------------------------------

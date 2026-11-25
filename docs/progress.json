@@ -125,12 +125,14 @@
       ],
       "readme_from": {
         "impl": 0,
-        "verified": 1
+        "verified": 1,
+        "impl_column": "verified"
       },
       "readme_labels": [
-        "resolved (0 missing)",
+        "",
         "own HLE"
-      ]
+      ],
+      "readme_resolved": true
     },
     {
       "id": "shaders",
@@ -153,11 +155,11 @@
         {
           "label": "World set, translated + validated + real RADV pipeline",
           "impl": [
-            751,
+            749,
             751
           ],
           "verified": [
-            751,
+            749,
             751
           ],
           "note": "0 stop: 751 of 751 reached a real RADV pipeline in the 25 Nov 13:14 run"
@@ -187,7 +189,7 @@
             14247
           ],
           "verified": null,
-          "note": "516 stop in the emitter; no pipeline validation has been run on the archive yet"
+          "note": "83 programs of this stage are not emitted; no pipeline validation has been run on the archive yet"
         },
         {
           "label": "Whole archive, host shader emitted: compute",
@@ -196,7 +198,7 @@
             2682
           ],
           "verified": null,
-          "note": "6 stop in the emitter; no pipeline validation has been run on the archive yet"
+          "note": "6 programs of this stage are not emitted; no pipeline validation has been run on the archive yet"
         },
         {
           "label": "Whole archive, host shader emitted: mesh",
@@ -205,7 +207,7 @@
             8765
           ],
           "verified": null,
-          "note": "3 stop in the emitter; no pipeline validation has been run on the archive yet"
+          "note": "3 programs of this stage are not emitted; no pipeline validation has been run on the archive yet"
         },
         {
           "label": "ISA: opcode-table entries the decoder names",
@@ -237,7 +239,7 @@
     {
       "id": "command_stream",
       "title": "GPU command stream",
-      "summary": "What the title records per frame and what reaches the card. The headline row measures one real world frame: the draws and dispatches it recorded, minus the ones dropped, and the drop lines below name every reason. Ray tracing is switched off on purpose, so most of the drops in this build are one intended reason and not a gap in the port — the bar is a record of what ran, not a score.",
+      "summary": "What the title records per frame and what reaches the card. The headline row measures one real world frame: the draws and dispatches it recorded, minus the ones dropped. The reasons listed below come from a separate reference run and are **not** an accounting of that frame — they are the reasons drops have been seen, with the count each reached in the run that showed it. Ray tracing is off on purpose, so most drops are one intended reason and not a gap in the port.",
       "column": "Set",
       "rows": [
         {
@@ -250,7 +252,7 @@
             4309,
             4688
           ],
-          "note": "the last world frame (3,000 draws or more) of the newest run that has one; the numbers are the backend's own per-frame lines, and every dropped program is listed below by reason"
+          "note": "the last world frame (3,000 draws or more) of the newest run that has one: the backend's own per-frame lines"
         },
         {
           "label": "D3D12 calls the title makes that our backend has",
@@ -267,27 +269,27 @@
         {
           "label": "Drops: ray-tracing hit shading, left out",
           "status": "off",
-          "note": "631/frame in the reference world run; behind a switch until the trace path is correct, and the largest single reason for drops"
+          "note": "631/frame in the reference run of 24 Nov, which is a different run from the headline frame; behind a switch until the trace path is correct"
         },
         {
           "label": "Drops: one stage of the ray-tracing structure builder",
           "status": "off",
-          "note": "346-361/frame; off with the same switch"
+          "note": "346-361/frame in that same reference run; off with the same switch"
         },
         {
           "label": "Drops: one whole-wave compute step",
           "status": "14-28/frame",
-          "note": "a section step our wave simulation does not follow yet"
+          "note": "14-28/frame in that same reference run: a section step our wave simulation does not follow yet"
         },
         {
           "label": "Drops: compute and pixel programs while their pipeline is made",
           "status": "1-4/frame",
-          "note": "each named program appears once and then runs; counted in the pipeline area"
+          "note": "1-4/frame in that same reference run: each named program appears once and then runs, which is the pipeline area's business"
         }
       ],
       "foot": [
-        "The reference run records 168 world frames at 2.04 fps; drop reasons are the backend's own log lines, summed per frame.",
-        "Nothing is dropped as \"no host pipeline\": every drop above is a named, deliberate or known gap."
+        "The reference run records 168 world frames at 2.04 fps; drop reasons are the backend's own log lines, summed per frame in that run.",
+        "Nothing is dropped as \"no host pipeline\": every drop is a named, deliberate or known gap."
       ],
       "readme_where": "[detail](docs/PROGRESS.md#gpu-command-stream)",
       "readme_when": "",
@@ -313,14 +315,14 @@
         {
           "label": "World set: pipelines that build offline",
           "impl": [
-            751,
+            749,
             751
           ],
           "verified": [
-            751,
+            749,
             751
           ],
-          "note": "0 refused by RADV; 8.7 MB of Mesa cache, 37.7 s of CPU on 8 workers"
+          "note": "2 of 751 do not reach a pipeline in this run"
         },
         {
           "label": "Pipelines the title asks for, covered by the pre-bake list",
@@ -351,13 +353,12 @@
       ],
       "readme_from": {
         "impl": 1,
-        "verified": null
+        "verified": 0
       },
       "readme_labels": [
         "",
-        ""
-      ],
-      "readme_verified_text": "world set 751/751 built offline"
+        "built offline"
+      ]
     },
     {
       "id": "features",
@@ -427,7 +428,7 @@
     {
       "id": "mesa",
       "title": "Mesa reach (compiled offline, not run)",
-      "summary": "Whether the world shader set compiles for a GPU family's Mesa driver, without that GPU. Mesa 26.3.1's noop drm-shim fakes each chip, so RADV builds every pipeline with that family's ISA and limits. **All 751 world pipelines compile on 4 of 5 AMD families** (RDNA4, RDNA3, RDNA2, RDNA1); Vega compiles 669 and aborts on the 82 mesh-shader programs. Intel is in progress. This is a compile result: only RDNA4 has actually been run.",
+      "summary": "Whether the world shader set compiles for a GPU family's Mesa driver, without that GPU. Mesa 26.3.1's noop drm-shim fakes each chip, so RADV and ANV build every pipeline with that family's ISA and limits. All 751 world pipelines compile on **4 of 5 AMD families** (RDNA4, RDNA3, RDNA2, RDNA1); Vega compiles 669 and aborts on the 82 mesh-shader programs. Three Intel families were measured (dg2, mtl, bmg) and all but one or two programs compile on each. This is a compile result: only RDNA4 has actually been run.",
       "column": "GPU families",
       "rows": [
         {
@@ -440,6 +441,15 @@
           "note": "RDNA4, RDNA3, RDNA2, RDNA1: 751/751 each through the noop shim (Mesa driver, no GPU)"
         },
         {
+          "label": "Intel (ANV) families measured offline",
+          "impl": [
+            3,
+            3
+          ],
+          "verified": null,
+          "note": "dg2 750/751, mtl 750/751, bmg 751/751 through Mesa's Intel noop shim; one program fails on two of the three, and there is no Intel card here to run on"
+        },
+        {
           "label": "Vega (gfx900): world programs that compile offline",
           "impl": [
             669,
@@ -449,26 +459,19 @@
           "note": "82 abort the driver: every mesh-shader program, and GFX9 has no mesh shader support in RADV"
         },
         {
-          "label": "Intel (ANV) families measured offline",
-          "impl_text": "0",
-          "ver_text": "1 planned",
-          "status": "in progress",
-          "note": "no Intel card and no vulkan-intel ICD on this machine; Mesa 26.3.1 ships the Intel noop shim (dg2, bmg) to build"
-        },
-        {
           "label": "Families with a run, not just a compile",
           "impl": [
             1,
-            6
+            8
           ],
           "verified": null,
-          "note": "RDNA4 only; the five shim families have compiled pipelines but no run, and a compiled pipeline is not a working feature"
+          "note": "RDNA4 only: 5 AMD and 3 Intel families have compiled pipelines, none of them has been run"
         }
       ],
       "foot": [
-        "Source: `family-matrix-20261125-134909-2134785.tsv`, 751 world programs, 4 stages, 8 jobs, 50 s wall for six columns; the shim column for our own family matches the real-GPU column exactly (751/751), so the harness does not change the answer.",
+        "Sources: `family-matrix-20261125-134909-2134785.tsv` (AMD, five families + the real card as control) and `family-matrix-20261125-140636-2410746.tsv` (Intel, three shim devices, 750-751 of 751 each); the shim column for our own family matches the real-GPU column exactly, so the harness does not change the answer.",
         "Compiled offline is not run. On RDNA1 all 82 mesh programs create, yet RADV does not advertise `VK_EXT_mesh_shader` there, so a program that uses mesh, barycentric or ray query at draw time needs the game's own fallback path.",
-        "Intel: ANV needs `libvulkan_intel.so` plus Mesa's Intel noop shim from the same build; neither is installed here, so nothing is claimed."
+        "Intel: ANV needs `libvulkan_intel.so` plus Mesa's Intel noop shim from the same build; both were built for this run. The one program that fails on dg2 and mtl is the same class, and nothing Intel has been run."
       ],
       "readme_where": "[detail](docs/PROGRESS.md#mesa-reach)",
       "readme_when": "",
@@ -491,11 +494,11 @@
         {
           "label": "Fixed test scene vs the 30 fps console target",
           "impl": [
-            1.95,
+            1.6,
             30
           ],
           "verified": [
-            1.95,
+            1.6,
             30
           ],
           "note": "median 1.95 fps at the window scene in the last recorded row; 1.45-2.30 across the 25 Nov rows, 3.0 in one earlier build"
